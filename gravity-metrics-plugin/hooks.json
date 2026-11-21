@@ -1,0 +1,12 @@
+{
+  "gravity-metrics-command": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 hooks/pre_invocation_metrics.py",
+        "timeout": 15
+      }
+    ]
+  }
+}

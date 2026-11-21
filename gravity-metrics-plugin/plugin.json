@@ -1,0 +1,17 @@
+{
+  "name": "gravity-metrics",
+  "displayName": "Gravity Metrics",
+  "version": "0.1.0",
+  "description": "Collecte zéro-token via /gravity metrics, historique centralisé et tableaux de bord des coûts, tokens et cache Antigravity.",
+  "logo": "assets/logo.svg",
+  "homepage": "https://github.com/BSourichanh/gravity-metrics",
+  "repository": "https://github.com/BSourichanh/gravity-metrics.git",
+  "suggestedPrompts": [
+    "/gravity metrics",
+    "/gravity metrics list",
+    "/gravity metrics inspect <label>"
+  ],
+  "author": {
+    "name": "Gravity Contributors"
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "catalog_version": "1.0.0",
+  "effective_date": "2026-11-21",
+  "currency": "USD",
+  "unit": "per_1m_tokens",
+  "default_profile": "2026_nov_standard",
+  "billing_rules": {
+    "input_tokens": "Tokens d'entrée non cachés (frais), facturés au tarif input.",
+    "cache_read_tokens": "Tokens d'entrée lus depuis le cache de contexte, facturés au tarif cache_read.",
+    "output_tokens": "Tokens de sortie incluant les tokens de raisonnement (thinking), facturés au tarif output.",
+    "effective_context_tokens": "Contexte effectif d'un appel = input_tokens + cache_read_tokens.",
+    "long_context_tiers": "Tarifs plats jusqu'à 1M tokens pour Gemini 3.8 Flash et Gemini 4 (Hydrogen, Neon). Palier >200k optionnel appliqué pour Gemini 3.1 Pro via long_context_threshold."
+  },
+  "profiles": {
+    "2026_nov_standard": {
+      "description": "Tarifs API Google Gemini en vigueur en novembre 2026 (tarif introductif Gemini 3.8 Flash valable jusqu'au 31/12/2026).",
+      "models": {
+        "gemini-3.8-flash-tiered": {
+          "input": 0.75,
+          "cache_read": 0.075,
+          "output": 3.75,
+          "note": "Tarif introductif jusqu'au 31/12/2026"
+        },
+        "gemini-3.8-flash-high": {
+          "input": 0.75,
+          "cache_read": 0.075,
+          "output": 3.75,
+          "note": "Tarif introductif jusqu'au 31/12/2026"
+        },
+        "gemini-3.8-flash*": {
+          "input": 0.75,
+          "cache_read": 0.075,
+          "output": 3.75,
+          "note": "Motif générique Gemini 3.8 Flash (introductif 2026)"
+        },
+        "gemini-4-hydrogen-tiered-high": {
+          "input": 1.5,
+          "cache_read": 0.075,
+          "output": 7.5,
+          "note": "Tarif plat jusqu'à 1M tokens"
+        },
+        "gemini-4-hydrogen*": {
+          "input": 1.5,
+          "cache_read": 0.075,
+          "output": 7.5,
+          "note": "Motif générique Gemini 4 Hydrogen"
+        },
+        "gemini-4-neon*": {
+          "input": 3.0,
+          "cache_read": 0.15,
+          "output": 15.0,
+          "note": "Tarif plat jusqu'à 1M tokens"
+        },
+        "gemini-3.5-flash-lite*": {
+          "input": 0.3,
+          "cache_read": 0.03,
+          "output": 2.5
+        },
+        "gemini-3.1-pro*": {
+          "input": 2.0,
+          "cache_read": 0.2,
+          "output": 12.0,
+          "long_context_threshold": 200000,
+          "input_over_threshold": 4.0,
+          "cache_read_over_threshold": 0.4,
+          "output_over_threshold": 18.0
+        },
+        "_fallback": {
+          "input": 0.75,
+          "cache_read": 0.075,
+          "output": 3.75,
+          "is_fallback": true,
+          "note": "Tarif de repli si un identifiant de modèle est inconnu"
+        }
+      }
+    },
+    "2027_standard": {
+      "description": "Projection tarifaire à partir du 1er janvier 2027 (fin du tarif introductif Gemini 3.8 Flash).",
+      "models": {
+        "gemini-3.8-flash-tiered": {
+          "input": 1.5,
+          "cache_read": 0.15,
+          "output": 7.5,
+          "note": "Tarif standard 2027"
+        },
+        "gemini-3.8-flash-high": {
+          "input": 1.5,
+          "cache_read": 0.15,
+          "output": 7.5,
+          "note": "Tarif standard 2027"
+        },
+        "gemini-3.8-flash*": {
+          "input": 1.5,
+          "cache_read": 0.15,
+          "output": 7.5,
+          "note": "Motif générique Gemini 3.8 Flash (standard 2027)"
+        },
+        "gemini-4-hydrogen-tiered-high": {
+          "input": 1.5,
+          "cache_read": 0.075,
+          "output": 7.5
+        },
+        "gemini-4-hydrogen*": {
+          "input": 1.5,
+          "cache_read": 0.075,
+          "output": 7.5
+        },
+        "gemini-4-neon*": {
+          "input": 3.0,
+          "cache_read": 0.15,
+          "output": 15.0
+        },
+        "gemini-3.5-flash-lite*": {
+          "input": 0.3,
+          "cache_read": 0.03,
+          "output": 2.5
+        },
+        "gemini-3.1-pro*": {
+          "input": 2.0,
+          "cache_read": 0.2,
+          "output": 12.0,
+          "long_context_threshold": 200000,
+          "input_over_threshold": 4.0,
+          "cache_read_over_threshold": 0.4,
+          "output_over_threshold": 18.0
+        },
+        "_fallback": {
+          "input": 1.5,
+          "cache_read": 0.15,
+          "output": 7.5,
+          "is_fallback": true,
+          "note": "Tarif de repli 2027"
+        }
+      }
+    }
+  }
+}
