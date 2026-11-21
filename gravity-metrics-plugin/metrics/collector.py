@@ -25,14 +25,12 @@ from .pricing import (
 METRICS_MARKER = "<!-- gravity-metrics:recorded -->"
 
 _GRAVITY_METRICS_CMD_RE = re.compile(
-    r"^/(?:gravity(?::gravity)?)\s+metrics(?:\s|$)", re.IGNORECASE
+    r"^/gravity-metrics(?::gravity-metrics)?(?:\s|$)", re.IGNORECASE
 )
 _GRAVITY_METRICS_ARGS_RE = re.compile(
-    r"^/(?:gravity(?::gravity)?)\s+metrics(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL
+    r"^/gravity-metrics(?::gravity-metrics)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL
 )
-_NON_CAPTURE_METRICS_SUBCOMMANDS = frozenset(
-    {"help", "-h", "--help", "list", "inspect", "remove", "add"}
-)
+_NON_CAPTURE_METRICS_SUBCOMMANDS: Tuple[str, ...] = ()
 _GRAVITY_CMD_RE = re.compile(r"^/(?:gravity(?::gravity)?)(?:\s|$)", re.IGNORECASE)
 _GRAVITY_LEADING_AXES_RE = re.compile(
     r"^/(?:gravity(?::gravity)?)"
@@ -52,24 +50,41 @@ _STOPWORDS = {
     "de",
     "des",
     "du",
+    "elle",
     "en",
     "et",
     "for",
+    "il",
     "in",
+    "je",
     "la",
     "le",
     "les",
+    "me",
+    "ne",
+    "no",
+    "non",
     "of",
+    "ok",
     "on",
     "or",
     "ou",
+    "oui",
     "par",
+    "pas",
+    "peux",
     "pour",
     "sur",
+    "te",
     "the",
     "to",
+    "tu",
     "un",
     "une",
+    "vas",
+    "vazi",
+    "veux",
+    "yes",
 }
 
 
@@ -115,13 +130,13 @@ def _clean_user_prompt(raw: str, max_len: int = 90) -> str:
 
 
 def is_gravity_metrics_prompt(raw: str) -> bool:
-    """Retourne True uniquement si le prompt invoque `/gravity metrics` (ou `/gravity:gravity metrics`)."""
+    """Retourne True uniquement si le prompt invoque `/gravity-metrics`."""
     txt = extract_user_request_text(raw)
     return bool(_GRAVITY_METRICS_CMD_RE.match(txt))
 
 
 def is_gravity_metrics_capture_prompt(raw: str) -> bool:
-    """Retourne True uniquement pour une commande de capture `/gravity metrics` (hors sous-commandes)."""
+    """Retourne True pour une commande de capture `/gravity-metrics`."""
     if not is_gravity_metrics_prompt(raw):
         return False
     txt = extract_user_request_text(raw)
@@ -141,7 +156,7 @@ def is_gravity_metrics_capture_prompt(raw: str) -> bool:
 
 
 def is_gravity_session_prompt(raw: str) -> bool:
-    """Retourne True si le prompt lance `/gravity ...` hors sous-commande `/gravity metrics`."""
+    """Retourne True si le prompt lance `/gravity ...` (hors `/gravity-metrics`)."""
     txt = extract_user_request_text(raw)
     return bool(_GRAVITY_CMD_RE.match(txt)) and not is_gravity_metrics_prompt(txt)
 
@@ -185,6 +200,18 @@ def slugify_label(label: str, fallback: str = "session") -> str:
     return slug or fallback
 
 
+def _extract_label_keywords(raw_prompt: str, project_slug: str = "") -> List[str]:
+    """Extrait les mots-clés significatifs d'un prompt (ignore commandes `/gravity` et stopwords)."""
+    cleaned = extract_user_request_text(raw_prompt)
+    cleaned = _GRAVITY_LEADING_AXES_RE.sub("", cleaned).strip()
+    words: List[str] = []
+    for tok in re.findall(r"[a-z0-9]+", slugify_label(cleaned, fallback="").replace(".", "-")):
+        if len(tok) < 2 or tok in _STOPWORDS or (project_slug and tok == project_slug):
+            continue
+        words.append(tok)
+    return words
+
+
 def suggest_auto_label(
     project: str = "",
     first_prompt: str = "",
@@ -193,16 +220,7 @@ def suggest_auto_label(
 ) -> str:
     """Génère un label court, lisible et unique à partir du projet, prompt et horodatage."""
     proj_slug = slugify_label(project, fallback="")[:18].strip("-")
-    cleaned = extract_user_request_text(first_prompt)
-    cleaned = _GRAVITY_LEADING_AXES_RE.sub("", cleaned).strip()
-
-    words: List[str] = []
-    for tok in re.findall(r"[a-z0-9]+", slugify_label(cleaned, fallback="").replace(".", "-")):
-        if len(tok) < 2 or tok in _STOPWORDS:
-            continue
-        words.append(tok)
-        if len(words) >= 3:
-            break
+    words = _extract_label_keywords(first_prompt, proj_slug)[:3]
 
     dt = _parse_iso_ts(started_at)
     ts_tag = dt.astimezone(timezone.utc).strftime("%Y%m%d-%H%M") if dt else "session"
@@ -352,7 +370,7 @@ def resolve_gravity_window(
     from_step: Optional[int] = None,
     to_step: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Résout la fenêtre de lignes [début /gravity → avant /gravity metrics] sur le transcript racine."""
+    """Résout la fenêtre de lignes [début /gravity → avant /gravity-metrics] sur le transcript racine."""
     tpath = Path(transcript_path)
     entries: List[Dict[str, Any]] = []
     if tpath.is_file():
@@ -491,7 +509,7 @@ def resolve_gravity_window(
         end_pos = current_m_pos if current_m_pos is not None else len(entries)
         if prev_m_pos is not None:
             pos = prev_m_pos + 1
-            while pos < end_pos and entries[pos]["type"] == "SYSTEM_MESSAGE":
+            while pos < end_pos and not entries[pos]["is_user"]:
                 pos += 1
             fallback_start_pos = pos
         else:
@@ -529,7 +547,17 @@ def resolve_gravity_window(
     end_step_index = entries[end_pos]["step_index"] if end_pos < len(entries) else None
     start_ts = next((e["created_at"] for e in slice_entries if e.get("created_at")), None)
     end_ts = entries[end_pos].get("created_at") if end_pos < len(entries) else None
-    first_prompt = next((e["clean_prompt"] for e in slice_entries if e["is_user"] and e["clean_prompt"]), "")
+    first_prompt = next(
+        (
+            e["clean_prompt"]
+            for e in slice_entries
+            if e["is_user"] and e["clean_prompt"] and _extract_label_keywords(e["clean_prompt"])
+        ),
+        "",
+    ) or next(
+        (e["clean_prompt"] for e in slice_entries if e["is_user"] and e["clean_prompt"]),
+        "",
+    )
 
     return {
         "mode": mode,
@@ -1344,7 +1372,12 @@ def collect_run_metrics(
     verif_cost = sum(a["_raw_cost"]["total_usd"] for a in cat_groups.get("verification", []))
     build_cost = sum(a["_raw_cost"]["total_usd"] for a in cat_groups.get("build", []))
     test_cost = sum(a["_raw_cost"]["total_usd"] for a in cat_groups.get("testing", []))
-    verif_to_build_ratio = round(verif_cost / max(build_cost + test_cost, 1e-9), 2)
+    build_plus_test = build_cost + test_cost
+    verif_to_build_ratio = (
+        round(verif_cost / build_plus_test, 2)
+        if build_plus_test > 0
+        else (None if verif_cost > 0 else 0.0)
+    )
     execution_mode, features_used = _detect_execution_mode(enriched_agents, tool_counter, root_id)
 
     agents_clean: List[Dict[str, Any]] = []

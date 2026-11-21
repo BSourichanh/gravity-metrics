@@ -25,10 +25,7 @@ from .history import (
     to_session_record,
     upsert_session,
 )
-from .html_report import render_history_dashboard_html, render_session_detail_html
 from .markdown_report import (
-    render_chat_inspect_markdown,
-    render_chat_list_markdown,
     render_chat_summary_markdown,
     render_inspect_text,
     render_metrics_markdown,
@@ -92,14 +89,10 @@ __all__ = [
     "upsert_session",
     "remove_session",
     "render_metrics_markdown",
-    "render_history_dashboard_html",
     "render_terminal_table",
     "render_inspect_text",
     "render_session_detail_markdown",
-    "render_session_detail_html",
     "render_chat_summary_markdown",
-    "render_chat_list_markdown",
-    "render_chat_inspect_markdown",
     "resolve_store_paths",
     "regenerate_views",
     "write_session_details",

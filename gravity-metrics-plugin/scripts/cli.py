@@ -140,16 +140,13 @@ def _cmd_add(args: argparse.Namespace) -> int:
         label=label,
         note=note,
         summary_only=args.summary_only,
-        no_html=args.no_html,
     )
 
     slug = saved_rec["detail_slug"]
     reports_dir = store_dir / "reports"
     reports_msg = ""
     if not args.summary_only:
-        reports_msg = f"\n     Rapports session : {reports_dir / (slug + '.md')}" + (
-            "" if args.no_html else f", {reports_dir / (slug + '.html')}"
-        )
+        reports_msg = f"\n     Rapport session : {reports_dir / (slug + '.md')}"
 
     print(f"[OK] Session ajoutée : {saved_rec['label']} ({cid[:8]})")
     print(
@@ -157,11 +154,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         f"Agents: {saved_rec['agents']} | Appels: {saved_rec['llm_calls']} | "
         f"Cache: {saved_rec['cache_hit_rate_pct']:.1f}%"
     )
-    print(
-        f"     Historique global: {store_dir / 'METRICS.md'}"
-        + ("" if args.no_html else f", {store_dir / 'dashboard.html'}")
-        + reports_msg
-    )
+    print(f"     Historique global: {store_dir / 'METRICS.md'}" + reports_msg)
     return 0
 
 
@@ -170,7 +163,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
     if args.regen:
         with history_lock(history_path):
             records = load_history(history_path)
-            regenerate_views(store_dir, records, no_html=args.no_html)
+            regenerate_views(store_dir, records)
     else:
         records = load_history(history_path)
     print(render_terminal_table(records))
@@ -205,7 +198,6 @@ def _cmd_remove(args: argparse.Namespace) -> int:
             store_dir=store_dir,
             history_path=history_path,
             purge_reports=args.purge_reports,
-            no_html=args.no_html,
         )
     except (KeyError, ValueError) as exc:
         print(f"[ERREUR] {exc}", file=sys.stderr)
@@ -227,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("-n", "--note", default="", help="Note libre sur le changement testé.")
     p_add.add_argument("--latest", action="store_true", help="Sélectionne automatiquement la session Gravity la plus récente.")
     p_add.add_argument("--all", action="store_true", help="Inclut aussi les conversations hors Gravity dans le menu.")
-    p_add.add_argument("--gravity-window", action="store_true", help="Mesure uniquement la fenêtre [début /gravity → avant /gravity metrics].")
+    p_add.add_argument("--gravity-window", action="store_true", help="Mesure uniquement la fenêtre [début /gravity → avant /gravity-metrics].")
     p_add.add_argument("--full", action="store_true", help="Mesure l'ensemble de la conversation.")
     p_add.add_argument("--workspace", type=Path, default=None, help="Workspace projet pour lire (en lecture seule) nom et profil Gravity.")
     p_add.add_argument("--profile", default="2026_nov_standard", help="Profil tarifaire (défaut: 2026_nov_standard).")
@@ -236,14 +228,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: ~/.gemini/gravity-metrics).")
     p_add.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_add.add_argument("--summary-only", action="store_true", help="N'écrit que dans l'historique global (sans fichiers reports/).")
-    p_add.add_argument("--no-html", action="store_true", help="Ne génère pas les dashboards HTML.")
     p_add.set_defaults(func=_cmd_add)
 
     p_list = sub.add_parser("list", help="Affiche la liste historique des sessions.")
     p_list.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: ~/.gemini/gravity-metrics).")
     p_list.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
-    p_list.add_argument("--regen", action="store_true", help="Régénère METRICS.md et dashboard.html.")
-    p_list.add_argument("--no-html", action="store_true", help="Ignore dashboard.html lors de --regen.")
+    p_list.add_argument("--regen", action="store_true", help="Régénère METRICS.md.")
     p_list.set_defaults(func=_cmd_list)
 
     p_insp = sub.add_parser("inspect", help="Affiche le détail complet d'une session.")
@@ -266,7 +256,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Supprime aussi les rapports détaillés dans reports/.",
     )
-    p_rm.add_argument("--no-html", action="store_true", help="Ne génère pas dashboard.html.")
     p_rm.set_defaults(func=_cmd_remove)
 
     return parser

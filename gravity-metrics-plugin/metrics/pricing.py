@@ -33,16 +33,21 @@ TYPE_TO_CATEGORY = {
     "teamwork": "orchestration",
     "teamwork_orchestrator": "orchestration",
     "self": "orchestration",
+    "planner": "orchestration",
     "teamwork_interviewer": "orchestration",
     "teamwork_explorer": "discovery",
     "teamwork_spec_miner": "discovery",
     "research": "discovery",
     "teamwork_worker": "build",
+    "builder": "build",
     "teamwork_test_writer": "testing",
     "teamwork_reviewer": "verification",
     "teamwork_challenger": "verification",
     "teamwork_auditor": "verification",
+    "reviewer": "verification",
 }
+
+GENERIC_AGENT_TYPES = {"research", "self"}
 
 
 def default_brain_dir() -> Path:
@@ -163,9 +168,9 @@ def _round_cost(acc: Dict[str, float], digits: int = 6) -> Dict[str, float]:
 
 
 def classify_agent(type_name: str, role: str) -> str:
-    """Classe un agent selon son typeName en priorité, puis repli sur le rôle."""
+    """Classe un agent selon son typeName spécialisé, puis le rôle, puis repli générique."""
     tn = (type_name or "").strip().lower()
-    if tn in TYPE_TO_CATEGORY:
+    if tn in TYPE_TO_CATEGORY and tn not in GENERIC_AGENT_TYPES:
         return TYPE_TO_CATEGORY[tn]
 
     rl = (role or "").strip().lower()
@@ -179,4 +184,6 @@ def classify_agent(type_name: str, role: str) -> str:
         return "build"
     if re.search(r"reviewer|challenger|auditor", rl):
         return "verification"
+    if tn in TYPE_TO_CATEGORY:
+        return TYPE_TO_CATEGORY[tn]
     return "other"

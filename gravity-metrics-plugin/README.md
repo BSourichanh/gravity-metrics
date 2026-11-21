@@ -1,21 +1,31 @@
 # Plugin Gravity Metrics
 
-Plugin compagnon **100 % bibliothèque standard Python 3** pour collecter, historiser et visualiser les coûts, tokens, taux de cache et signaux de fiabilité des sessions Antigravity / Gravity.
+Plugin compagnon **100 % bibliothèque standard Python 3** pour collecter, historiser et visualiser en widget **MCP App** les coûts, tokens, taux de cache et signaux de fiabilité des sessions Antigravity / Gravity.
 
-## Commandes `/gravity metrics` (zéro token)
+## Commande `/gravity-metrics`
 
-Interceptées localement avant tout appel modèle via le hook `PreInvocation` :
+- `/gravity-metrics [label] [-l|--label <label>] [-n|--note "note"] [--profile <profil>] [--full]` : le hook `PreInvocation` capture la fenêtre courante de la session (du **premier** `/gravity` après la précédente collecte jusqu'à **strictement avant** `/gravity-metrics`, ou toute la conversation avec `--full`), affiche une synthèse inline et déclenche l'ouverture automatique du widget interactif dans le panneau latéral (`detail` sur la session capturée, ou `history` filtré sur le projet actif si aucune nouvelle activité LLM n'est détectée).
+- Ouverture manuelle à **0 token** à tout moment depuis **Plugins > Gravity Metrics** (vue globale tous projets ou panneau latéral).
 
-- `/gravity metrics [label] [-n "note"] [--full] [--summary-only]` : collecte la fenêtre courante de la session (du **premier** `/gravity` après la précédente collecte jusqu'à **strictement avant** `/gravity metrics`).
-- `/gravity metrics list [--regen]` : affiche l'historique consolidé.
-- `/gravity metrics inspect <label_ou_uuid>` : affiche le détail complet d'une session.
-- `/gravity metrics remove <label_ou_uuid> [--purge-reports]` : retire une session de la liste.
-- `/gravity metrics add <UUID> [label] [-n "note"] [--full]` : collecte une session externe par UUID.
-- `/gravity metrics help` : affiche l'aide rapide.
+## Widget MCP App (`open_metrics_dashboard`)
+
+- **Points d'entrée :** panneau latéral (`aux_pane`) et pleine page (`global`).
+- **Navigation & comparaison :** bascule projet actif / vue globale et comparateur tarifaire `2026` / `Proj. 2027`, avec rafraîchissement automatique toutes les `4s` lorsque le widget est visible.
+- **Exploration & actions :** graphiques SVG, détail par catégorie, phase, modèle, agent, gaspillage, outil et erreur, ainsi que les actions intégrées **Ouvrir .md**, **Joindre au prompt**, **Analyser** et **Supprimer** (avec purge optionnelle de `reports/`).
 
 ## Stockage centralisé
 
-Toutes les données sont écrites uniquement dans `~/.gemini/gravity-metrics/` (surchargeable via `GRAVITY_METRICS_HOME` ou `--store`) — **zéro fichier créé dans vos projets** :
-- `data/history.jsonl` : liste chronologique compacte des sessions.
-- `METRICS.md` & `dashboard.html` : vue globale multi-sessions.
-- `reports/<slug>.{json,md,html}` : audits détaillés par session.
+Toutes les données sont écrites uniquement dans `~/.gemini/gravity-metrics/` (surchargeable via `GRAVITY_METRICS_HOME` ou `--store`) — **zéro fichier créé dans vos projets** et **aucun fichier `.html` statique généré sur disque** :
+- `data/history.jsonl` : liste chronologique compacte des sessions (noms de projets harmonisés sans sensibilité à la casse).
+- `METRICS.md` : vue Markdown globale multi-sessions.
+- `reports/<slug>.{json,md}` : audits détaillés par session.
+
+## CLI non-interactif (`scripts/cli.py`)
+
+```bash
+python scripts/cli.py list [--regen]
+python scripts/cli.py add --latest -l "mon-run" -n "Note"
+python scripts/cli.py add <UUID> --gravity-window --workspace <chemin-projet>
+python scripts/cli.py inspect <label_ou_uuid>
+python scripts/cli.py remove <label_ou_uuid> --purge-reports
+```

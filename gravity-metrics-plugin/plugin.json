@@ -1,15 +1,15 @@
 {
   "name": "gravity-metrics",
   "displayName": "Gravity Metrics",
-  "version": "0.1.0",
-  "description": "Collecte zéro-token via /gravity metrics, historique centralisé et tableaux de bord des coûts, tokens et cache Antigravity.",
+  "version": "0.1.1",
+  "description": "Capture /gravity-metrics, historique centralisé et widget MCP App interactif des coûts, tokens et cache Antigravity.",
   "logo": "assets/logo.svg",
   "homepage": "https://github.com/BSourichanh/gravity-metrics",
   "repository": "https://github.com/BSourichanh/gravity-metrics.git",
   "suggestedPrompts": [
-    "/gravity metrics",
-    "/gravity metrics list",
-    "/gravity metrics inspect <label>"
+    "/gravity-metrics",
+    "/gravity-metrics --full",
+    "Analyse les coûts et le taux de cache de mes sessions Gravity"
   ],
   "author": {
     "name": "Gravity Contributors"

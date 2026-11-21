@@ -26,10 +26,9 @@ from metrics import (  # noqa: E402
     load_pricing_catalog,
     parse_agent_transcript,
     read_gravity_profile_summary,
+    record_session_metrics,
     remove_session,
-    render_history_dashboard_html,
     render_metrics_markdown,
-    render_session_detail_html,
     render_session_detail_markdown,
     resolve_gravity_window,
     resolve_model_pricing,
@@ -83,6 +82,12 @@ class TestCoreAndParsing(unittest.TestCase):
         self.assertEqual(classify_agent("teamwork_worker", "Builder"), "build")
         self.assertEqual(classify_agent("teamwork_test_writer", "E2E Test Writer"), "testing")
         self.assertEqual(classify_agent("unknown_type", "Security Reviewer"), "verification")
+        self.assertEqual(classify_agent("research", "Security and Hooks Auditor"), "verification")
+        self.assertEqual(classify_agent("research", "Codebase Explorer"), "discovery")
+        self.assertEqual(classify_agent("research", "Reader"), "discovery")
+        self.assertEqual(classify_agent("planner", "Arch"), "orchestration")
+        self.assertEqual(classify_agent("builder", "Impl"), "build")
+        self.assertEqual(classify_agent("reviewer", "Audit"), "verification")
 
     def test_pricing_long_context_tier_flash_flat_and_fallback(self) -> None:
         p_pro, is_fb = resolve_model_pricing("gemini-3.1-pro-preview", self.catalog, "2026_nov_standard")
@@ -289,7 +294,7 @@ class TestGravityWindowAndProfile(unittest.TestCase):
                         "type": "USER_INPUT",
                         "status": "DONE",
                         "created_at": "2026-11-21T10:10:00Z",
-                        "content": "<USER_REQUEST>\n/gravity metrics\n</USER_REQUEST>",
+                        "content": "<USER_REQUEST>\n/gravity-metrics\n</USER_REQUEST>",
                     },
                     {
                         "step_index": 7,
@@ -340,7 +345,7 @@ class TestGravityWindowAndProfile(unittest.TestCase):
                     }
                 ],
             )
-            # Sous-agent après /gravity metrics (doit être exclu)
+            # Sous-agent après /gravity-metrics (doit être exclu)
             _write_subagent_meta(brain / root_id, "sub-after", "teamwork_reviewer", "PostAudit", spawn_step=7)
             _write_transcript(
                 brain / "sub-after",
@@ -391,20 +396,20 @@ class TestGravityWindowAndProfile(unittest.TestCase):
                 [
                     {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:00:00Z", "content": "/gravity run un"},
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
-                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:01:00Z", "content": "/gravity metrics"},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:01:00Z", "content": "/gravity-metrics"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T11:01:01Z", "content": METRICS_MARKER},
                     {"step_index": 4, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:05:00Z", "content": "/gravity run deux"},
                     {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": []},
                 ],
             )
-            # Fin de la 2e session (hook avant flush du 2e /gravity metrics)
+            # Fin de la 2e session (hook avant flush du 2e /gravity-metrics)
             m2 = collect_run_metrics(
                 cid,
                 brain,
                 CATALOG_PATH,
                 gravity_window=True,
                 current_prompt_is_metrics=True,
-                current_prompt="/gravity metrics",
+                current_prompt="/gravity-metrics",
             )
             self.assertEqual(m2["window"]["mode"], "gravity_session")
             self.assertEqual(m2["window"]["start_step_index"], 4)
@@ -436,6 +441,68 @@ class TestGravityWindowAndProfile(unittest.TestCase):
             self.assertEqual(win_fb["mode"], "full_conversation")
             self.assertFalse(win_fb["has_gravity_anchor"])
 
+    def test_handoff_turn_is_excluded_from_subsequent_capture_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = Path(tmp) / "brain"
+            cid = "conv-handoff"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:00:00Z", "content": "/gravity tache 1"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:01:00Z", "content": "/gravity-metrics"},
+                    {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T11:01:01Z", "content": METRICS_MARKER},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_metrics_dashboard"}]},
+                    {"step_index": 5, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-21T11:01:03Z", "content": "ok"},
+                    {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:04Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 250, "cache_read_tokens": 0, "output_tokens": 20, "tool_calls": []},
+                ],
+            )
+            # Un second /gravity-metrics immédiat ne doit PAS compter le tour open_metrics_dashboard
+            win_empty = resolve_gravity_window(
+                tpath,
+                current_prompt_is_metrics=True,
+                current_prompt="/gravity-metrics",
+            )
+            self.assertTrue(win_empty["window_empty"])
+            m_empty = collect_run_metrics(
+                cid,
+                brain,
+                CATALOG_PATH,
+                gravity_window=True,
+                current_prompt_is_metrics=True,
+                current_prompt="/gravity-metrics",
+            )
+            self.assertEqual(m_empty["summary"]["total_llm_calls"], 0)
+            self.assertEqual(m_empty["window"]["excluded_before_steps"], 7)
+
+            # Un tour normal suivant repart proprement au USER_INPUT suivant
+            _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:00:00Z", "content": "/gravity tache 1"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:01:00Z", "content": "/gravity-metrics"},
+                    {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T11:01:01Z", "content": METRICS_MARKER},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_metrics_dashboard"}]},
+                    {"step_index": 5, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-21T11:01:03Z", "content": "ok"},
+                    {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:04Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 250, "cache_read_tokens": 0, "output_tokens": 20, "tool_calls": []},
+                    {"step_index": 7, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:05:00Z", "content": "Ajoute un test"},
+                    {"step_index": 8, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:05:05Z", "model": "gemini-4-neon", "input_tokens": 4000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": []},
+                ],
+            )
+            m_next = collect_run_metrics(
+                cid,
+                brain,
+                CATALOG_PATH,
+                gravity_window=True,
+                current_prompt_is_metrics=True,
+                current_prompt="/gravity-metrics",
+            )
+            self.assertEqual(m_next["window"]["mode"], "since_last_metrics")
+            self.assertEqual(m_next["window"]["start_step_index"], 7)
+            self.assertEqual(m_next["summary"]["total_llm_calls"], 1)
+            self.assertEqual(m_next["summary"]["input_tokens"], 4000)
+
     def test_read_gravity_profile_summary_and_auto_label(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ws = Path(tmp) / "MyApp"
@@ -461,13 +528,30 @@ class TestGravityWindowAndProfile(unittest.TestCase):
         lbl2 = suggest_auto_label("MyApp", "/gravity high fast ajoute le module auth", "2026-11-21T19:00:00Z", [lbl1])
         self.assertEqual(lbl2, "myapp-ajoute-module-auth-2")
 
+        with tempfile.TemporaryDirectory() as tmp2:
+            brain2 = Path(tmp2) / "brain"
+            cid2 = "conv-bare-gravity"
+            tpath2 = _write_transcript(
+                brain2 / cid2,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T21:18:00Z", "content": "<USER_REQUEST>\n/gravity \n</USER_REQUEST>"},
+                    {"step_index": 1, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T21:20:00Z", "content": "<USER_REQUEST>\noui\n</USER_REQUEST>"},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T21:22:00Z", "content": "<USER_REQUEST>\nJe veux un audit complet de gravity sur les hooks\n</USER_REQUEST>"},
+                    {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T21:22:10Z", "model": "gemini-4-neon", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                ],
+            )
+            win2 = resolve_gravity_window(tpath2, current_prompt_is_metrics=True)
+            self.assertIn("audit complet", win2["first_prompt"].lower())
+            auto_lbl = suggest_auto_label("Gravity", win2["first_prompt"], "2026-11-21T21:18:00Z", [])
+            self.assertEqual(auto_lbl, "gravity-audit-complet-hooks")
+
 
 class TestHistoryAndCLI(unittest.TestCase):
     def test_slugify_label(self) -> None:
         self.assertEqual(slugify_label("v0.1 Prototype / Test!"), "v0.1-prototype-test")
         self.assertEqual(slugify_label("   ", fallback="session-abcd"), "session-abcd")
 
-    def test_history_lifecycle_markdown_and_xss_html(self) -> None:
+    def test_history_lifecycle_and_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hpath = Path(tmp) / "history.jsonl"
             rec1 = {
@@ -494,10 +578,10 @@ class TestHistoryAndCLI(unittest.TestCase):
             rec2 = dict(rec1)
             rec2.update(
                 {
-                    "label": '<script>alert("xss")</script>',
+                    "label": "v0.2-run",
                     "conversation_id": "22222222-aaaa-bbbb-cccc-000000000002",
-                    "note": '<img src=x onerror="alert(1)">',
-                    "project": '<svg onload=alert(1)>',
+                    "note": "Suite",
+                    "project": "Gravity",
                     "cost_usd": 6.0,
                     "duplicate_spawns": 0,
                 }
@@ -513,21 +597,58 @@ class TestHistoryAndCLI(unittest.TestCase):
 
             md = render_metrics_markdown(loaded)
             self.assertIn("v0.1-run", md)
+            self.assertIn("v0.2-run", md)
             self.assertIn("Gravity", md)
             self.assertIn("$16.0000", md)
-            self.assertNotIn("Δ vs Ref", md)
-            self.assertNotIn("Référence active", md)
-
-            html_out = render_history_dashboard_html(loaded)
-            self.assertNotIn("<script>", html_out)
-            self.assertNotIn("<img ", html_out)
-            self.assertNotIn("<svg onload", html_out)
-            self.assertIn("&lt;script&gt;", html_out)
-            self.assertNotIn("BASELINE", html_out)
-            self.assertNotIn("Δ vs Ref", html_out)
+            self.assertNotIn(".html", md)
 
             loaded = remove_session(loaded, "v0.1-run")
             self.assertEqual(len(loaded), 1)
+
+    def test_record_session_metrics_harmonizes_project_casing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            history_path = store / "data" / "history.jsonl"
+            brain = root / "brain"
+            for cid, lbl in (("1111aaaa-0000-0000-0000-000000000001", "s1"), ("2222bbbb-0000-0000-0000-000000000002", "s2")):
+                _write_transcript(
+                    brain / cid,
+                    [
+                        {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T10:00:00Z", "content": "/gravity t"},
+                        {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T10:00:10Z", "model": "gemini-4-neon", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                    ],
+                )
+            m1 = collect_run_metrics("1111aaaa-0000-0000-0000-000000000001", brain, CATALOG_PATH, label="s1", project="gravity")
+            rec1, _ = record_session_metrics(m1, store_dir=store, history_path=history_path, label="s1")
+            self.assertEqual(rec1["project"], "gravity")
+
+            m2 = collect_run_metrics("2222bbbb-0000-0000-0000-000000000002", brain, CATALOG_PATH, label="s2", project="Gravity")
+            rec2, _ = record_session_metrics(m2, store_dir=store, history_path=history_path, label="s2")
+            self.assertEqual(rec2["project"], "gravity")
+
+    def test_verification_ratio_na_without_build_or_test(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = Path(tmp) / "brain"
+            root_id = "verif-only-root"
+            _write_transcript(
+                brain / root_id,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T10:00:00Z", "content": "/gravity audit"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T10:00:10Z", "model": "gemini-4-neon", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "invoke_subagent"}]},
+                ],
+            )
+            _write_subagent_meta(brain / root_id, "sub-aud", "research", "Security Auditor", spawn_step=1)
+            _write_transcript(
+                brain / "sub-aud",
+                [
+                    {"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T10:00:15Z", "model": "gemini-4-neon", "input_tokens": 2000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": []},
+                ],
+            )
+            m = collect_run_metrics(root_id, brain, CATALOG_PATH, label="verif-only")
+            self.assertIsNone(m["efficiency_and_waste"]["verification_to_build_cost_ratio"])
+            det_md = render_session_detail_markdown(m)
+            self.assertIn("N/A (sans Build/Test)", det_md)
 
     def test_cli_end_to_end_add_list_inspect_remove(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -601,20 +722,18 @@ class TestHistoryAndCLI(unittest.TestCase):
             out_root = root / "out"
             self.assertTrue(hist.is_file())
             self.assertTrue((out_root / "METRICS.md").is_file())
-            self.assertTrue((out_root / "dashboard.html").is_file())
+            self.assertFalse((out_root / "dashboard.html").exists())
 
             rep_dir = out_root / "reports"
             for slug in ("run-1", "run-2"):
                 self.assertTrue((rep_dir / f"{slug}.json").is_file())
                 self.assertTrue((rep_dir / f"{slug}.md").is_file())
-                self.assertTrue((rep_dir / f"{slug}.html").is_file())
+                self.assertFalse((rep_dir / f"{slug}.html").exists())
 
             md_txt = (out_root / "METRICS.md").read_text(encoding="utf-8")
             self.assertIn("reports/run-1.md", md_txt)
-            self.assertIn("reports/run-2.html", md_txt)
+            self.assertNotIn(".html", md_txt)
             self.assertIn("`gemini-3.8-flash-tiered`", md_txt)
-            html_txt = (out_root / "dashboard.html").read_text(encoding="utf-8")
-            self.assertIn("reports/run-1.html", html_txt)
 
             r_list = run_cli("list", "--history", str(hist))
             self.assertEqual(r_list.returncode, 0, r_list.stderr)
@@ -627,14 +746,6 @@ class TestHistoryAndCLI(unittest.TestCase):
             self.assertEqual(r_insp.returncode, 0, r_insp.stderr)
             self.assertIn("Inspection Gravity [run-2]", r_insp.stdout)
 
-            det_metrics = json.loads((rep_dir / "run-2.json").read_text(encoding="utf-8"))
-            det_metrics["label"] = '<script>alert("xss")</script>'
-            det_metrics["agents"][0]["role"] = '<img src=x onerror="alert(1)">'
-            det_html = render_session_detail_html(det_metrics)
-            self.assertNotIn("<script>", det_html)
-            self.assertIn("&lt;script&gt;", det_html)
-            self.assertIn("../dashboard.html", det_html)
-
             r_rm = run_cli("remove", "run-1", "--history", str(hist))
             self.assertEqual(r_rm.returncode, 0, r_rm.stderr)
             self.assertEqual(len(load_history(hist)), 1)
@@ -644,7 +755,6 @@ class TestHistoryAndCLI(unittest.TestCase):
             self.assertEqual(r_rm2.returncode, 0, r_rm2.stderr)
             self.assertFalse((rep_dir / "run-2.json").exists())
             self.assertFalse((rep_dir / "run-2.md").exists())
-            self.assertFalse((rep_dir / "run-2.html").exists())
 
     def test_execution_mode_detection_swarm_teamwork_and_single(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -893,7 +1003,7 @@ class TestReconciliationAndCompliance(unittest.TestCase):
 
     def test_stdlib_only_and_no_forbidden_jargon(self) -> None:
         stdlib_names = set(getattr(sys, "stdlib_module_names", set()))
-        allowed = stdlib_names | {"metrics", "hook_runtime", "cli", "validate", "install"}
+        allowed = stdlib_names | {"metrics", "hook_runtime", "cli", "validate", "install", "mcp", "widget_html"}
         forbidden_re = re.compile(r"\bMod" + r"ule\s+0?\d\b", re.IGNORECASE)
         forbidden_term_re = re.compile(r"\bbench" + r"marks?\b", re.IGNORECASE)
 

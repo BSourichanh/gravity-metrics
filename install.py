@@ -19,6 +19,7 @@ PLUGIN_NAME = "gravity-metrics"
 
 EXEC_SCRIPTS: Tuple[str, ...] = (
     "hooks/pre_invocation_metrics.py",
+    "mcp/server.py",
     "scripts/cli.py",
     "scripts/validate.py",
 )
@@ -164,7 +165,8 @@ def print_next_steps(target_dir: Optional[Path]) -> None:
         print(f"  - Installed plugin location : {target_dir}")
     print(f"  - Centralized metrics store : {store_dir}")
     print("  - Manage plugin in Antigravity : [Gravity Metrics](customization://gravity-metrics)")
-    print("  - End any /gravity session with /gravity metrics (zero tokens) to record it.")
+    print("  - Run /gravity-metrics at the end of a Gravity session to capture metrics and open the widget.")
+    print("  - Or open the global dashboard anytime from Plugins -> Gravity Metrics (zero tokens).")
 
 
 def check_environment(
@@ -205,6 +207,35 @@ def check_environment(
     return 0
 
 
+def _is_empty_dir(path: Path) -> bool:
+    """Return True when path is a regular empty directory."""
+    return path.is_dir() and not path.is_symlink() and not any(path.iterdir())
+
+
+def _prune_stale_entries(src_dir: Path, dst_dir: Path) -> None:
+    """Remove entries in dst_dir that do not exist in src_dir (best-effort on locked caches)."""
+    src_entries = {entry.name: entry for entry in src_dir.iterdir()}
+    for entry in list(dst_dir.iterdir()):
+        src_match = src_entries.get(entry.name)
+        if src_match is None or (entry.is_dir() != src_match.is_dir()):
+            try:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+            except PermissionError:
+                pass
+        elif entry.is_dir() and not entry.is_symlink() and src_match.is_dir():
+            _prune_stale_entries(src_match, entry)
+
+
+def _sync_directory_in_place(src_dir: Path, dst_dir: Path) -> None:
+    """Update dst_dir contents in-place from src_dir without renaming or removing dst_dir."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    _prune_stale_entries(src_dir, dst_dir)
+    shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+
+
 def install_copy(
     plugin_src: Path,
     target_dir: Path,
@@ -225,24 +256,27 @@ def install_copy(
 
     replacing = False
     if target_dir.exists() or target_dir.is_symlink():
-        if not is_gravity_metrics_plugin_dir(target_dir):
+        if _is_empty_dir(target_dir):
+            replacing = True
+        elif not is_gravity_metrics_plugin_dir(target_dir):
             print(
                 f"[ERROR] Target path exists and is not a Gravity Metrics plugin: {target_dir}\n"
                 "Refusing to overwrite unrelated files.",
                 file=sys.stderr,
             )
             return 1
-        inst_manifest = read_plugin_manifest(target_dir) or {}
-        inst_version = str(inst_manifest.get("version", "unknown"))
-        if not force:
-            print(
-                f"[ERROR] Gravity Metrics v{inst_version} is already installed at {target_dir} "
-                f"(source is v{src_version}).\n"
-                "Re-run with --force to upgrade or reinstall.",
-                file=sys.stderr,
-            )
-            return 1
-        replacing = True
+        else:
+            inst_manifest = read_plugin_manifest(target_dir) or {}
+            inst_version = str(inst_manifest.get("version", "unknown"))
+            if not force:
+                print(
+                    f"[ERROR] Gravity Metrics v{inst_version} is already installed at {target_dir} "
+                    f"(source is v{src_version}).\n"
+                    "Re-run with --force to upgrade or reinstall.",
+                    file=sys.stderr,
+                )
+                return 1
+            replacing = True
 
     will_fix_py = os.name == "nt" and not no_fix_python and not has_real_python3()
 
@@ -289,26 +323,34 @@ def install_copy(
                 tempfile.mkdtemp(prefix=".gmetrics-backup-", dir=str(target_dir.parent))
             )
             backup_dir = backup_parent / PLUGIN_NAME
-            shutil.move(str(target_dir), str(backup_dir))
             try:
-                shutil.move(str(staged_dir), str(target_dir))
-            except Exception as exc:
-                print(
-                    f"[ERROR] Failed to move staged plugin into {target_dir}: {exc}",
-                    file=sys.stderr,
-                )
-                if not target_dir.exists() and backup_dir.exists():
-                    shutil.move(str(backup_dir), str(target_dir))
-                return 1
-            shutil.rmtree(backup_parent, ignore_errors=True)
-            backup_parent = None
-            print(f"[OK]    Upgraded Gravity Metrics v{src_version} at {target_dir}")
+                os.rename(str(target_dir), str(backup_dir))
+            except PermissionError:
+                shutil.rmtree(backup_parent, ignore_errors=True)
+                backup_parent = None
+                print("[INFO]  Target directory is in use by a running process; updating files in place.")
+                _sync_directory_in_place(staged_dir, target_dir)
+                print(f"[OK]    Upgraded Gravity Metrics v{src_version} at {target_dir} (in-place)")
+            else:
+                try:
+                    shutil.move(str(staged_dir), str(target_dir))
+                except Exception as exc:
+                    print(
+                        f"[ERROR] Failed to move staged plugin into {target_dir}: {exc}",
+                        file=sys.stderr,
+                    )
+                    if not target_dir.exists() and backup_dir.exists():
+                        shutil.move(str(backup_dir), str(target_dir))
+                    return 1
+                shutil.rmtree(backup_parent, ignore_errors=True)
+                backup_parent = None
+                print(f"[OK]    Upgraded Gravity Metrics v{src_version} at {target_dir}")
         else:
             shutil.move(str(staged_dir), str(target_dir))
             print(f"[OK]    Installed Gravity Metrics v{src_version} at {target_dir}")
     finally:
         shutil.rmtree(stage_parent, ignore_errors=True)
-        if backup_parent is not None and target_dir.exists():
+        if backup_parent is not None and is_gravity_metrics_plugin_dir(target_dir):
             shutil.rmtree(backup_parent, ignore_errors=True)
 
     return 0

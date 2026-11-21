@@ -9,10 +9,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SCRIPT = PROJECT_ROOT / "install.py"
 SOURCE_HOOKS = PROJECT_ROOT / "gravity-metrics-plugin" / "hooks.json"
+SOURCE_MCP = PROJECT_ROOT / "gravity-metrics-plugin" / "mcp_config.json"
 VALIDATE_SCRIPT = PROJECT_ROOT / "gravity-metrics-plugin" / "scripts" / "validate.py"
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -51,7 +53,9 @@ class TestInstaller(unittest.TestCase):
 
     def test_copy_install_upgrade_workspace_and_uninstall(self) -> None:
         source_hooks_before = SOURCE_HOOKS.read_text(encoding="utf-8")
+        source_mcp_before = SOURCE_MCP.read_text(encoding="utf-8")
         self.assertIn("python3 hooks/pre_invocation_metrics.py", source_hooks_before)
+        self.assertIn('"command": "python3"', source_mcp_before)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -61,12 +65,18 @@ class TestInstaller(unittest.TestCase):
             self.assertEqual(r_inst.returncode, 0, r_inst.stderr + r_inst.stdout)
             self.assertTrue((target / "plugin.json").is_file())
             self.assertTrue((target / "hooks" / "pre_invocation_metrics.py").is_file())
+            self.assertTrue((target / "mcp_config.json").is_file())
+            self.assertTrue((target / "mcp" / "server.py").is_file())
+            self.assertTrue((target / "skills" / "gravity-metrics" / "SKILL.md").is_file())
 
             # Le dépôt source garde toujours 'python3' portable
             self.assertEqual(SOURCE_HOOKS.read_text(encoding="utf-8"), source_hooks_before)
+            self.assertEqual(SOURCE_MCP.read_text(encoding="utf-8"), source_mcp_before)
             if os.name == "nt" and not installer.has_real_python3():
                 installed_hooks = (target / "hooks.json").read_text(encoding="utf-8")
+                installed_mcp = (target / "mcp_config.json").read_text(encoding="utf-8")
                 self.assertNotIn('"python3 ', installed_hooks)
+                self.assertNotIn('"python3"', installed_mcp)
 
             # Refus sans --force
             r_dup = _run_install("--target", str(target))
@@ -126,6 +136,43 @@ class TestInstaller(unittest.TestCase):
                 [sys.executable, "-B", str(VALIDATE_SCRIPT), "--plugin-root", "~/plugin-copy", "--strict"],
                 cwd=str(PROJECT_ROOT),
                 env=val_env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(r_val.returncode, 0, r_val.stderr + r_val.stdout)
+            self.assertIn("[PASS]", r_val.stdout)
+
+    def test_empty_dir_recovery_and_locked_dir_inplace_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            empty_target = root / "empty-target"
+            empty_target.mkdir()
+            rc_empty = installer.install_copy(installer.PLUGIN_SOURCE, empty_target)
+            self.assertEqual(rc_empty, 0)
+            self.assertTrue((empty_target / "plugin.json").is_file())
+
+            locked_target = root / "locked-target"
+            self.assertEqual(installer.install_copy(installer.PLUGIN_SOURCE, locked_target), 0)
+            stale_top = locked_target / "stale.txt"
+            stale_nested = locked_target / "metrics" / "stale_old.py"
+            stale_top.write_text("old", encoding="utf-8")
+            stale_nested.write_text("# old", encoding="utf-8")
+
+            with mock.patch.object(installer.os, "rename", side_effect=PermissionError("WinError 32 locked")):
+                rc_inplace = installer.install_copy(
+                    installer.PLUGIN_SOURCE, locked_target, force=True
+                )
+            self.assertEqual(rc_inplace, 0)
+            self.assertFalse(stale_top.exists())
+            self.assertFalse(stale_nested.exists())
+            self.assertTrue((locked_target / "plugin.json").is_file())
+
+            r_val = subprocess.run(
+                [sys.executable, "-B", str(VALIDATE_SCRIPT), "--plugin-root", str(locked_target), "--strict"],
+                cwd=str(PROJECT_ROOT),
                 text=True,
                 encoding="utf-8",
                 errors="replace",

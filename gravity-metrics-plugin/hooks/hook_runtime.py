@@ -40,12 +40,9 @@ def read_stdin_text(timeout_s: float = 1.0) -> str:
 
 
 def emit_json(payload: Dict[str, Any]) -> None:
-    """Émet un objet JSON sur stdout et vide le buffer."""
+    """Émet un objet JSON ASCII-safe sur stdout et vide le buffer."""
     configure_utf8_stdio()
-    try:
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except UnicodeEncodeError:
-        sys.stdout.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    sys.stdout.write(json.dumps(payload, ensure_ascii=True) + "\n")
     sys.stdout.flush()
 
 
@@ -67,6 +64,22 @@ def emit_user_markdown(markdown_text: str, *, system_message: str = "") -> None:
                 }
             ],
             "terminationBehavior": "terminate",
+        }
+    )
+
+
+def emit_handoff_markdown(markdown_text: str, *, system_message: str) -> None:
+    """Affiche du Markdown inline et laisse l'agent appeler l'outil MCP du widget."""
+    emit_json(
+        {
+            "injectSteps": [
+                {
+                    "systemMessage": {
+                        "systemMessage": system_message,
+                        "metadata": {"user_markdown": markdown_text},
+                    }
+                }
+            ],
         }
     )
 

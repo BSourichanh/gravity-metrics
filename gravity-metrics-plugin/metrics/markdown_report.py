@@ -61,7 +61,7 @@ def render_metrics_markdown(records: List[Dict[str, Any]]) -> str:
     ]
 
     if not records:
-        lines.append("_Aucune session enregistrée. Lancez `/gravity metrics` ou `python scripts/cli.py add`._")
+        lines.append("_Aucune session enregistrée. Lancez `/gravity-metrics` ou `python scripts/cli.py add`._")
         lines.append("")
         return "\n".join(lines)
 
@@ -84,7 +84,7 @@ def render_metrics_markdown(records: List[Dict[str, Any]]) -> str:
         par_f = float(rec.get("parallelism_factor") or 1.0)
         dur_cell = f"{_fmt_dur(rec.get('wall_clock_s') or 0)} ({par_f:.2f}x)"
         note_clean = _md_cell(rec.get("note"))
-        details_links = f"[MD](reports/{slug}.md) · [HTML](reports/{slug}.html)"
+        details_links = f"[MD](reports/{slug}.md)"
         lines.append(
             f"| `{_session_date_str(rec)}` | **{lbl_cell}** | {proj_cell} | "
             f"{_mode_cell_md(rec)} | {agents_cell} | {_fmt_int(rec.get('llm_calls'))} | "
@@ -138,7 +138,7 @@ def render_metrics_markdown(records: List[Dict[str, Any]]) -> str:
         [
             "",
             "---",
-            "*Commandes rapides : `/gravity metrics` · `/gravity metrics list` · `/gravity metrics inspect <label>`*",
+            "*Commande : `/gravity-metrics` · Widget interactif : **Plugins > Gravity Metrics***",
             "",
         ]
     )
@@ -260,6 +260,12 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
     proj_total = float(p.get("total_usd", 0.0))
     proj_delta = proj_total - float(c["total_usd"])
     delta_sign = "+" if proj_delta >= 0 else "-"
+    lifespans_s = s.get("sum_agent_lifespans_s")
+    dur_detail = (
+        f"cumulé : {_fmt_dur(lifespans_s)} · actif : {_fmt_dur(s['sum_agent_active_s'])}"
+        if lifespans_s is not None
+        else f"actif : {_fmt_dur(s['sum_agent_active_s'])}"
+    )
     lines.extend(
         [
             f"- **Fenêtre mesurée** : {_window_desc(win)}",
@@ -273,7 +279,7 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
             f"| **Coût total ({metrics['pricing_profile']})** | **${c['total_usd']:.4f}** | Input ${c['input_usd']:.4f} · Cache ${c['cache_read_usd']:.4f} · Output ${c['output_usd']:.4f} |",
             f"| **Projection ({metrics.get('secondary_pricing_profile') or '2027_standard'})** | **${proj_total:.4f}** | Écart : **{delta_sign}${abs(proj_delta):.4f}** |",
             f"| **Économie grâce au cache** | **${c['cache_savings_usd']:.4f}** | Sans cache : ${c['without_cache_usd']:.4f} (Cache Hit : **{s['cache_hit_rate_pct']:.2f}%**) |",
-            f"| **Agents / Profondeur max** | **{s['total_agents']}** / {s['max_tree_depth']} | Parallélisme : **{s['parallelism_factor']:.2f}x** (actif : {_fmt_dur(s['sum_agent_active_s'])}) |",
+            f"| **Agents / Profondeur max** | **{s['total_agents']}** / {s['max_tree_depth']} | Parallélisme : **{s['parallelism_factor']:.2f}x** ({dur_detail}) |",
             f"| **Appels LLM / Appels outils** | **{_fmt_int(s['total_llm_calls'])}** / **{_fmt_int(s['total_tool_calls'])}** | Erreurs : {s['total_error_steps']} ({s['error_rate_pct']:.2f}%) · Inputs utilisateur : {s['total_user_inputs']} |",
             f"| **Tokens (In / Cache / Out)** | **{_fmt_int(s['total_tokens'])}** | {_fmt_int(s['input_tokens'])} / {_fmt_int(s['cache_read_tokens'])} / {_fmt_int(s['output_tokens'])} |",
             "",
@@ -352,12 +358,14 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
     rw = eff["rewind_waste"]
     intr = eff["interrupted_agents"]
     cb = eff["context_bloat"]
+    v_ratio = eff.get("verification_to_build_cost_ratio")
+    v_ratio_str = "N/A (sans Build/Test)" if v_ratio is None else f"{float(v_ratio):.2f}x"
     lines.extend(
         [
             "",
             "## 6. Diagnostic & Gaspillages",
             "",
-            f"- **Ratio Vérification / (Build + Test)** : **{eff.get('verification_to_build_cost_ratio', 0.0):.2f}x**",
+            f"- **Ratio Vérification / (Build + Test)** : **{v_ratio_str}**",
             f"- **Doublons de rôles** : **{dup['duplicate_agent_count']}** ({dup['duplicate_calls']} appels, **${dup['duplicate_cost_usd']:.4f}**)",
             f"- **Rewinds / reprises quota** : **{rw['rewind_calls']}** appels (**${rw['rewind_cost_usd']:.4f}**)",
             f"- **Agents interrompus** : **{intr['count']}** ({intr['total_llm_calls']} appels, **${intr['total_cost_usd']:.4f}**)",
@@ -404,9 +412,8 @@ def render_chat_summary_markdown(
     store_dir: Path,
     *,
     reports_written: bool = True,
-    html_written: bool = True,
 ) -> str:
-    """Formate la synthèse compacte affichée dans le chat après `/gravity metrics` (0 token)."""
+    """Formate la synthèse compacte affichée dans le chat après `/gravity-metrics`."""
     s = metrics["summary"]
     c = s["cost_usd"]
     win = metrics.get("window") or {}
@@ -421,7 +428,7 @@ def render_chat_summary_markdown(
 
     lines = [
         METRICS_MARKER,
-        f"### Gravity Metrics — `{saved_rec['label']}` enregistrée *(0 token)*",
+        f"### Gravity Metrics — `{saved_rec['label']}` enregistrée",
         "",
         " · ".join(meta_parts),
         "",
@@ -437,85 +444,7 @@ def render_chat_summary_markdown(
     ]
 
     links = [_file_link("METRICS.md", store_dir / "METRICS.md")]
-    if html_written and (store_dir / "dashboard.html").is_file():
-        links.append(_file_link("dashboard.html", store_dir / "dashboard.html"))
     if reports_written:
         links.append(_file_link(f"{slug}.md", store_dir / "reports" / f"{slug}.md"))
-        if html_written:
-            links.append(_file_link(f"{slug}.html", store_dir / "reports" / f"{slug}.html"))
     lines.append("**Rapports :** " + " · ".join(links))
-    return "\n".join(lines)
-
-
-def render_chat_list_markdown(records: List[Dict[str, Any]], store_dir: Path) -> str:
-    """Formate l'historique complet en Markdown pour `/gravity metrics list`."""
-    if not records:
-        return (
-            "### Gravity Metrics — Historique vide\n\n"
-            "Aucune session enregistrée. Lancez `/gravity metrics` à la fin d'une session."
-        )
-    lines = [
-        f"### Gravity Metrics — Historique ({len(records)} session(s))",
-        "",
-        "| Date (UTC) | Label | Projet | Mode | Coût ($) | Cache % | Agents / Appels | Alertes |",
-        "|---|---|---|---|---:|---:|---:|---|",
-    ]
-    for rec in records:
-        lbl_cell = _md_cell(rec.get("label"), "—")
-        proj = _md_cell(rec.get("project"), "—")
-        lines.append(
-            f"| `{_session_date_str(rec)}` | **{lbl_cell}** | `{proj}` | "
-            f"{_mode_cell_md(rec)} | ${float(rec.get('cost_usd') or 0.0):.4f} | "
-            f"{float(rec.get('cache_hit_rate_pct') or 0.0):.1f}% | "
-            f"{int(rec.get('agents') or 0)} / {_fmt_int(rec.get('llm_calls'))} | `{_alerts_str(rec)}` |"
-        )
-    links = [_file_link("METRICS.md", store_dir / "METRICS.md")]
-    if (store_dir / "dashboard.html").is_file():
-        links.append(_file_link("dashboard.html", store_dir / "dashboard.html"))
-    lines.extend(["", "**Vues globales :** " + " · ".join(links)])
-    return "\n".join(lines)
-
-
-def render_chat_inspect_markdown(
-    metrics: Dict[str, Any], store_dir: Path, detail_slug: str = ""
-) -> str:
-    """Formate l'inspection d'une session en Markdown pour `/gravity metrics inspect`."""
-    s = metrics["summary"]
-    c = s["cost_usd"]
-    eff = metrics["efficiency_and_waste"]
-    dup = eff["duplicate_role_spawns"]
-    rw = eff["rewind_waste"]
-    intr = eff["interrupted_agents"]
-    cb = eff["context_bloat"]
-    win = metrics.get("window") or {}
-
-    lines = [
-        f"### Inspection — `{metrics['label']}` (`{metrics['root_conversation_id'][:8]}`)",
-        "",
-        f"- **Projet / Profil** : `{metrics.get('project') or '—'}` / `{metrics.get('gravity_profile') or '—'}`",
-        f"- **Mode / Fenêtre** : `{s.get('execution_mode', 'single')}` · {_window_desc(win)} · `{_fmt_dur(s['wall_clock_s'])}` (`{s['parallelism_factor']:.2f}x`)",
-        f"- **Coût** : **${c['total_usd']:.4f}** (in `${c['input_usd']:.4f}` · cache `${c['cache_read_usd']:.4f}` · out `${c['output_usd']:.4f}`) · Cache Hit **{s['cache_hit_rate_pct']:.2f}%**",
-        f"- **Activité** : **{s['total_agents']}** agents (prof. `{s['max_tree_depth']}`) · **{_fmt_int(s['total_llm_calls'])}** appels LLM · `{_fmt_int(s['total_tool_calls'])}` outils · `{s['total_error_steps']}` erreurs (`{s['error_rate_pct']:.2f}%`)",
-        f"- **Alertes** : `D:{dup['duplicate_agent_count']} R:{rw['rewind_calls']} I:{intr['count']}` · Max Ctx : `{_fmt_int(cb['max_context_tokens_overall'])}`",
-        "",
-        "| Modèle | Appels | Coût USD | Part |",
-        "|---|---:|---:|---:|",
-    ]
-    for m_name, m_data in metrics["by_model"].items():
-        lines.append(
-            f"| `{m_name}` | {_fmt_int(m_data['calls'])} | ${m_data['cost_usd']['total_usd']:.4f} | {m_data['cost_share_pct']:.1f}% |"
-        )
-
-    slug = detail_slug or slugify_label(
-        str(metrics.get("label") or ""),
-        f"session-{metrics['root_conversation_id'][:8]}",
-    )
-    links = [_file_link("METRICS.md", store_dir / "METRICS.md")]
-    rep_md = store_dir / "reports" / f"{slug}.md"
-    rep_html = store_dir / "reports" / f"{slug}.html"
-    if rep_md.is_file():
-        links.append(_file_link(f"{slug}.md", rep_md))
-    if rep_html.is_file():
-        links.append(_file_link(f"{slug}.html", rep_html))
-    lines.extend(["", "**Rapports :** " + " · ".join(links)])
     return "\n".join(lines)

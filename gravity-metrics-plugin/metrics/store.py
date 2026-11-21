@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Opérations transactionnelles sur le store centralisé Gravity Metrics (100 % stdlib)."""
 
+from collections import Counter
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,7 +16,6 @@ from .history import (
     to_session_record,
     upsert_session,
 )
-from .html_report import render_history_dashboard_html, render_session_detail_html
 from .markdown_report import render_metrics_markdown, render_session_detail_markdown
 from .pricing import default_store_dir
 
@@ -37,23 +37,15 @@ def resolve_store_paths(
     return s_dir, s_dir / "data" / "history.jsonl"
 
 
-def regenerate_views(
-    store_dir: Path, records: List[Dict[str, Any]], *, no_html: bool = False
-) -> Path:
-    """Régénère METRICS.md et dashboard.html dans `store_dir`."""
+def regenerate_views(store_dir: Path, records: List[Dict[str, Any]]) -> Path:
+    """Régénère METRICS.md dans `store_dir`."""
     store_dir.mkdir(parents=True, exist_ok=True)
     (store_dir / "METRICS.md").write_text(render_metrics_markdown(records), encoding="utf-8")
-    if not no_html:
-        (store_dir / "dashboard.html").write_text(
-            render_history_dashboard_html(records), encoding="utf-8"
-        )
     return store_dir
 
 
-def write_session_details(
-    store_dir: Path, slug: str, metrics: Dict[str, Any], *, no_html: bool = False
-) -> Path:
-    """Persiste `<slug>.json`, `<slug>.md` et `<slug>.html` dans `<store_dir>/reports/`."""
+def write_session_details(store_dir: Path, slug: str, metrics: Dict[str, Any]) -> Path:
+    """Persiste `<slug>.json` et `<slug>.md` dans `<store_dir>/reports/`."""
     reports_dir = store_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     (reports_dir / f"{slug}.json").write_text(
@@ -62,10 +54,6 @@ def write_session_details(
     (reports_dir / f"{slug}.md").write_text(
         render_session_detail_markdown(metrics), encoding="utf-8"
     )
-    if not no_html:
-        (reports_dir / f"{slug}.html").write_text(
-            render_session_detail_html(metrics), encoding="utf-8"
-        )
     return reports_dir
 
 
@@ -82,6 +70,22 @@ def purge_session_details(store_dir: Path, rec: Dict[str, Any]) -> None:
             fpath.unlink()
 
 
+def _harmonize_project_name(project: str, records: List[Dict[str, Any]]) -> str:
+    """Réutilise la casse existante d'un projet connu (comparaison insensible à la casse)."""
+    clean = project.strip()
+    if not clean:
+        return ""
+    cf = clean.casefold()
+    counts: Counter = Counter()
+    for rec in records:
+        p = str(rec.get("project") or "").strip()
+        if p and p.casefold() == cf:
+            counts[p] += 1
+    if not counts:
+        return clean
+    return min(counts.items(), key=lambda kv: (-kv[1], kv[0] != kv[0].lower(), kv[0]))[0]
+
+
 def record_session_metrics(
     metrics: Dict[str, Any],
     *,
@@ -90,7 +94,6 @@ def record_session_metrics(
     label: str = "",
     note: str = "",
     summary_only: bool = False,
-    no_html: bool = False,
     auto_label: bool = False,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Enregistre une session sous verrou dans `history.jsonl` et régénère les vues."""
@@ -99,6 +102,9 @@ def record_session_metrics(
 
     with history_lock(history_path):
         records = load_history(history_path)
+        harmonized_proj = _harmonize_project_name(str(metrics_to_write.get("project") or ""), records)
+        metrics_to_write["project"] = harmonized_proj
+        metrics["project"] = harmonized_proj
         if explicit_label:
             resolved_label = explicit_label
         elif auto_label:
@@ -119,11 +125,9 @@ def record_session_metrics(
         rec = to_session_record(metrics_to_write, label=resolved_label, note=note)
         updated = upsert_session(records, rec)
         save_history(history_path, updated)
-        regenerate_views(store_dir, updated, no_html=no_html)
+        regenerate_views(store_dir, updated)
         if not summary_only:
-            write_session_details(
-                store_dir, rec["detail_slug"], metrics_to_write, no_html=no_html
-            )
+            write_session_details(store_dir, rec["detail_slug"], metrics_to_write)
 
     saved_rec = next(
         (
@@ -186,7 +190,6 @@ def apply_remove(
     store_dir: Path,
     history_path: Path,
     purge_reports: bool = False,
-    no_html: bool = False,
 ) -> Tuple[Dict[str, Any], int]:
     """Retire une session sous verrou, purge optionnellement `reports/` et régénère les vues."""
     with history_lock(history_path):
@@ -199,5 +202,5 @@ def apply_remove(
         if purge_reports:
             purge_session_details(store_dir, target_rec)
         save_history(history_path, updated)
-        regenerate_views(store_dir, updated, no_html=no_html)
+        regenerate_views(store_dir, updated)
     return target_rec, len(updated)
