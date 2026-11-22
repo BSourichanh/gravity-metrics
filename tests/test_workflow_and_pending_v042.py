@@ -62,7 +62,13 @@ def _write_subagent(
     )
 
 
-def _planner_step(step_idx: int, ts: str, in_tok: int = 10_000, out_tok: int = 500) -> dict:
+def _planner_step(
+    step_idx: int,
+    ts: str,
+    in_tok: int = 10_000,
+    out_tok: int = 500,
+    tool_calls: list = None,
+) -> dict:
     return {
         "step_index": step_idx,
         "type": "PLANNER_RESPONSE",
@@ -72,7 +78,7 @@ def _planner_step(step_idx: int, ts: str, in_tok: int = 10_000, out_tok: int = 5
         "input_tokens": in_tok,
         "cache_read_tokens": 0,
         "output_tokens": out_tok,
-        "tool_calls": [],
+        "tool_calls": list(tool_calls) if tool_calls is not None else [],
     }
 
 
@@ -118,6 +124,11 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                         "content": "[GRAVITY-BRIDGE | thread=thr-wf-mix]",
                     },
                     _planner_step(1, "2026-11-22T10:01:10Z", 15_000, 600),
+                    _planner_step(
+                        51,
+                        "2026-11-22T10:01:20Z",
+                        tool_calls=[{"name": "run_workflow"}],
+                    ),
                     {
                         "step_index": 52,
                         "type": "GENERIC",
@@ -183,8 +194,18 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             (msgs_dir / "msg-51.json").write_text(
                 json.dumps(
                     {
-                        "sourceMetadata": {"tool": {"toolCall": {"name": "other_tool"}, "stepIndex": 51}},
+                        "sourceMetadata": {"tool": {"toolCall": {"name": "run_workflow"}, "stepIndex": 51}},
                         "content": f"- [agent:builder] Builder Phase Two Worker: DONE ({wf_b2})\n",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ignored_cmd_cid = "cccccccc-0000-4000-8000-000000000000"
+            (msgs_dir / "msg-ignored-cmd.json").write_text(
+                json.dumps(
+                    {
+                        "sourceMetadata": {"tool": {"toolCall": {"name": "run_command"}, "stepIndex": 51}},
+                        "content": f"- [agent:builder] Ignored Command Output: DONE ({ignored_cmd_cid})\n",
                     }
                 ),
                 encoding="utf-8",
@@ -252,6 +273,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             self.assertEqual(by_wcid[wf_r2]["spawn_step_index"], 52)
             self.assertEqual(by_wcid[wf_p2]["spawn_step_index"], 53)
             self.assertNotIn("bbbbbbbb-0000-4000-8000-000000000000", by_wcid)
+            self.assertNotIn(ignored_cmd_cid, by_wcid)
 
             metrics = collect_run_metrics(
                 root_id,

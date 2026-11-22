@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-11-22
+
+### Fixed
+- **`run_workflow` Discovery Precision (`plugin/metrics/collector.py`):**
+  - Tightened Source 2 (`.system_generated/messages/*.json`, excluding `read.json`) in `discover_workflow_children()` to strictly require `toolCall.name == "run_workflow"` alongside `"[agent:"` in content, rejecting `run_command`, `other_tool`, or missing tool metadata.
+  - Replaced blind `GENERIC`/`SYSTEM_MESSAGE` scanning in Source 3 (`transcript.jsonl` fallback) with ordered turn-state tracking (`active_wf_turn`, `active_wf_has_other_tools`, `has_any_wf_call`): resets on `USER_INPUT`, activates on `PLANNER_RESPONSE` containing `run_workflow`, skips obvious shell/read outputs (`Command output:`, `Command exited `, `Showing lines `) on parallel tool turns unless `"Workflow "` or `"\nLogs:\n"` is present, and requires either a prior `run_workflow` call or a parent task/sender marker (`task id "<parent>/task-"` or `sender=<parent>/task-`) for `SYSTEM_MESSAGE`.
+- **Clean Termination via `finish` (`plugin/metrics/collector.py`):**
+  - Added `_has_finish_tool_call()` and tracked `prev_non_sys` in `parse_agent_transcript()` so agents ending on `PLANNER_RESPONSE(status="DONE", tool_calls=[..., {"name": "finish"}, ...])` or followed by `GENERIC(status="DONE")` report `clean_termination=True`, while keeping `GENERIC` `RUNNING`/`ERROR`, non-`finish` tool outputs, and missing transcripts as `clean_termination=False`.
+
+### Added
+- **Regression & Precision Tests (`tests/test_workflow_precision_v043.py`, `tests/test_workflow_and_pending_v042.py`):**
+  - Added `tests/test_workflow_precision_v043.py` covering non-workflow log inspection isolation, parallel `run_workflow` + `run_command` filtering, `USER_INPUT` turn reset, async `SYSTEM_MESSAGE` parent-marker filtering, `finish` termination edge cases, and mixed-tree `interrupted_agents.count == 0`.
+  - Updated permissive `v0.4.2` fixtures in `tests/test_workflow_and_pending_v042.py` to include `run_workflow` tool calls and added `msg-ignored-cmd.json` (`run_command`) rejection coverage.
+
+### Changed
+- **Version Bump (`plugin/plugin.json`, `plugin/mcp/server.py`, `plugin/mcp/ui/app_js.py`, `tests/test_mcp_server.py`, `README.md`, `CHANGELOG.md`):**
+  - Bumped manifest, MCP server, UI `appInfo`, test expectations, and documentation to `0.4.3` (without altering `SCHEMA_VERSION` `2.1.0` or UI rendering).
+
 ## [0.4.2] - 2026-11-22
 
 ### Fixed

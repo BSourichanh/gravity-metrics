@@ -533,7 +533,7 @@ def discover_workflow_children(
             )
             content = obj.get("content")
             content_str = content if isinstance(content, str) else ""
-            if tool_name != "run_workflow" and "[agent:" not in content_str:
+            if tool_name != "run_workflow" or "[agent:" not in content_str:
                 continue
             raw_step = tool_meta.get("stepIndex") if isinstance(tool_meta, dict) else None
             step_idx = (
@@ -551,6 +551,9 @@ def discover_workflow_children(
             raw_lines = tpath.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             raw_lines = []
+        active_wf_turn = False
+        active_wf_has_other_tools = False
+        has_any_wf_call = False
         for raw_line in raw_lines:
             line = raw_line.strip()
             if not line:
@@ -561,10 +564,49 @@ def discover_workflow_children(
                 continue
             if not isinstance(obj, dict):
                 continue
-            if obj.get("type") not in ("GENERIC", "SYSTEM_MESSAGE"):
+            step_type = obj.get("type")
+            if step_type == "USER_INPUT":
+                active_wf_turn = False
+                active_wf_has_other_tools = False
                 continue
-            content = obj.get("content")
-            if not isinstance(content, str) or "[agent:" not in content:
+            if step_type == "PLANNER_RESPONSE":
+                raw_tcs = obj.get("tool_calls")
+                tc_list = raw_tcs if isinstance(raw_tcs, list) else []
+                tc_names = [
+                    str(tc.get("name") or "").strip()
+                    for tc in tc_list
+                    if isinstance(tc, dict)
+                ]
+                has_wf = "run_workflow" in tc_names
+                active_wf_turn = has_wf
+                active_wf_has_other_tools = has_wf and any(
+                    n != "run_workflow" for n in tc_names
+                )
+                has_any_wf_call = has_any_wf_call or has_wf
+                continue
+            if step_type == "GENERIC":
+                content = obj.get("content")
+                if not active_wf_turn or not isinstance(content, str) or "[agent:" not in content:
+                    continue
+                if active_wf_has_other_tools:
+                    padded = "\n" + content
+                    if any(
+                        m in padded
+                        for m in ("\nCommand output:", "\nCommand exited ", "\nShowing lines ")
+                    ) and ("Workflow " not in content and "\nLogs:\n" not in content):
+                        continue
+            elif step_type == "SYSTEM_MESSAGE":
+                content = obj.get("content")
+                if not isinstance(content, str) or "[agent:" not in content:
+                    continue
+                lowered = content.lower()
+                if not (
+                    has_any_wf_call
+                    or f'task id "{parent_cid_lower}/task-' in lowered
+                    or f"sender={parent_cid_lower}/task-" in lowered
+                ):
+                    continue
+            else:
                 continue
             raw_step = obj.get("step_index")
             step_idx = (
@@ -1235,6 +1277,19 @@ def _percentile_sorted(sorted_vals: List[int], pct: float) -> int:
     return int(sorted_vals[idx])
 
 
+def _has_finish_tool_call(step_obj: Optional[Dict[str, Any]]) -> bool:
+    """Vérifie si un step PLANNER_RESPONSE invoque l'outil terminal `finish`."""
+    if not isinstance(step_obj, dict) or step_obj.get("type") != "PLANNER_RESPONSE":
+        return False
+    raw_tcs = step_obj.get("tool_calls")
+    if not isinstance(raw_tcs, (list, tuple)):
+        return False
+    return any(
+        isinstance(tc, dict) and str(tc.get("name") or "").strip() == "finish"
+        for tc in raw_tcs
+    )
+
+
 def parse_agent_transcript(
     transcript_path: Union[Path, str],
     catalog: Dict[str, Any],
@@ -1280,6 +1335,7 @@ def parse_agent_transcript(
     rewind_cost_raw = 0.0
 
     timestamps: List[datetime] = []
+    prev_non_sys: Optional[Dict[str, Any]] = None
     last_non_sys: Optional[Dict[str, Any]] = None
     user_prompt_texts: List[str] = []
 
@@ -1310,6 +1366,7 @@ def parse_agent_transcript(
                     timestamps.append(dt)
 
                 if step_type != "SYSTEM_MESSAGE":
+                    prev_non_sys = last_non_sys
                     last_non_sys = obj
                 else:
                     system_messages += 1
@@ -1406,9 +1463,18 @@ def parse_agent_transcript(
     last_non_sys_type: Optional[str] = None
     if last_non_sys is not None:
         last_non_sys_type = last_non_sys.get("type")
-        clean_term = (last_non_sys_type == "PLANNER_RESPONSE") and (
-            not bool(last_non_sys.get("tool_calls"))
-        )
+        if last_non_sys_type == "PLANNER_RESPONSE":
+            clean_term = (not bool(last_non_sys.get("tool_calls"))) or (
+                last_non_sys.get("status") == "DONE"
+                and _has_finish_tool_call(last_non_sys)
+            )
+        elif last_non_sys_type == "GENERIC":
+            clean_term = (
+                last_non_sys.get("status") == "DONE"
+                and prev_non_sys is not None
+                and prev_non_sys.get("status") == "DONE"
+                and _has_finish_tool_call(prev_non_sys)
+            )
 
     ts_sorted = sorted(timestamps)
     first_dt = ts_sorted[0] if ts_sorted else None
