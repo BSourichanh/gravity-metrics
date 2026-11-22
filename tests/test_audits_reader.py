@@ -46,12 +46,16 @@ class TestAuditsReader(unittest.TestCase):
             (env_audits / "README.md").write_text("# Index Env\n", encoding="utf-8")
 
             ws_local = root / "local-ws"
-            (ws_local / "audits").mkdir(parents=True)
-            (ws_local / "audits" / "local.md").write_text("# Audit Local\n", encoding="utf-8")
+            (ws_local / "audits" / "agents").mkdir(parents=True)
+            (ws_local / "audits" / "agents" / "local.md").write_text("# Audit Local\n", encoding="utf-8")
+            (ws_local / "audits" / "code").mkdir(parents=True)
+            (ws_local / "audits" / "code" / "ignored-local.md").write_text("# Audit Code Local\n", encoding="utf-8")
 
             ws_bridge = root / "bridge-ws"
-            (ws_bridge / "audits").mkdir(parents=True)
-            (ws_bridge / "audits" / "bridge.md").write_text("# Audit Bridge\n", encoding="utf-8")
+            (ws_bridge / "audits" / "agents").mkdir(parents=True)
+            (ws_bridge / "audits" / "agents" / "bridge.md").write_text("# Audit Bridge\n", encoding="utf-8")
+            (ws_bridge / "audits" / "code").mkdir(parents=True)
+            (ws_bridge / "audits" / "code" / "ignored-bridge.md").write_text("# Audit Code Bridge\n", encoding="utf-8")
 
             db_path = root / "bridge" / "bridge.db"
             _create_workspaces_bridge_db(
@@ -69,7 +73,7 @@ class TestAuditsReader(unittest.TestCase):
                 self.assertEqual(len(roots_env), 1)
                 self.assertEqual(roots_env[0]["path"], env_audits.resolve())
 
-            # 2) Sans $GRAVITY_AUDITS_DIR : <workspace>/audits/ puis <canonical_path>/audits/ (dédupliqués)
+            # 2) Sans $GRAVITY_AUDITS_DIR : <workspace>/audits/agents/ puis <canonical_path>/audits/agents/ (audits/code/ ignoré)
             with mock.patch.dict(os.environ, {"GRAVITY_AUDITS_DIR": ""}, clear=False):
                 roots_ws = discover_audit_roots(
                     workspace_dirs=[ws_local],
@@ -78,8 +82,17 @@ class TestAuditsReader(unittest.TestCase):
                 )
                 self.assertEqual(
                     [r["path"] for r in roots_ws],
-                    [(ws_local / "audits").resolve(), (ws_bridge / "audits").resolve()],
+                    [
+                        (ws_local / "audits" / "agents").resolve(),
+                        (ws_bridge / "audits" / "agents").resolve(),
+                    ],
                 )
+                audits_ws, _ = list_audits(
+                    workspace_dirs=[ws_local],
+                    bridge_db=db_path,
+                    include_cwd=False,
+                )
+                self.assertEqual({a["filename"] for a in audits_ws}, {"local.md", "bridge.md"})
 
             # 3) Base bridge.db absente tolérée sans création
             missing_db = root / "absent" / "bridge.db"
@@ -202,6 +215,123 @@ class TestAuditsReader(unittest.TestCase):
             self.assertGreater(huge_loaded["size_bytes"], MAX_AUDIT_BYTES)
             self.assertEqual(len(huge_loaded["content"].encode("utf-8")), MAX_AUDIT_BYTES)
             self.assertEqual(huge_loaded["verdict_tone"], "warn")
+
+    def test_agents_scoping_relative_paths_and_code_exclusion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "gravity-studio"
+            agents_dir = ws / "audits" / "agents"
+            code_dir = ws / "audits" / "code"
+            agents_dir.mkdir(parents=True)
+            code_dir.mkdir(parents=True)
+
+            (agents_dir / "2026-11-22-audit-01.md").write_text(
+                "# Audit Agent 01\n\nVerdict : PASS\n",
+                encoding="utf-8",
+            )
+            # Un fichier nommé code.md directement dans agents/ reste légitime
+            (agents_dir / "code.md").write_text(
+                "# Audit Code Name\n\nVerdict : PASS\n",
+                encoding="utf-8",
+            )
+            (code_dir / "2026-11-22-audit-code-01.md").write_text(
+                "# Audit Code Interdit\n\nVerdict : BLOQUANT\n",
+                encoding="utf-8",
+            )
+
+            db_path = root / "bridge" / "bridge.db"
+            missing_db = root / "absent" / "bridge.db"
+            _create_workspaces_bridge_db(db_path, [("gravity-studio", ws, "Gravity Studio")])
+
+            # 1) workspace_dirs, include_cwd=True et bridge_db ciblent uniquement audits/agents/
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(ws)
+                with mock.patch.dict(os.environ, {"GRAVITY_AUDITS_DIR": ""}, clear=False):
+                    roots_cwd = discover_audit_roots(bridge_db=missing_db, include_cwd=True)
+                    self.assertEqual(len(roots_cwd), 1)
+                    self.assertEqual(roots_cwd[0]["path"], agents_dir.resolve())
+                    self.assertEqual(roots_cwd[0]["workspace"], "gravity-studio")
+
+                    audits_ws, _ = list_audits(workspace_dirs=[ws], bridge_db=missing_db, include_cwd=False)
+                    self.assertEqual(
+                        {a["filename"] for a in audits_ws},
+                        {"2026-11-22-audit-01.md", "code.md"},
+                    )
+
+                    audits_bridge, _ = list_audits(bridge_db=db_path, include_cwd=False)
+                    self.assertEqual(
+                        {a["filename"] for a in audits_bridge},
+                        {"2026-11-22-audit-01.md", "code.md"},
+                    )
+
+                    # Chemins relatifs (".", "audits", "audits/agents", workspace_dirs=["."])
+                    roots_rel_ws = discover_audit_roots(workspace_dirs=["."], bridge_db=missing_db, include_cwd=False)
+                    self.assertEqual(roots_rel_ws[0]["workspace"], "gravity-studio")
+                    self.assertEqual(roots_rel_ws[0]["path"], agents_dir.resolve())
+
+                    roots_rel_audits = discover_audit_roots(audits_dir="audits", include_cwd=False)
+                    self.assertEqual(roots_rel_audits[0]["workspace"], "gravity-studio")
+                    self.assertEqual(roots_rel_audits[0]["path"], agents_dir.resolve())
+
+                    roots_rel_agents = discover_audit_roots(audits_dir="audits/agents", include_cwd=False)
+                    self.assertEqual(roots_rel_agents[0]["workspace"], "gravity-studio")
+                    self.assertEqual(roots_rel_agents[0]["path"], agents_dir.resolve())
+
+                os.chdir(agents_dir)
+                roots_dot_agents = discover_audit_roots(audits_dir=".", include_cwd=False)
+                self.assertEqual(roots_dot_agents[0]["workspace"], "gravity-studio")
+                self.assertEqual(roots_dot_agents[0]["path"], agents_dir.resolve())
+
+                os.chdir(code_dir)
+                self.assertEqual(discover_audit_roots(audits_dir=".", include_cwd=False), [])
+            finally:
+                os.chdir(old_cwd)
+
+            # 2) $GRAVITY_AUDITS_DIR=<ws>/audits bascule vers <ws>/audits/agents sans code/
+            with mock.patch.dict(os.environ, {"GRAVITY_AUDITS_DIR": str(ws / "audits")}, clear=False):
+                audits_env, roots_env = list_audits(include_cwd=False)
+                self.assertEqual(len(roots_env), 1)
+                self.assertEqual(roots_env[0]["workspace"], "gravity-studio")
+                self.assertEqual(
+                    {a["filename"] for a in audits_env},
+                    {"2026-11-22-audit-01.md", "code.md"},
+                )
+
+            # 3) Rejet explicite de audits_dir=<ws>/audits/code
+            self.assertEqual(discover_audit_roots(audits_dir=code_dir, include_cwd=False), [])
+            audits_code_only, roots_code_only = list_audits(audits_dir=code_dir, include_cwd=False)
+            self.assertEqual(audits_code_only, [])
+            self.assertEqual(roots_code_only, [])
+            with self.assertRaises(FileNotFoundError) as ctx:
+                read_audit("2026-11-22-audit-code-01.md", audits_dir=code_dir, include_cwd=False)
+            self.assertIn("audits/agents/", str(ctx.exception))
+
+            with self.assertRaises((ValueError, FileNotFoundError)):
+                read_audit(
+                    "gravity-studio:../code/2026-11-22-audit-code-01.md",
+                    workspace_dirs=[ws],
+                    include_cwd=False,
+                )
+
+            # 4) Exclusion défensive d'un sous-dossier code/ sous audits_dir explicite sans agents/
+            flat_env = root / "env-audits-flat"
+            (flat_env / "code").mkdir(parents=True)
+            (flat_env / "sub" / "code").mkdir(parents=True)
+            (flat_env / "README.md").write_text("# Index Plat\n", encoding="utf-8")
+            (flat_env / "code.md").write_text("# Fichier code.md autorisé\n", encoding="utf-8")
+            (flat_env / "code" / "2026-11-22-audit-code-01.md").write_text("# Code 1\n", encoding="utf-8")
+            (flat_env / "sub" / "code" / "nested.md").write_text("# Code 2\n", encoding="utf-8")
+
+            flat_audits, flat_roots = list_audits(audits_dir=flat_env, include_cwd=False)
+            self.assertEqual({a["filename"] for a in flat_audits}, {"README.md", "code.md"})
+            flat_root_id = flat_roots[0]["root_id"]
+            with self.assertRaises(ValueError):
+                read_audit(f"{flat_root_id}:code/2026-11-22-audit-code-01.md", audits_dir=flat_env, include_cwd=False)
+            with self.assertRaises(ValueError):
+                read_audit(f"{flat_root_id}:sub/code/nested.md", audits_dir=flat_env, include_cwd=False)
+            ok_code_file = read_audit(f"{flat_root_id}:code.md", audits_dir=flat_env, include_cwd=False)
+            self.assertEqual(ok_code_file["title"], "Fichier code.md autorisé")
 
 
 if __name__ == "__main__":

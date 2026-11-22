@@ -106,6 +106,7 @@ class TestMcpServer(unittest.TestCase):
             expected_version = json.loads(
                 (PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8")
             )["version"]
+            self.assertEqual(expected_version, "0.4.1")
             self.assertEqual(by_id[1]["serverInfo"]["name"], "gravity-metrics")
             self.assertEqual(by_id[1]["serverInfo"]["version"], expected_version)
             self.assertEqual(by_id[2], {})
@@ -128,6 +129,10 @@ class TestMcpServer(unittest.TestCase):
                 "metrics_read_audit",
             ):
                 self.assertEqual(tools[helper_name]["_meta"]["ui"]["visibility"], ["app"])
+            self.assertIn("Audits Agents", tools["metrics_list_audits"]["title"])
+            self.assertIn("audits/agents/", tools["metrics_list_audits"]["description"])
+            self.assertIn("Audit Agent", tools["metrics_read_audit"]["title"])
+            self.assertIn("audits/agents/", tools["metrics_read_audit"]["description"])
 
             res_list = by_id[4]["resources"]
             self.assertEqual(len(res_list), 1)
@@ -148,7 +153,8 @@ class TestMcpServer(unittest.TestCase):
                 "Vue d'ensemble",
                 "Rapports",
                 "À archiver",
-                "Audits",
+                "Audits Agents",
+                "audits/agents/",
                 "Comparer A vs B",
                 "renderSafeMarkdown",
                 "renderProjectShareBars",
@@ -387,22 +393,29 @@ class TestMcpServer(unittest.TestCase):
             root = Path(tmp)
             store = root / "store"
             brain = root / "brain"
-            audits_dir = root / "studio" / "audits"
-            audits_dir.mkdir(parents=True)
+            audits_base = root / "studio" / "audits"
+            agents_dir = audits_base / "agents"
+            code_dir = audits_base / "code"
+            agents_dir.mkdir(parents=True)
+            code_dir.mkdir(parents=True)
             self._seed_store(store, brain)
 
-            (audits_dir / "README.md").write_text(
-                "# Matrice Audits\n\nVerdict : PASS\n\nIndex principal.\n",
+            (agents_dir / "README.md").write_text(
+                "# Matrice Audits Agents\n\nVerdict : PASS\n\nIndex principal.\n",
                 encoding="utf-8",
             )
-            (audits_dir / "2026-11-22-audit-alpha.md").write_text(
+            (agents_dir / "2026-11-22-audit-alpha.md").write_text(
                 "# Audit Alpha\n\nVerdict : NON BLOQUANT\n\nConcerne 11111111-aaaa-bbbb-cccc-000000000001.\n",
                 encoding="utf-8",
             )
-            (audits_dir / "ignore.txt").write_text("texte brut", encoding="utf-8")
+            (code_dir / "2026-11-22-audit-code-01.md").write_text(
+                "# Audit Code Interdit\n\nVerdict : BLOQUANT\n\nConcerne 22222222-aaaa-bbbb-cccc-000000000002.\n",
+                encoding="utf-8",
+            )
+            (agents_dir / "ignore.txt").write_text("texte brut", encoding="utf-8")
             (root / "secret.md").write_text("# Secret\n", encoding="utf-8")
 
-            env_extra = {"GRAVITY_AUDITS_DIR": str(audits_dir)}
+            env_extra = {"GRAVITY_AUDITS_DIR": str(audits_base)}
             resps = _call_mcp_stdio(
                 [
                     {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {"view": "audits"}}},
@@ -411,6 +424,8 @@ class TestMcpServer(unittest.TestCase):
                     {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "metrics_read_audit", "arguments": {"audit_id": "studio:2026-11-22-audit-alpha.md"}}},
                     {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "metrics_read_audit", "arguments": {"audit_id": "studio:../secret.md"}}},
                     {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "metrics_read_audit", "arguments": {"audit_id": "studio:ignore.txt"}}},
+                    {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "metrics_read_audit", "arguments": {"audit_id": "studio:../code/2026-11-22-audit-code-01.md"}}},
+                    {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "metrics_read_audit", "arguments": {"audit_id": "studio:code/2026-11-22-audit-code-01.md"}}},
                 ],
                 store,
                 brain,
@@ -425,6 +440,7 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual({p["project"] for p in by_proj}, {"ProjA", "ProjB"})
             self.assertAlmostEqual(sum(p["share_pct"] for p in by_proj), 100.0, delta=0.2)
             self.assertIn("11111111-aaaa-bbbb-cccc-000000000001", sc_open["audit_links_by_session"])
+            self.assertNotIn("22222222-aaaa-bbbb-cccc-000000000002", sc_open["audit_links_by_session"])
 
             sc_state = by_id[2]["structuredContent"]
             self.assertEqual(sc_state["audits_count"], 2)
@@ -433,15 +449,39 @@ class TestMcpServer(unittest.TestCase):
             sc_list = by_id[3]["structuredContent"]
             self.assertEqual(sc_list["count"], 2)
             self.assertTrue(sc_list["audits"][0]["is_index"])
+            self.assertEqual(
+                {a["filename"] for a in sc_list["audits"]},
+                {"README.md", "2026-11-22-audit-alpha.md"},
+            )
 
             self.assertFalse(by_id[4]["isError"])
             audit_obj = by_id[4]["structuredContent"]["audit"]
+            self.assertEqual(audit_obj["workspace"], "studio")
             self.assertEqual(audit_obj["title"], "Audit Alpha")
             self.assertEqual(audit_obj["verdict_tone"], "ok")
             self.assertEqual(audit_obj["linked_sessions"][0]["label"], "alpha-run")
 
             self.assertTrue(by_id[5]["isError"])
             self.assertTrue(by_id[6]["isError"])
+            self.assertTrue(by_id[7]["isError"])
+            self.assertTrue(by_id[8]["isError"])
+
+            # GRAVITY_AUDITS_DIR pointant directement sur audits/code => count == 0
+            resps_code = _call_mcp_stdio(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {"view": "audits"}}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "metrics_list_audits", "arguments": {}}},
+                    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "metrics_read_audit", "arguments": {"audit_id": "2026-11-22-audit-code-01.md"}}},
+                ],
+                store,
+                brain,
+                extra_env={"GRAVITY_AUDITS_DIR": str(code_dir)},
+            )
+            by_id_code = {r["id"]: r["result"] for r in resps_code}
+            self.assertEqual(by_id_code[1]["structuredContent"]["audits_count"], 0)
+            self.assertEqual(by_id_code[2]["structuredContent"]["count"], 0)
+            self.assertEqual(by_id_code[2]["structuredContent"]["audits"], [])
+            self.assertTrue(by_id_code[3]["isError"])
 
 
 if __name__ == "__main__":

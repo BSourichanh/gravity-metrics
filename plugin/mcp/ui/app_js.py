@@ -829,7 +829,7 @@ APP_JS = r"""
       { id: "overview", label: "Vue d'ensemble", badge: "" },
       { id: "reports", label: "Rapports", badge: String(scopedCount) },
       { id: "pending", label: "À archiver", badge: String(pendCount), warn: pendCount > 0 },
-      { id: "audits", label: "Audits", badge: String(audCount) }
+      { id: "audits", label: "Audits Agents", badge: String(audCount) }
     ];
     let tabsHtml = '<nav class="nav-tabs" aria-label="Navigation principale">';
     tabs.forEach((t) => {
@@ -1504,13 +1504,13 @@ APP_JS = r"""
     });
 
     const masterPane = '<aside class="master-pane' + (state.auditsShowListMobile ? '' : ' hide-mobile') + '">' +
-      '<input id="gm-audit-search" type="search" placeholder="Rechercher audit, verdict..." value="' + esc(state.auditSearch) + '" />' +
+      '<input id="gm-audit-search" type="search" placeholder="Rechercher audit agent, verdict..." value="' + esc(state.auditSearch) + '" />' +
       '<div class="filters" style="margin-bottom:0;">' +
       '<select id="gm-audit-ws" style="flex:1 1 110px;">' + wsOpts + '</select>' +
       '<select id="gm-audit-verdict" style="flex:1 1 110px;">' + vOpts + '</select>' +
       '</div>' +
       '<div class="master-list">' +
-      (state.auditsLoading && !state.audits.length ? '<div class="empty">Découverte des audits...</div>' : (itemsHtml || '<div class="empty">Aucun audit Markdown trouvé.</div>')) +
+      (state.auditsLoading && !state.audits.length ? '<div class="empty">Découverte des audits...</div>' : (itemsHtml || '<div class="empty">Aucun audit agent Markdown trouvé.</div>')) +
       '</div></aside>';
 
     const quickOpts = ordered.map((a) =>
@@ -1520,8 +1520,8 @@ APP_JS = r"""
 
     const navBar = '<div class="sticky-nav">' +
       '<div class="sticky-nav-group">' +
-      '<button type="button" class="btn sm only-narrow" data-action="toggle-audits-list">' + (state.auditsShowListMobile ? 'Masquer liste' : 'Audits (' + ordered.length + ')') + '</button>' +
-      '<select id="gm-quick-audit" aria-label="Sélecteur rapide d’audit">' + (quickOpts || '<option value="">Aucun audit</option>') + '</select>' +
+      '<button type="button" class="btn sm only-narrow" data-action="toggle-audits-list">' + (state.auditsShowListMobile ? 'Masquer liste' : 'Audits Agents (' + ordered.length + ')') + '</button>' +
+      '<select id="gm-quick-audit" aria-label="Sélecteur rapide d’audit agent">' + (quickOpts || '<option value="">Aucun audit agent</option>') + '</select>' +
       '</div>' +
       '<button type="button" class="btn sm" data-action="reload-audits">Actualiser audits</button>' +
       '</div>';
@@ -1531,7 +1531,7 @@ APP_JS = r"""
       readerHtml = '<div class="panel"><div class="empty">Lecture de l’audit...</div></div>';
     } else if (!state.selectedAudit) {
       readerHtml = '<div class="panel"><div class="empty">' +
-        (ordered.length ? 'Sélectionnez un fichier Markdown dans la liste.' : 'Aucun dossier <code>audits/</code> détecté (configurez <code>$GRAVITY_AUDITS_DIR</code> ou un workspace Bridge).') +
+        (ordered.length ? 'Sélectionnez un fichier Markdown dans la liste.' : 'Aucun dossier <code>audits/agents/</code> détecté (configurez <code>$GRAVITY_AUDITS_DIR</code> ou un workspace Bridge).') +
         '</div></div>';
     } else {
       const a = state.selectedAudit;
@@ -1942,7 +1942,7 @@ APP_JS = r"""
   async function initBridge() {
     try {
       const initRes = await sendRequest("ui/initialize", {
-        appInfo: { name: "gravity-metrics", version: "0.4.0" },
+        appInfo: { name: "gravity-metrics", version: "0.4.1" },
         appCapabilities: {},
         protocolVersion: PROTOCOL_VERSION
       });

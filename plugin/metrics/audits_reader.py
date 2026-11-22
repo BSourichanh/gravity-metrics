@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Découverte et lecture sécurisée en lecture seule des dossiers audits/ (100 % stdlib)."""
+"""Découverte et lecture sécurisée en lecture seule des dossiers audits/agents/ (100 % stdlib)."""
 
 from contextlib import closing
 from datetime import datetime, timezone
@@ -78,6 +78,43 @@ def _load_bridge_workspace_dirs(bridge_db: Optional[Union[Path, str]] = None) ->
     return out
 
 
+def _is_audits_code_dir(path: Path) -> bool:
+    """Retourne True si le chemin désigne un dossier `audits/code`."""
+    return path.name.lower() == "code" and path.parent.name.lower() == "audits"
+
+
+def _is_code_audit_path(
+    root_resolved: Path,
+    file_path: Path,
+    resolved_file: Optional[Path] = None,
+) -> bool:
+    """Exclut tout fichier situé sous un répertoire `code/` ou `audits/code/`."""
+    resolved = resolved_file or file_path.resolve()
+    for candidate in (file_path, resolved):
+        try:
+            rel_parts = candidate.relative_to(root_resolved).parts
+        except ValueError:
+            return True
+        if any(part.lower() == "code" for part in rel_parts[:-1]):
+            return True
+    dir_parts = [part.lower() for part in resolved.parts[:-1]]
+    return any(
+        dir_parts[idx] == "audits" and dir_parts[idx + 1] == "code"
+        for idx in range(len(dir_parts) - 1)
+    )
+
+
+def _workspace_label(ws_path: Path, explicit_name: str = "") -> str:
+    if explicit_name:
+        return explicit_name
+    if ws_path.name:
+        return ws_path.name
+    try:
+        return ws_path.resolve().name or "workspace"
+    except OSError:
+        return "workspace"
+
+
 def discover_audit_roots(
     *,
     audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
@@ -85,8 +122,8 @@ def discover_audit_roots(
     bridge_db: Optional[Union[Path, str]] = None,
     include_cwd: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Découvre les dossiers `audits/` en lecture seule selon la priorité Gravity."""
-    candidates: List[Tuple[str, Path, str]] = []
+    """Découvre les dossiers `audits/agents/` en lecture seule selon la priorité Gravity."""
+    candidates: List[Tuple[str, Path, str, bool]] = []
 
     if audits_dir is not None:
         if isinstance(audits_dir, (str, Path)):
@@ -94,32 +131,57 @@ def discover_audit_roots(
         else:
             raw_list = [Path(p).expanduser() for p in audits_dir]
         for p in raw_list:
-            candidates.append((p.parent.name or p.name or "audits", p, "explicit"))
+            candidates.append(("", p, "explicit", True))
     else:
         env_audits = os.environ.get("GRAVITY_AUDITS_DIR", "").strip()
         if env_audits:
             for p in _split_env_dirs(env_audits):
-                candidates.append((p.parent.name or p.name or "audits", p, "env"))
+                candidates.append(("", p, "env", True))
         else:
             if workspace_dirs:
                 for ws in workspace_dirs:
                     ws_path = Path(ws).expanduser()
-                    candidates.append((ws_path.name or "workspace", ws_path / "audits", "workspace"))
+                    candidates.append(
+                        (_workspace_label(ws_path), ws_path / "audits" / "agents", "workspace", False)
+                    )
             if include_cwd:
                 cwd = Path.cwd()
-                candidates.append((cwd.name or "workspace", cwd / "audits", "workspace"))
+                candidates.append(
+                    (_workspace_label(cwd), cwd / "audits" / "agents", "workspace", False)
+                )
             for ws_name, ws_path in _load_bridge_workspace_dirs(bridge_db):
-                candidates.append((ws_name or ws_path.name or "workspace", ws_path / "audits", "bridge_db"))
+                candidates.append(
+                    (_workspace_label(ws_path, ws_name), ws_path / "audits" / "agents", "bridge_db", False)
+                )
 
     roots: List[Dict[str, Any]] = []
     seen_paths: Set[str] = set()
     used_ids: Set[str] = set()
 
-    for ws_label, root_path, source in candidates:
+    for ws_label_hint, root_path, source, is_direct in candidates:
         try:
+            if is_direct:
+                abs_path = Path(os.path.abspath(str(root_path)))
+                if _is_audits_code_dir(abs_path):
+                    continue
             if not root_path.is_dir():
                 continue
             resolved = root_path.resolve()
+            if _is_audits_code_dir(resolved):
+                continue
+            if is_direct:
+                agents_sub = resolved / "agents"
+                if agents_sub.is_dir():
+                    agents_resolved = agents_sub.resolve()
+                    if _is_audits_code_dir(agents_sub) or _is_audits_code_dir(agents_resolved):
+                        continue
+                    resolved = agents_resolved
+                if resolved.name.lower() == "agents" and resolved.parent.name.lower() == "audits":
+                    ws_label = resolved.parent.parent.name or resolved.parent.name or resolved.name or "audits"
+                else:
+                    ws_label = resolved.parent.name or resolved.name or "audits"
+            else:
+                ws_label = ws_label_hint or "workspace"
             key = _norm_key(resolved)
         except OSError:
             continue
@@ -369,9 +431,12 @@ def _resolve_audit_target(
 
     for root in matched_roots:
         root_resolved = root["path"].resolve()
-        candidate = (root_resolved / rel_part).resolve()
+        unresolved_candidate = root_resolved / rel_part
+        candidate = unresolved_candidate.resolve()
         if not candidate.is_relative_to(root_resolved):
             raise ValueError(f"Path traversal détecté : {audit_id!r}")
+        if _is_code_audit_path(root_resolved, unresolved_candidate, candidate):
+            raise ValueError(f"Accès aux audits de code interdit : {audit_id!r}")
         if candidate.suffix.lower() != ".md":
             raise ValueError("Seuls les fichiers Markdown (.md) peuvent être lus.")
         if candidate.is_file():
@@ -391,7 +456,7 @@ def list_audits(
     bridge_db: Optional[Union[Path, str]] = None,
     include_cwd: bool = True,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-    """Liste les fichiers `.md` découverts dans les dossiers `audits/` en lecture seule."""
+    """Liste les fichiers `.md` découverts dans les dossiers `audits/agents/` (hors `audits/code/`) en lecture seule."""
     roots = discover_audit_roots(
         audits_dir=audits_dir,
         workspace_dirs=workspace_dirs,
@@ -411,6 +476,8 @@ def list_audits(
                     continue
                 resolved_file = fpath.resolve()
                 if not resolved_file.is_relative_to(root_resolved):
+                    continue
+                if _is_code_audit_path(root_resolved, fpath, resolved_file):
                     continue
                 audits.append(
                     _build_audit_record(root, resolved_file, records=records, include_content=False)
@@ -462,7 +529,7 @@ def read_audit(
         include_cwd=include_cwd,
     )
     if not roots:
-        raise FileNotFoundError("Aucun dossier audits/ découvert.")
+        raise FileNotFoundError("Aucun dossier audits/agents/ découvert.")
     root, target = _resolve_audit_target(audit_id, roots)
     return _build_audit_record(root, target, records=records, include_content=True)
 

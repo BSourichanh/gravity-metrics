@@ -14,7 +14,7 @@
 gravity-metrics/
 ├── install.py                              # Cross-platform installer / uninstaller (atomic copy + agy)
 ├── plugin/                                 # Standalone plugin ready to install
-│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.4.0)
+│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.4.1)
 │   ├── hooks.json                          # PreInvocation hook (pre-capture on /gravity-metrics)
 │   ├── mcp_config.json                     # MCP App stdio server configuration
 │   ├── README.md                           # Plugin documentation (French)
@@ -30,7 +30,7 @@ gravity-metrics/
 │   └── scripts/                            # cli.py + validate.py (--strict, --fix-python-cmd)
 ├── tests/                                  # Unit & integrity test suite (engine, hook, MCP server, audits_reader, installer)
 ├── AGENTS.md
-├── CHANGELOG.md                            # Release notes (v0.4.0)
+├── CHANGELOG.md                            # Release notes (v0.4.1)
 ├── LICENSE
 └── README.md
 ```
@@ -88,7 +88,7 @@ Open anytime with **zero LLM tokens** from **Plugins > Gravity Metrics** in the 
   - **`Vue d'ensemble` (`overview`):** KPI cards, **`by_project`** `%` cost distribution (click-to-filter), SVG evolution & category charts, and sortable history table.
   - **`Rapports` (`reports`):** Master-Detail layout (`global`), sticky `← Préc. | Quick Selector | Suiv. →` + `Alt+←`/`Alt+→` navigation (`aux_pane`), detail sub-tabs (`Synthèse & Dossiers (%)` with **`by_workspace`** `%` bars & `2.0.0` fallback, `Agents & Bridge`, `Diagnostic & Outils`), and **`A vs B`** comparator.
   - **`À archiver` (`pending`):** unarchived root Gravity sessions queue with one-click immutable archiving (`metrics_archive_session`, Bridge job-safety guards).
-  - **`Audits` (`audits`):** read-only discovery (`$GRAVITY_AUDITS_DIR` > `<workspace>/audits/` > `bridge.db` `?mode=ro`), anti-XSS Markdown reader, pinned `README.md` index, and bidirectional Audit ↔ Report cross-links.
+  - **`Audits Agents` (`audits`):** read-only discovery (`$GRAVITY_AUDITS_DIR` > `<workspace>/audits/agents/` > `<canonical_path>/audits/agents/` via `bridge.db` `?mode=ro`, excluding `audits/code/`), anti-XSS Markdown reader, pinned `README.md` index, and bidirectional Audit ↔ Report cross-links.
 - **Tariff & actions:** `2026` vs `Proj. 2027` toggle, 4s visibility-aware auto-refresh, **Ouvrir `.md`**, **Joindre au prompt**, **Analyser**, and **Supprimer** (with optional `reports/` purge).
 
 ### MCP App Tools & Resource (`plugin/mcp/server.py`)
@@ -100,8 +100,8 @@ Open anytime with **zero LLM tokens** from **Plugins > Gravity Metrics** in the 
 | `metrics_get_session` | `app` | Loads detailed JSON session metrics (`reports/<slug>.json` or live recompute fallback) |
 | `metrics_archive_session` | `app` | Analyzes and immutably archives a pending Gravity session (respects Bridge active-job guards and `force`) |
 | `metrics_remove_session` | `app` | Removes a session from history (with optional `purge_reports`) and regenerates `METRICS.md` |
-| `metrics_list_audits` | `app` | Discovers read-only `.md` files in `audits/` directories and session cross-links |
-| `metrics_read_audit` | `app` | Safely reads an allowed `.md` audit (anti-traversal, `.md`-only, 256 KiB cap + `truncated`) |
+| `metrics_list_audits` | `app` | Discovers read-only `.md` files in `audits/agents/` directories (excluding `audits/code/`) and session cross-links |
+| `metrics_read_audit` | `app` | Safely reads an allowed `.md` audit from `audits/agents/` (anti-traversal, `.md`-only, excludes `audits/code/`, 256 KiB cap + `truncated`) |
 | `ui://gravity-metrics/dashboard.html` | UI Resource | Modular self-contained HTML/SVG/JS widget assembled from `plugin/mcp/ui/` (`text/html;profile=mcp-app`) |
 
 ---
@@ -141,7 +141,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 ## 5. Documentation & Releases
 
-- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.2.0`, `v0.3.0`, `v0.4.0`)
+- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.4.1`)
 - [`plugin/README.md`](plugin/README.md) — Plugin documentation (French)
 - [`AGENTS.md`](AGENTS.md) — Repository invariants and verification commands
 

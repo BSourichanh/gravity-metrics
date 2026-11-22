@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-22
+
+### Changed
+- **Strict `audits/agents/` Scoping & `audits/code/` Exclusion (`plugin/metrics/audits_reader.py`):**
+  - Updated `discover_audit_roots()` so `workspace_dirs`, `include_cwd=True`, and `bridge.db` (`?mode=ro`) target `<workspace>/audits/agents` instead of `<workspace>/audits`.
+  - Automatically redirects explicit `audits_dir` / `$GRAVITY_AUDITS_DIR` pointing to a parent folder containing `agents/` (e.g., `<ws>/audits`) toward `<dir>/agents`, while ignoring any `audits/code` directory and preserving workspace name extraction (`root["workspace"]` / `root_id`) on both absolute and relative paths (`.`, `audits`, `audits/agents`).
+  - Added defensive `_is_code_audit_path()` checks in `list_audits()` and `_resolve_audit_target()` to reject or exclude any file under a `code/` or `audits/code/` directory segment without blocking legitimate files named `code.md` inside `agents/`.
+- **`Audits Agents` Tab & MCP Descriptions (`plugin/mcp/ui/app_js.py`, `plugin/mcp/server.py`, `plugin/plugin.json`, `README.md`, `plugin/README.md`):**
+  - Renamed the displayed UI tab label from `"Audits"` to `"Audits Agents"` and updated search placeholder, mobile button, quick selector, and empty state (`audits/agents/`), while preserving `view="audits"` and tool names `metrics_list_audits` / `metrics_read_audit`.
+  - Updated `metrics_list_audits` and `metrics_read_audit` MCP titles/descriptions to explicitly reference `audits/agents/` (`Audits Agents`), and bumped manifest, MCP server, and widget versions to `0.4.1`.
+
 ## [0.4.0] - 2026-11-22
 
 ### Added

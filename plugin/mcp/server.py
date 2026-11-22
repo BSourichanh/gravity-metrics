@@ -33,7 +33,7 @@ from metrics import (  # noqa: E402
 from mcp.widget_html import render_mcp_widget_html  # noqa: E402
 
 SERVER_NAME = "gravity-metrics"
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "0.4.1"
 APP_URI = "ui://gravity-metrics/dashboard.html"
 APP_MIME = "text/html;profile=mcp-app"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
@@ -326,8 +326,8 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "metrics_list_audits",
-            "title": "Lister les audits Markdown",
-            "description": "Découvre en lecture seule les fichiers Markdown des dossiers audits/ et leurs liens de sessions.",
+            "title": "Lister les Audits Agents Markdown",
+            "description": "Découvre en lecture seule les fichiers Markdown des dossiers audits/agents/ (onglet Audits Agents, hors audits/code/) et leurs liens de sessions.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -347,8 +347,8 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "metrics_read_audit",
-            "title": "Lire un audit Markdown",
-            "description": "Lit en lecture seule un fichier .md autorisé d'un dossier audits/ (plafond 256 Ko).",
+            "title": "Lire un Audit Agent Markdown",
+            "description": "Lit en lecture seule un fichier .md autorisé d'un dossier audits/agents/ (onglet Audits Agents, hors audits/code/, plafond 256 Ko).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -24,7 +24,7 @@ Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque s
   - **`Vue d'ensemble` (`overview`) :** KPIs, répartition `%` par projet (`by_project`), courbes SVG et tableau filtrable.
   - **`Rapports` (`reports`) :** vue Master-Detail (`global`), barre rapide `← Préc. | Sélecteur | Suiv. →` + `Alt+←`/`Alt+→` (`aux_pane`), sous-onglets (`Synthèse & Dossiers (%)` avec `by_workspace`, `Agents & Bridge`, `Diagnostic & Outils`) et comparateur **`A vs B`**.
   - **`À archiver` (`pending`) :** file des sessions Gravity racines en attente avec archivage immuable (`metrics_archive_session`, garde-fous Bridge).
-  - **`Audits` (`audits`) :** découverte lecture seule (`$GRAVITY_AUDITS_DIR` > `<workspace>/audits/` > `bridge.db`), lecteur Markdown anti-XSS, `README.md` épinglé et liens croisés bidirectionnels Audit ↔ Rapports.
+  - **`Audits Agents` (`audits`) :** découverte lecture seule (`$GRAVITY_AUDITS_DIR` > `<workspace>/audits/agents/` > `<canonical_path>/audits/agents/` via `bridge.db` `?mode=ro`, hors `audits/code/`), lecteur Markdown anti-XSS, `README.md` épinglé et liens croisés bidirectionnels Audit ↔ Rapports.
 - **Actions & synchronisation :** rafraîchissement automatique toutes les `4s` lorsque le widget est visible, comparateur `2026` / `Proj. 2027`, **Ouvrir .md**, **Joindre au prompt**, **Analyser** et **Supprimer** (avec purge optionnelle de `reports/`).
 
 ## Stockage centralisé
