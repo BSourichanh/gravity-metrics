@@ -117,7 +117,12 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual(open_meta["ui"]["visibility"], ["model", "app"])
             eps = open_meta["com.google.antigravity/ui"]["entrypoints"]
             self.assertEqual({e["type"] for e in eps}, {"aux_pane", "global"})
-            for helper_name in ("metrics_get_state", "metrics_get_session", "metrics_remove_session"):
+            for helper_name in (
+                "metrics_get_state",
+                "metrics_get_session",
+                "metrics_archive_session",
+                "metrics_remove_session",
+            ):
                 self.assertEqual(tools[helper_name]["_meta"]["ui"]["visibility"], ["app"])
 
             res_list = by_id[4]["resources"]
@@ -277,6 +282,93 @@ class TestMcpServer(unittest.TestCase):
             sc = resps[0]["result"]["structuredContent"]
             self.assertEqual(len(sc["records"]), 2)
             self.assertEqual(sc["projects"], ["ProjA", "ProjB"])
+
+    def test_pending_sessions_and_archive_tool_with_bridge_guard(self) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            bridge_home = root / "bridge"
+            bridge_home.mkdir()
+            db_path = bridge_home / "bridge.db"
+
+            cid_root = "55555555-aaaa-bbbb-cccc-000000000005"
+            cid_bridge = "66666666-aaaa-bbbb-cccc-000000000006"
+            _write_transcript(
+                brain / cid_root,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T14:00:00Z", "content": "/gravity-bridge send"},
+                    {
+                        "step_index": 1,
+                        "type": "PLANNER_RESPONSE",
+                        "status": "DONE",
+                        "created_at": "2026-11-22T14:00:10Z",
+                        "model": "gemini-3.8-flash-tiered",
+                        "input_tokens": 10_000,
+                        "cache_read_tokens": 20_000,
+                        "output_tokens": 400,
+                        "tool_calls": [],
+                    },
+                ],
+            )
+            _write_transcript(
+                brain / cid_bridge,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T14:00:20Z", "content": "[GRAVITY-BRIDGE | thread=thr-20261122-mcp1]"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T14:00:30Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                ],
+            )
+
+            con = sqlite3.connect(str(db_path))
+            con.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, msg_type TEXT, status TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, created_at TEXT)"
+            )
+            con.execute(
+                "CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, action TEXT, target_conversation_id TEXT, status TEXT, created_at TEXT)"
+            )
+            con.execute(
+                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("thr-20261122-mcp1", "gravity-studio", "gravity-metrics", "handoff", "open", cid_bridge, cid_root, "2026-11-22T14:00:15Z"),
+            )
+            con.execute(
+                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("job-mcp1", "thr-20261122-mcp1", "gravity-metrics", "new_conversation", cid_bridge, "queued", "2026-11-22T14:00:15Z"),
+            )
+            con.commit()
+            con.close()
+
+            env_extra = {"GRAVITY_BRIDGE_HOME": str(bridge_home)}
+            resps = _call_mcp_stdio(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "metrics_get_state", "arguments": {}}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "metrics_archive_session", "arguments": {"conversation_id": cid_root[:8], "label": "mcp-run"}}},
+                    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "metrics_archive_session", "arguments": {"conversation_id": cid_root[:8], "label": "mcp-run", "force": True}}},
+                    {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "metrics_archive_session", "arguments": {"conversation_id": cid_root[:8], "label": "mcp-other", "force": False}}},
+                ],
+                store,
+                brain,
+                extra_env=env_extra,
+            )
+            by_id = {r["id"]: r["result"] for r in resps}
+
+            pend = by_id[1]["structuredContent"]["pending_sessions"]
+            self.assertEqual([p["conversation_id"] for p in pend], [cid_root])
+            self.assertTrue(pend[0]["has_pending_bridge_jobs"])
+
+            self.assertTrue(by_id[2]["isError"])
+            self.assertIn("--force", by_id[2]["content"][0]["text"])
+
+            self.assertFalse(by_id[3]["isError"])
+            arch_sc = by_id[3]["structuredContent"]
+            self.assertEqual(arch_sc["archived"]["label"], "mcp-run")
+            self.assertEqual(arch_sc["archived"]["agents"], 2)
+            self.assertEqual(arch_sc["pending_sessions"], [])
+
+            self.assertFalse(by_id[4]["isError"])
+            self.assertTrue(by_id[4]["structuredContent"]["already_archived"])
+            self.assertEqual(by_id[4]["structuredContent"]["archived"]["label"], "mcp-run")
 
 
 if __name__ == "__main__":

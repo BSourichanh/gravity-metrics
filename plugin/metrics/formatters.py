@@ -51,3 +51,18 @@ def _format_models_summary(rec: Dict[str, Any]) -> str:
         key=lambda kv: (-int(kv[1].get("calls") or 0), -float(kv[1].get("cost_usd") or 0.0), kv[0]),
     )
     return ", ".join(f"`{m_name}` ({int(m_data.get('calls') or 0)})" for m_name, m_data in items)
+
+
+def _status_badge(rec: Dict[str, Any]) -> str:
+    status = str(rec.get("status") or "archived").strip().lower()
+    return "archivé" if status == "archived" else status
+
+
+def _bridge_badge(rec: Dict[str, Any]) -> str:
+    count = int(rec.get("bridge_children_count") or 0)
+    wss = [str(w).strip() for w in (rec.get("bridge_workspaces") or []) if str(w).strip()]
+    if count <= 0 and "bridge" not in (rec.get("features_used") or []):
+        return ""
+    if wss:
+        return f"bridge:{count} ({', '.join(wss)})"
+    return f"bridge:{count}" if count > 0 else "bridge"

@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from typing import Any, Dict, Optional, Tuple, Union
 
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "2.1.0"
 
 CATEGORY_ORDER = (
     "orchestration",
@@ -45,6 +45,10 @@ TYPE_TO_CATEGORY = {
     "teamwork_challenger": "verification",
     "teamwork_auditor": "verification",
     "reviewer": "verification",
+    "bridge_handoff": "build",
+    "bridge_question": "discovery",
+    "bridge_info": "orchestration",
+    "bridge": "orchestration",
 }
 
 GENERIC_AGENT_TYPES = {"research", "self"}

@@ -2,6 +2,7 @@
 """Serveur MCP App stdio JSON-RPC 2.0 pour Gravity Metrics (100 % stdlib Python 3)."""
 
 from collections import Counter, defaultdict
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -15,8 +16,11 @@ if str(MCP_DIR) not in sys.path:
     sys.path.insert(0, str(MCP_DIR))
 
 from metrics import (  # noqa: E402
+    PendingBridgeJobsError,
     apply_remove,
+    archive_conversation,
     default_brain_dir,
+    list_pending_sessions,
     load_history,
     load_session_for_inspect,
     resolve_session_index,
@@ -26,7 +30,7 @@ from metrics import (  # noqa: E402
 from widget_html import render_mcp_widget_html  # noqa: E402
 
 SERVER_NAME = "gravity-metrics"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 APP_URI = "ui://gravity-metrics/dashboard.html"
 APP_MIME = "text/html;profile=mcp-app"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
@@ -75,14 +79,31 @@ def _resolve_slug_for_rec(rec: Optional[Dict[str, Any]], cid: str, label: str) -
     return slugify_label(label, f"session-{cid[:8]}")
 
 
+def _pending_signature(pending: List[Dict[str, Any]]) -> str:
+    compact = [
+        (
+            p.get("conversation_id"),
+            p.get("llm_calls"),
+            p.get("bridge_children_count"),
+            p.get("bridge_pending_jobs_count"),
+            p.get("updated_at"),
+        )
+        for p in pending
+    ]
+    raw = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
 def _load_state_snapshot(
     store_dir: Path, history_path: Path
-) -> Tuple[str, List[Dict[str, Any]], List[str], str]:
-    sig = _history_signature(history_path)
+) -> Tuple[str, List[Dict[str, Any]], List[str], str, List[Dict[str, Any]]]:
+    hist_sig = _history_signature(history_path)
     records = load_history(history_path)
     projects = _collect_projects(records)
     metrics_md_uri = _file_uri_if_exists(store_dir / "METRICS.md")
-    return sig, records, projects, metrics_md_uri
+    pending_sessions = list_pending_sessions(default_brain_dir(), history_path)
+    sig = f"{hist_sig}|p:{_pending_signature(pending_sessions)}"
+    return sig, records, projects, metrics_md_uri, pending_sessions
 
 
 def _tool_definitions() -> List[Dict[str, Any]]:
@@ -128,7 +149,7 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         {
             "name": "metrics_get_state",
             "title": "Lire l'état Gravity Metrics",
-            "description": "Retourne l'historique consolidé Gravity Metrics pour le widget.",
+            "description": "Retourne l'historique consolidé et les sessions en attente pour le widget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -155,6 +176,44 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     }
                 },
                 "required": ["target"],
+            },
+            "_meta": {
+                "ui": {"visibility": ["app"]},
+            },
+        },
+        {
+            "name": "metrics_archive_session",
+            "title": "Archiver une session",
+            "description": "Analyse et archive de façon immuable une session Gravity en attente.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "UUID ou préfixe unique de la conversation à archiver.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Label optionnel (auto-généré si omis).",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Note optionnelle.",
+                    },
+                    "full": {
+                        "type": "boolean",
+                        "description": "Mesurer toute la conversation au lieu de la fenêtre Gravity.",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Forcer l'archivage même si déjà archivée ou si un job Bridge est actif.",
+                    },
+                    "profile": {
+                        "type": "string",
+                        "description": "Profil tarifaire (défaut: 2026_nov_standard).",
+                    },
+                },
+                "required": ["conversation_id"],
             },
             "_meta": {
                 "ui": {"visibility": ["app"]},
@@ -205,7 +264,9 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
     brain_dir = default_brain_dir()
     catalog_path = PLUGIN_ROOT / "config" / "pricing_catalog.json"
 
-    sig, records, projects, metrics_md_uri = _load_state_snapshot(store_dir, history_path)
+    sig, records, projects, metrics_md_uri, pending_sessions = _load_state_snapshot(
+        store_dir, history_path
+    )
     proj_map = _canonical_projects_map(records)
     raw_project = str(args.get("project") or "").strip()
     initial_project = proj_map.get(raw_project.casefold(), raw_project) if raw_project else ""
@@ -252,6 +313,7 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
         "signature": sig,
         "records": records,
         "projects": projects,
+        "pending_sessions": pending_sessions,
         "metrics_md_uri": metrics_md_uri,
         "initial_scope": initial_scope,
         "initial_project": initial_project,
@@ -296,17 +358,19 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_metrics_get_state(args: Dict[str, Any]) -> Dict[str, Any]:
     store_dir, history_path = resolve_store_paths()
     since_sig = str(args.get("since_signature") or "").strip()
-    sig = _history_signature(history_path)
+    sig, records, projects, metrics_md_uri, pending_sessions = _load_state_snapshot(
+        store_dir, history_path
+    )
     if since_sig and since_sig == sig:
         return _tool_ok("Inchangé.", {"changed": False, "signature": sig})
-    sig, records, projects, metrics_md_uri = _load_state_snapshot(store_dir, history_path)
     return _tool_ok(
-        f"{len(records)} session(s) chargée(s).",
+        f"{len(records)} session(s) chargée(s), {len(pending_sessions)} en attente.",
         {
             "changed": True,
             "signature": sig,
             "records": records,
             "projects": projects,
+            "pending_sessions": pending_sessions,
             "metrics_md_uri": metrics_md_uri,
         },
     )
@@ -340,6 +404,60 @@ def _handle_metrics_get_session(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _handle_metrics_archive_session(args: Dict[str, Any]) -> Dict[str, Any]:
+    cid_arg = str(args.get("conversation_id") or "").strip()
+    if not cid_arg:
+        return _tool_err("Le paramètre 'conversation_id' est requis.")
+    store_dir, history_path = resolve_store_paths()
+    brain_dir = default_brain_dir()
+    catalog_path = PLUGIN_ROOT / "config" / "pricing_catalog.json"
+
+    label = str(args.get("label") or "").strip()
+    note = str(args.get("note") or "").strip()
+    full = bool(args.get("full", False))
+    force = bool(args.get("force", False))
+    profile = str(args.get("profile") or "2026_nov_standard").strip() or "2026_nov_standard"
+
+    try:
+        saved_rec, _, _metrics = archive_conversation(
+            cid_arg,
+            store_dir=store_dir,
+            history_path=history_path,
+            brain_dir=brain_dir,
+            catalog_path=catalog_path,
+            label=label,
+            note=note,
+            pricing_profile=profile,
+            gravity_window=not full,
+            full_conversation=full,
+            force=force,
+        )
+    except PendingBridgeJobsError as exc:
+        return _tool_err(str(exc))
+
+    sig, records, projects, metrics_md_uri, pending_sessions = _load_state_snapshot(
+        store_dir, history_path
+    )
+    already = bool(saved_rec.get("already_archived"))
+    msg = (
+        f"Session '{saved_rec.get('label')}' déjà archivée (immuable)."
+        if already
+        else f"Session '{saved_rec.get('label')}' archivée."
+    )
+    return _tool_ok(
+        msg,
+        {
+            "archived": saved_rec,
+            "already_archived": already,
+            "signature": sig,
+            "records": records,
+            "projects": projects,
+            "pending_sessions": pending_sessions,
+            "metrics_md_uri": metrics_md_uri,
+        },
+    )
+
+
 def _handle_metrics_remove_session(args: Dict[str, Any]) -> Dict[str, Any]:
     target = str(args.get("target") or "").strip()
     if not target:
@@ -352,7 +470,9 @@ def _handle_metrics_remove_session(args: Dict[str, Any]) -> Dict[str, Any]:
         history_path=history_path,
         purge_reports=purge_reports,
     )
-    sig, records, projects, metrics_md_uri = _load_state_snapshot(store_dir, history_path)
+    sig, records, projects, metrics_md_uri, pending_sessions = _load_state_snapshot(
+        store_dir, history_path
+    )
     return _tool_ok(
         f"Session '{removed.get('label')}' supprimée ({remaining} restante(s)).",
         {
@@ -361,6 +481,7 @@ def _handle_metrics_remove_session(args: Dict[str, Any]) -> Dict[str, Any]:
             "signature": sig,
             "records": records,
             "projects": projects,
+            "pending_sessions": pending_sessions,
             "metrics_md_uri": metrics_md_uri,
         },
     )
@@ -370,6 +491,7 @@ _TOOL_DISPATCH = {
     "open_metrics_dashboard": _handle_open_metrics_dashboard,
     "metrics_get_state": _handle_metrics_get_state,
     "metrics_get_session": _handle_metrics_get_session,
+    "metrics_archive_session": _handle_metrics_archive_session,
     "metrics_remove_session": _handle_metrics_remove_session,
 }
 

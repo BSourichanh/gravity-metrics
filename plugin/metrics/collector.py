@@ -3,6 +3,7 @@
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -10,6 +11,10 @@ import re
 import shlex
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
+from .bridge_links import (
+    discover_bridge_links,
+    load_bridge_target_conversation_ids,
+)
 from .pricing import (
     CATEGORY_ORDER,
     SCHEMA_VERSION,
@@ -30,14 +35,14 @@ _GRAVITY_METRICS_CMD_RE = re.compile(
 _GRAVITY_METRICS_ARGS_RE = re.compile(
     r"^/gravity-metrics(?::gravity-metrics)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL
 )
-_NON_CAPTURE_METRICS_SUBCOMMANDS: Tuple[str, ...] = ()
+_NON_CAPTURE_METRICS_SUBCOMMANDS: Tuple[str, ...] = ("archive", "pending")
 _GRAVITY_CMD_RE = re.compile(
-    r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity(?::gravity)?)(?:\s|$)",
+    r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity-architect(?::gravity-architect)?|gravity-bridge(?::gravity-bridge)?|gravity(?::gravity)?)(?:\s|$)",
     re.IGNORECASE,
 )
 _GRAVITY_LEADING_AXES_RE = re.compile(
-    r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity(?::gravity)?)"
-    r"(?:\s+(?:low|medium|high|ultra|evo|evolutive|slow|fast|safe|unsafe|auto|init|status|evals))*\s*",
+    r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity-architect(?::gravity-architect)?|gravity-bridge(?::gravity-bridge)?|gravity(?::gravity)?)"
+    r"(?:\s+(?:low|medium|high|ultra|evo|evolutive|slow|fast|safe|unsafe|auto|init|status|evals|modules|doctor|sync|spec|handoff|archive|workspaces|link|send|read|take|reply|done|prune))*\s*",
     re.IGNORECASE,
 )
 _STOPWORDS = {
@@ -138,28 +143,164 @@ def is_gravity_metrics_prompt(raw: str) -> bool:
     return bool(_GRAVITY_METRICS_CMD_RE.match(txt))
 
 
-def is_gravity_metrics_capture_prompt(raw: str) -> bool:
-    """Retourne True pour une commande de capture `/gravity-metrics`."""
-    if not is_gravity_metrics_prompt(raw):
-        return False
+def _split_metrics_tokens(raw_args: str) -> List[str]:
+    text = (raw_args or "").strip()
+    if not text:
+        return []
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def _parse_metrics_flags(tokens: List[str]) -> Tuple[Dict[str, Any], List[str], bool]:
+    """Parse les options communes de `/gravity-metrics` sans lever d'exception sur texte long."""
+    label = ""
+    note = ""
+    profile = "2026_nov_standard"
+    full = False
+    force = False
+    has_explicit_label = False
+    positionals: List[str] = []
+
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-l", "--label"):
+            if i + 1 >= len(tokens):
+                raise ValueError(f"Option {tok} sans valeur.")
+            label = tokens[i + 1]
+            has_explicit_label = True
+            i += 2
+        elif tok in ("-n", "--note"):
+            if i + 1 >= len(tokens):
+                raise ValueError(f"Option {tok} sans valeur.")
+            note = tokens[i + 1]
+            i += 2
+        elif tok == "--profile":
+            if i + 1 >= len(tokens):
+                raise ValueError("Option --profile sans valeur.")
+            profile = tokens[i + 1]
+            i += 2
+        elif tok == "--full":
+            full = True
+            i += 1
+        elif tok == "--force":
+            force = True
+            i += 1
+        elif tok.startswith("-"):
+            raise ValueError(f"Option inconnue : `{tok}`.")
+        else:
+            positionals.append(tok)
+            i += 1
+
+    return (
+        {
+            "label": label.strip(),
+            "note": note.strip(),
+            "profile": profile.strip(),
+            "full": full,
+            "force": force,
+        },
+        positionals,
+        has_explicit_label,
+    )
+
+
+def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
+    """Analyse un prompt `/gravity-metrics` et décide : passthrough, capture, archive, pending ou error."""
     txt = extract_user_request_text(raw)
+    if not _GRAVITY_METRICS_CMD_RE.match(txt):
+        return {"action": "passthrough"}
     match = _GRAVITY_METRICS_ARGS_RE.match(txt)
     if not match:
-        return False
+        return {"action": "passthrough"}
     rest = (match.group(1) or "").strip()
     if not rest:
-        return True
-    try:
-        tokens = shlex.split(rest)
-    except ValueError:
-        tokens = rest.split()
+        return {
+            "action": "capture",
+            "label": "",
+            "note": "",
+            "profile": "2026_nov_standard",
+            "full": False,
+            "force": False,
+            "has_explicit_label": False,
+        }
+    if rest.startswith("/"):
+        return {"action": "passthrough"}
+
+    tokens = _split_metrics_tokens(rest)
     if not tokens:
-        return True
-    return tokens[0].lower() not in _NON_CAPTURE_METRICS_SUBCOMMANDS
+        return {
+            "action": "capture",
+            "label": "",
+            "note": "",
+            "profile": "2026_nov_standard",
+            "full": False,
+            "force": False,
+            "has_explicit_label": False,
+        }
+
+    head = tokens[0].lower()
+    if head == "pending":
+        for tok in tokens[1:]:
+            if tok.startswith("-"):
+                return {"action": "error", "error": f"Option inconnue pour `pending` : `{tok}`."}
+        return {"action": "pending"}
+
+    if head == "archive":
+        try:
+            opts, positionals, has_explicit_label = _parse_metrics_flags(tokens[1:])
+        except ValueError as exc:
+            return {"action": "error", "error": str(exc)}
+        if not positionals:
+            return {
+                "action": "error",
+                "error": 'Syntaxe : `/gravity-metrics archive <uuid_ou_prefixe> [label] [-n "note"] [--full] [--force]`',
+            }
+        target = positionals[0]
+        label = opts["label"] or " ".join(positionals[1:]).strip()
+        return {
+            "action": "archive",
+            "target": target,
+            "label": label,
+            "note": opts["note"],
+            "profile": opts["profile"],
+            "full": opts["full"],
+            "force": opts["force"],
+            "has_explicit_label": has_explicit_label,
+        }
+
+    try:
+        opts, positionals, has_explicit_label = _parse_metrics_flags(tokens)
+    except ValueError as exc:
+        if len(rest) > 60 or len(tokens) > 6:
+            return {"action": "passthrough"}
+        return {"action": "error", "error": str(exc)}
+
+    positional_text = " ".join(positionals).strip()
+    if not has_explicit_label and (len(positional_text) > 60 or len(positional_text.split()) > 6):
+        return {"action": "passthrough"}
+
+    resolved_label = opts["label"] or positional_text
+    return {
+        "action": "capture",
+        "label": resolved_label.strip(),
+        "note": opts["note"],
+        "profile": opts["profile"],
+        "full": opts["full"],
+        "force": opts["force"],
+        "has_explicit_label": has_explicit_label,
+    }
+
+
+def is_gravity_metrics_capture_prompt(raw: str) -> bool:
+    """Retourne True uniquement pour une commande valide de capture `/gravity-metrics` (hors passthrough/pending/archive)."""
+    return classify_metrics_prompt(raw).get("action") == "capture"
 
 
 def is_gravity_session_prompt(raw: str) -> bool:
-    """Retourne True si le prompt lance `/gravity ...` ou `/gravity-workflow ...` (hors `/gravity-metrics`)."""
+    """Retourne True si le prompt lance `/gravity`, `/gravity-workflow`, `/gravity-architect` ou `/gravity-bridge`."""
     txt = extract_user_request_text(raw)
     return bool(_GRAVITY_CMD_RE.match(txt)) and not is_gravity_metrics_prompt(txt)
 
@@ -196,11 +337,20 @@ def read_gravity_profile_summary(
     return " · ".join(parts)
 
 
-def slugify_label(label: str, fallback: str = "session") -> str:
-    """Normalise un label en nom de fichier sûr ([a-z0-9._-])."""
+def slugify_label(label: str, fallback: str = "session", max_len: int = 64) -> str:
+    """Normalise un label en nom de fichier sûr ([a-z0-9._-]) borné à `max_len` caractères."""
     slug = re.sub(r"[^a-z0-9._-]+", "-", (label or "").strip().lower())
     slug = re.sub(r"-{2,}", "-", slug).strip(".-_")
-    return slug or fallback
+    if not slug:
+        slug = fallback
+    if max_len > 0 and len(slug) > max_len:
+        digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:8]
+        if max_len <= len(digest) + 2:
+            return slug[:max_len]
+        keep = max_len - 1 - len(digest)
+        prefix = slug[:keep].rstrip(".-_") or slug[:keep]
+        return f"{prefix}-{digest}"
+    return slug
 
 
 def _extract_label_keywords(raw_prompt: str, project_slug: str = "") -> List[str]:
@@ -208,7 +358,7 @@ def _extract_label_keywords(raw_prompt: str, project_slug: str = "") -> List[str
     cleaned = extract_user_request_text(raw_prompt)
     cleaned = _GRAVITY_LEADING_AXES_RE.sub("", cleaned).strip()
     words: List[str] = []
-    for tok in re.findall(r"[a-z0-9]+", slugify_label(cleaned, fallback="").replace(".", "-")):
+    for tok in re.findall(r"[a-z0-9]+", slugify_label(cleaned, fallback="", max_len=0).replace(".", "-")):
         if len(tok) < 2 or tok in _STOPWORDS or (project_slug and tok == project_slug):
             continue
         words.append(tok)
@@ -290,17 +440,87 @@ def _has_gravity_workspace_uri(conv_dir: Path) -> bool:
     return False
 
 
+def is_bridge_child_conversation(
+    conversation_id: str,
+    *,
+    first_prompt_raw: Optional[str] = None,
+    bridge_target_ids: Optional[Set[str]] = None,
+    brain_dir: Optional[Union[Path, str]] = None,
+    bridge_db_path: Optional[Union[Path, str]] = None,
+) -> bool:
+    """Retourne True si la conversation est un enfant délégué via Gravity Bridge."""
+    cid = str(conversation_id or "").strip()
+    if not cid:
+        return False
+    if bridge_target_ids is None:
+        bridge_target_ids = load_bridge_target_conversation_ids(bridge_db_path)
+    if cid in bridge_target_ids:
+        return True
+
+    prompt_txt = first_prompt_raw
+    if prompt_txt is None and brain_dir is not None:
+        tpath = Path(brain_dir) / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        if tpath.is_file():
+            with tpath.open("r", encoding="utf-8", errors="replace") as fh:
+                for idx, raw_line in enumerate(fh):
+                    if idx >= 20:
+                        break
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(obj, dict) and obj.get("type") == "USER_INPUT":
+                        prompt_txt = str(obj.get("content") or "")
+                        break
+    if prompt_txt:
+        cleaned = extract_user_request_text(prompt_txt)
+        if cleaned.startswith("[GRAVITY-BRIDGE |"):
+            return True
+    return False
+
+
+def resolve_conversation_id_in_brain(target: str, brain_dir: Union[Path, str]) -> str:
+    """Résout un UUID complet ou un préfixe unique d'UUID dans `brain_dir`."""
+    clean = str(target or "").strip()
+    if not clean:
+        raise ValueError("Identifiant de conversation vide.")
+    base = Path(brain_dir)
+    if not base.is_dir():
+        raise FileNotFoundError(f"Répertoire des conversations introuvable : {base}")
+    exact = base / clean
+    if exact.is_dir():
+        return clean
+    lower_target = clean.lower()
+    matches = sorted(
+        d.name
+        for d in base.iterdir()
+        if d.is_dir() and d.name.lower().startswith(lower_target)
+    )
+    if not matches:
+        raise FileNotFoundError(f"Conversation introuvable : {clean!r} dans {base}")
+    if len(matches) > 1:
+        raise ValueError(
+            f"Plusieurs conversations correspondent au préfixe {clean!r} ; précisez l'UUID complet."
+        )
+    return matches[0]
+
+
 def list_gravity_conversations(
     brain_dir: Union[Path, str],
     include_all: bool = False,
     runs_jsonl_paths: Optional[List[Path]] = None,
+    bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Liste les conversations racines récentes, filtrées par défaut sur les sessions Gravity."""
+    """Liste les conversations racines récentes, en excluant les enfants Bridge par défaut."""
     base = Path(brain_dir)
     if not base.is_dir():
         return []
 
     known_session_ids = _collect_known_gravity_session_ids(runs_jsonl_paths)
+    bridge_target_ids = load_bridge_target_conversation_ids(bridge_db_path)
     results: List[Dict[str, Any]] = []
 
     for cdir in base.iterdir():
@@ -311,11 +531,10 @@ def list_gravity_conversations(
             continue
 
         first_prompt_raw: Optional[str] = None
+        has_gravity_cmd = False
         last_ts: Optional[str] = None
         with tpath.open("r", encoding="utf-8", errors="replace") as fh:
-            for idx, raw_line in enumerate(fh):
-                if idx >= 20 and first_prompt_raw is not None:
-                    break
+            for raw_line in fh:
                 line = raw_line.strip()
                 if not line:
                     continue
@@ -327,15 +546,28 @@ def list_gravity_conversations(
                     continue
                 if obj.get("created_at"):
                     last_ts = str(obj["created_at"])
-                if idx < 20 and obj.get("type") == "USER_INPUT" and first_prompt_raw is None:
-                    first_prompt_raw = str(obj.get("content") or "")
+                if obj.get("type") == "USER_INPUT":
+                    content = str(obj.get("content") or "")
+                    if first_prompt_raw is None:
+                        first_prompt_raw = content
+                    if is_gravity_session_prompt(content):
+                        has_gravity_cmd = True
 
         if first_prompt_raw is None:
             continue
 
+        is_bridge_child = is_bridge_child_conversation(
+            cdir.name,
+            first_prompt_raw=first_prompt_raw,
+            bridge_target_ids=bridge_target_ids,
+        )
+        if not include_all and is_bridge_child:
+            continue
+
         title = _clean_user_prompt(first_prompt_raw)
-        is_gravity = (
-            "/gravity" in first_prompt_raw.lower()
+        is_gravity = (not is_bridge_child) and (
+            has_gravity_cmd
+            or "/gravity" in first_prompt_raw.lower()
             or "gravity" in title.lower()
             or "gravity" in first_prompt_raw.lower()
             or cdir.name in known_session_ids
@@ -354,6 +586,7 @@ def list_gravity_conversations(
                 "title": title,
                 "updated_at": updated_at,
                 "is_gravity": is_gravity,
+                "is_bridge_child": is_bridge_child,
                 "_mtime": mtime,
             }
         )
@@ -598,8 +831,10 @@ def _read_first_timestamp(transcript_path: Union[Path, str]) -> Optional[datetim
     return None
 
 
-def _is_direct_child_in_window(
-    child_node: Dict[str, Any],
+def _is_spawn_in_window(
+    spawn_step: Optional[int],
+    created_at_ts: Optional[str],
+    transcript_path: Optional[str],
     window_info: Dict[str, Any],
 ) -> bool:
     if window_info.get("window_empty"):
@@ -607,7 +842,6 @@ def _is_direct_child_in_window(
 
     start_step = window_info.get("start_step_index")
     end_step = window_info.get("end_step_index")
-    spawn_step = child_node.get("spawn_step_index")
 
     use_step_bounds = (
         isinstance(start_step, int)
@@ -622,7 +856,9 @@ def _is_direct_child_in_window(
 
     start_dt = _parse_iso_ts(window_info.get("start_ts"))
     end_dt = _parse_iso_ts(window_info.get("end_ts"))
-    child_dt = _read_first_timestamp(child_node["transcript_path"])
+    child_dt = _read_first_timestamp(transcript_path) if transcript_path else None
+    if child_dt is None and created_at_ts:
+        child_dt = _parse_iso_ts(created_at_ts)
     if child_dt is not None and (start_dt is not None or end_dt is not None):
         if start_dt is not None and child_dt < start_dt:
             return False
@@ -637,18 +873,48 @@ def _is_direct_child_in_window(
     )
 
 
-def discover_agent_tree(root_id: str, brain_dir: Union[Path, str]) -> List[Dict[str, Any]]:
-    """Découvre l'arbre complet des conversations agents par parcours BFS anti-cycles."""
+def _is_direct_child_in_window(
+    child_node: Dict[str, Any],
+    window_info: Dict[str, Any],
+) -> bool:
+    return _is_spawn_in_window(
+        child_node.get("spawn_step_index"),
+        child_node.get("bridge_created_at"),
+        child_node.get("transcript_path"),
+        window_info,
+    )
+
+
+def discover_agent_tree(
+    root_id: str,
+    brain_dir: Union[Path, str],
+    bridge_db_path: Optional[Union[Path, str]] = None,
+) -> List[Dict[str, Any]]:
+    """Découvre l'arbre complet (sous-agents natifs + enfants Gravity Bridge) par BFS anti-cycles."""
     base = Path(brain_dir)
     visited: Set[str] = set()
     enqueued: Set[str] = {root_id}
-    queue: List[Tuple[str, Optional[str], int, str, str, Optional[str], Optional[int]]] = [
-        (root_id, None, 0, "root", "root", None, None)
+    queue: List[Dict[str, Any]] = [
+        {
+            "cid": root_id,
+            "parent_id": None,
+            "depth": 0,
+            "type_name": "root",
+            "role": "root",
+            "state": None,
+            "spawn_step": None,
+            "source": "root",
+            "bridge_thread_id": None,
+            "bridge_workspace": None,
+            "bridge_job_status": None,
+            "bridge_created_at": None,
+        }
     ]
     nodes: List[Dict[str, Any]] = []
 
     while queue:
-        cid, parent_id, depth, type_name, role, state, spawn_step = queue.pop(0)
+        item = queue.pop(0)
+        cid = item["cid"]
         if cid in visited:
             continue
         visited.add(cid)
@@ -657,6 +923,8 @@ def discover_agent_tree(root_id: str, brain_dir: Union[Path, str]) -> List[Dict[
         sub_dir = cdir / ".system_generated" / "subagents"
         transcript_path = cdir / ".system_generated" / "logs" / "transcript.jsonl"
         children_ids: List[str] = []
+        depth = item["depth"]
+        cur_bridge_ws = item["bridge_workspace"]
 
         if sub_dir.is_dir():
             for fn in sorted(sub_dir.iterdir()):
@@ -675,30 +943,71 @@ def discover_agent_tree(root_id: str, brain_dir: Union[Path, str]) -> List[Dict[
                     enqueued.add(scid)
                     desc = sd.get("subagentDescriptor") or {}
                     queue.append(
-                        (
-                            scid,
-                            cid,
-                            depth + 1,
-                            str(desc.get("typeName") or "unknown"),
-                            str(desc.get("role") or scid[:8]),
-                            sd.get("state"),
-                            sd.get("spawnStepIndex"),
-                        )
+                        {
+                            "cid": scid,
+                            "parent_id": cid,
+                            "depth": depth + 1,
+                            "type_name": str(desc.get("typeName") or "unknown"),
+                            "role": str(desc.get("role") or scid[:8]),
+                            "state": sd.get("state"),
+                            "spawn_step": sd.get("spawnStepIndex"),
+                            "source": "subagent",
+                            "bridge_thread_id": None,
+                            "bridge_workspace": cur_bridge_ws,
+                            "bridge_job_status": None,
+                            "bridge_created_at": None,
+                        }
                     )
 
+        bridge_links = discover_bridge_links(cid, transcript_path, bridge_db=bridge_db_path)
+        for link in bridge_links:
+            bcid = str(link.get("target_conversation_id") or "").strip()
+            if not bcid or bcid in visited:
+                continue
+            if bcid not in children_ids:
+                children_ids.append(bcid)
+            if bcid not in enqueued:
+                enqueued.add(bcid)
+                msg_type = str(link.get("msg_type") or "handoff").strip().lower()
+                to_ws = str(link.get("to_workspace") or "unknown").strip()
+                queue.append(
+                    {
+                        "cid": bcid,
+                        "parent_id": cid,
+                        "depth": depth + 1,
+                        "type_name": f"bridge_{msg_type}" if msg_type else "bridge",
+                        "role": f"bridge:{to_ws}",
+                        "state": link.get("job_status") or link.get("thread_status"),
+                        "spawn_step": link.get("spawn_step_index"),
+                        "source": "bridge",
+                        "bridge_thread_id": link.get("thread_id"),
+                        "bridge_workspace": to_ws,
+                        "bridge_job_status": link.get("job_status") or "",
+                        "bridge_created_at": link.get("created_at"),
+                    }
+                )
+
+        type_name = item["type_name"]
+        role = item["role"]
         nodes.append(
             {
                 "conversation_id": cid,
-                "parent_id": parent_id,
+                "parent_id": item["parent_id"],
                 "depth": depth,
                 "type_name": type_name,
                 "role": role,
                 "category": classify_agent(type_name, role),
-                "subagent_state": state,
-                "spawn_step_index": spawn_step,
+                "subagent_state": item["state"],
+                "spawn_step_index": item["spawn_step"],
+                "source": item["source"],
+                "bridge_thread_id": item["bridge_thread_id"],
+                "bridge_workspace": cur_bridge_ws,
+                "bridge_job_status": item["bridge_job_status"],
+                "bridge_created_at": item["bridge_created_at"],
                 "children_ids": children_ids,
                 "transcript_path": str(transcript_path),
                 "transcript_exists": transcript_path.is_file(),
+                "_bridge_links": bridge_links,
             }
         )
 
@@ -992,15 +1301,20 @@ def _detect_execution_mode(
     is_teamwork = any(tn.startswith("teamwork") for tn in type_names) or "teamwork" in cmds
     is_swarm = bool(tool_counter.get("swarm")) or "swarm" in cmds
     is_workflow = bool(tool_counter.get("run_workflow"))
+    is_bridge = any(
+        a.get("source") == "bridge" or str(a.get("type_name") or "").lower().startswith("bridge")
+        for a in enriched_agents
+    )
     is_subagents = len(enriched_agents) > 1 or bool(tool_counter.get("invoke_subagent"))
     is_plan = bool(tool_counter.get("exit_plan_mode")) or "plan" in cmds
-    is_gravity = bool(cmds & {"gravity", "gravity-workflow"})
+    is_gravity = bool(cmds & {"gravity", "gravity-workflow", "gravity-architect", "gravity-bridge"})
 
     features_used: List[str] = []
     for flag, name in (
         (is_teamwork, "teamwork"),
         (is_swarm, "swarm"),
         (is_workflow, "workflow"),
+        (is_bridge, "bridge"),
         (is_subagents, "subagents"),
         (is_plan, "plan"),
         (is_gravity, "gravity"),
@@ -1016,6 +1330,8 @@ def _detect_execution_mode(
         mode = "swarm"
     elif is_workflow:
         mode = "workflow"
+    elif is_bridge:
+        mode = "bridge"
     elif is_subagents:
         mode = "subagents"
     else:
@@ -1100,10 +1416,11 @@ def collect_run_metrics(
     to_step: Optional[int] = None,
     project: str = "",
     gravity_profile: str = "",
+    bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> Dict[str, Any]:
     """Collecte et agrège les métriques et coûts complets d'un arbre de conversation."""
     catalog = load_pricing_catalog(pricing_catalog_path)
-    nodes = discover_agent_tree(root_id, brain_dir)
+    nodes = discover_agent_tree(root_id, brain_dir, bridge_db_path=bridge_db_path)
     if not nodes:
         raise ValueError(f"Aucun nœud découvert pour {root_id!r} dans {brain_dir}")
 
@@ -1156,9 +1473,37 @@ def collect_run_metrics(
     unmatched_models: Set[str] = set()
     missing_transcripts: List[str] = []
     malformed_lines_total = 0
+    root_workspace = str(project or "").strip() or "root"
+
+    bridge_pending_jobs: List[Dict[str, Any]] = []
+    seen_pending_keys: Set[Tuple[str, str]] = set()
 
     for node in nodes:
         is_root = node["conversation_id"] == root_id
+        for link in node.get("_bridge_links") or []:
+            if not link.get("has_active_job"):
+                continue
+            if is_root and apply_window and not _is_spawn_in_window(
+                link.get("spawn_step_index"),
+                link.get("created_at"),
+                None,
+                window_info,
+            ):
+                continue
+            pkey = (str(link.get("thread_id") or ""), str(link.get("job_id") or ""))
+            if pkey not in seen_pending_keys:
+                seen_pending_keys.add(pkey)
+                bridge_pending_jobs.append(
+                    {
+                        "thread_id": pkey[0],
+                        "job_id": pkey[1],
+                        "to_workspace": str(link.get("to_workspace") or "unknown"),
+                        "status": str(link.get("job_status") or ""),
+                        "action": str(link.get("job_action") or ""),
+                        "target_conversation_id": str(link.get("target_conversation_id") or ""),
+                    }
+                )
+
         parsed = parse_agent_transcript(
             node["transcript_path"],
             catalog=catalog,
@@ -1172,7 +1517,8 @@ def collect_run_metrics(
             missing_transcripts.append(node["conversation_id"])
         malformed_lines_total += parsed["malformed_lines"]
 
-        merged = {**node, **parsed}
+        ag_workspace = str(node.get("bridge_workspace") or "").strip() or root_workspace
+        merged = {**node, **parsed, "workspace": ag_workspace}
         enriched_agents.append(merged)
         nodes_by_id[node["conversation_id"]] = merged
         if node["parent_id"]:
@@ -1330,6 +1676,26 @@ def collect_run_metrics(
         )
         by_phase[pname] = agg
 
+    ws_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for ag in enriched_agents:
+        ws_groups[ag["workspace"]].append(ag)
+    by_workspace: Dict[str, Any] = {}
+    for ws_name, subset in sorted(
+        ws_groups.items(),
+        key=lambda kv: (
+            kv[0] != root_workspace,
+            -sum(a["_raw_cost"]["total_usd"] for a in kv[1]),
+            kv[0],
+        ),
+    ):
+        agg = _aggregate_bucket(subset)
+        agg["cost_share_pct"] = (
+            round((sum(a["_raw_cost"]["total_usd"] for a in subset) / total_cost_float) * 100.0, 2)
+            if total_cost_float > 0
+            else 0.0
+        )
+        by_workspace[ws_name] = agg
+
     dup_groups_map: Dict[Tuple[Optional[str], str, str], List[Dict[str, Any]]] = defaultdict(list)
     for ag in enriched_agents:
         if ag["parent_id"] is not None:
@@ -1393,6 +1759,15 @@ def collect_run_metrics(
         ag_out["by_model"] = clean_models
         agents_clean.append(ag_out)
 
+    bridge_agents = [ag for ag in agents_clean if ag.get("source") == "bridge"]
+    bridge_workspaces = sorted(
+        {
+            str(ag.get("bridge_workspace") or ag.get("workspace") or "").strip()
+            for ag in bridge_agents
+            if str(ag.get("bridge_workspace") or ag.get("workspace") or "").strip()
+        }
+    )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "label": label or f"run-{root_id[:8]}",
@@ -1444,6 +1819,13 @@ def collect_run_metrics(
         "by_category": by_category,
         "by_model": by_model,
         "by_phase": by_phase,
+        "by_workspace": by_workspace,
+        "bridge_pending_jobs": bridge_pending_jobs,
+        "bridge": {
+            "children_count": len(bridge_agents),
+            "workspaces": bridge_workspaces,
+            "pending_jobs": bridge_pending_jobs,
+        },
         "tool_usage": {
             "total_calls": total_tool_calls,
             "by_tool": dict(tool_counter.most_common()),
@@ -1482,3 +1864,175 @@ def collect_run_metrics(
             "malformed_lines": malformed_lines_total,
         },
     }
+
+
+def _load_archived_keys(history_path: Optional[Union[Path, str]]) -> Set[Tuple[str, Optional[int]]]:
+    keys: Set[Tuple[str, Optional[int]]] = set()
+    if history_path is None:
+        return keys
+    hpath = Path(history_path)
+    if not hpath.is_file():
+        return keys
+    for raw_line in hpath.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        cid = str(obj.get("conversation_id") or "").strip()
+        status = str(obj.get("status") or "archived").strip().lower()
+        if cid and status == "archived":
+            keys.add((cid, obj.get("window_start_step")))
+    return keys
+
+
+def list_pending_sessions(
+    brain_dir: Union[Path, str],
+    history_path: Optional[Union[Path, str]] = None,
+    *,
+    bridge_db_path: Optional[Union[Path, str]] = None,
+    runs_jsonl_paths: Optional[List[Path]] = None,
+) -> List[Dict[str, Any]]:
+    """Liste les sessions Gravity racines ayant de l'activité LLM non encore archivée."""
+    base = Path(brain_dir)
+    if not base.is_dir():
+        return []
+
+    archived_keys = _load_archived_keys(history_path)
+    known_session_ids = _collect_known_gravity_session_ids(runs_jsonl_paths)
+    bridge_target_ids = load_bridge_target_conversation_ids(bridge_db_path)
+    pending: List[Dict[str, Any]] = []
+
+    for cdir in base.iterdir():
+        if not cdir.is_dir():
+            continue
+        tpath = cdir / ".system_generated" / "logs" / "transcript.jsonl"
+        if not tpath.is_file():
+            continue
+
+        first_prompt_raw: Optional[str] = None
+        has_gravity_cmd = False
+        raw_lines: List[str] = tpath.read_text(encoding="utf-8", errors="replace").splitlines()
+        for raw_line in raw_lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("type") == "USER_INPUT":
+                content = str(obj.get("content") or "")
+                if first_prompt_raw is None:
+                    first_prompt_raw = content
+                if is_gravity_session_prompt(content):
+                    has_gravity_cmd = True
+
+        if first_prompt_raw is None:
+            continue
+        if is_bridge_child_conversation(
+            cdir.name,
+            first_prompt_raw=first_prompt_raw,
+            bridge_target_ids=bridge_target_ids,
+        ):
+            continue
+
+        is_gravity = (
+            has_gravity_cmd
+            or "/gravity" in first_prompt_raw.lower()
+            or "gravity" in first_prompt_raw.lower()
+            or cdir.name in known_session_ids
+            or _has_gravity_workspace_uri(cdir)
+        )
+        if not is_gravity:
+            continue
+
+        win = resolve_gravity_window(tpath, current_prompt_is_metrics=False)
+        if win.get("window_empty"):
+            continue
+        if (cdir.name, win.get("start_step_index")) in archived_keys:
+            continue
+        if win.get("mode") == "full_conversation" and (cdir.name, None) in archived_keys:
+            continue
+
+        start_idx = int(win.get("start_line_idx") or 0)
+        end_idx = win.get("end_line_idx")
+        llm_calls = 0
+        last_ts: Optional[str] = None
+        for line_idx, raw_line in enumerate(raw_lines):
+            if line_idx < start_idx:
+                continue
+            if end_idx is not None and line_idx >= end_idx:
+                break
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("created_at"):
+                last_ts = str(obj["created_at"])
+            if obj.get("type") == "PLANNER_RESPONSE":
+                llm_calls += 1
+
+        if llm_calls == 0:
+            continue
+
+        links = discover_bridge_links(cdir.name, tpath, bridge_db=bridge_db_path)
+        apply_win = bool(win.get("has_gravity_anchor") or win.get("mode") != "full_conversation")
+        active_links = [
+            lnk
+            for lnk in links
+            if not apply_win
+            or _is_spawn_in_window(lnk.get("spawn_step_index"), lnk.get("created_at"), None, win)
+        ]
+        pending_jobs = [lnk for lnk in active_links if lnk.get("has_active_job")]
+        bridge_children = [lnk for lnk in active_links if lnk.get("target_conversation_id")]
+        bridge_workspaces = sorted(
+            {str(lnk.get("to_workspace") or "").strip() for lnk in active_links if lnk.get("to_workspace")}
+        )
+
+        mtime = tpath.stat().st_mtime
+        updated_at = last_ts or datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        title = _clean_user_prompt(win.get("first_prompt") or first_prompt_raw)
+        pending.append(
+            {
+                "conversation_id": cdir.name,
+                "title": title,
+                "window_mode": win["mode"],
+                "window_start_step": win["start_step_index"],
+                "started_at": win["start_ts"],
+                "updated_at": updated_at,
+                "llm_calls": llm_calls,
+                "bridge_children_count": len(bridge_children),
+                "bridge_pending_jobs_count": len(pending_jobs),
+                "has_pending_bridge_jobs": bool(pending_jobs),
+                "bridge_workspaces": bridge_workspaces,
+                "bridge_pending_jobs": [
+                    {
+                        "thread_id": j["thread_id"],
+                        "to_workspace": j["to_workspace"],
+                        "job_id": j["job_id"],
+                        "status": j["job_status"],
+                    }
+                    for j in pending_jobs
+                ],
+                "_mtime": mtime,
+            }
+        )
+
+    pending.sort(key=lambda item: (-item["_mtime"], item["conversation_id"]))
+    for item in pending:
+        item.pop("_mtime", None)
+    return pending

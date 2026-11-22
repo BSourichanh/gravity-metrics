@@ -14,7 +14,7 @@
 gravity-metrics/
 ├── install.py                              # Cross-platform installer / uninstaller (atomic copy + agy)
 ├── plugin/                                 # Standalone plugin ready to install
-│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.2.0)
+│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.3.0)
 │   ├── hooks.json                          # PreInvocation hook (pre-capture on /gravity-metrics)
 │   ├── mcp_config.json                     # MCP App stdio server configuration
 │   ├── README.md                           # Plugin documentation (French)
@@ -26,11 +26,11 @@ gravity-metrics/
 │   │   └── pricing_catalog.json            # Pricing catalog (2026_nov_standard, 2027_standard)
 │   ├── hooks/                              # hook_runtime.py + pre_invocation_metrics.py
 │   ├── mcp/                                # server.py (stdio JSON-RPC) + widget_html.py (MCP App UI)
-│   ├── metrics/                            # Modular engine (pricing, collector, history, store, formatters, markdown)
+│   ├── metrics/                            # Modular engine (bridge_links, pricing, collector, history, store, formatters, markdown)
 │   └── scripts/                            # cli.py + validate.py (--strict, --fix-python-cmd)
 ├── tests/                                  # Unit & integrity test suite (engine, hook, MCP server, installer)
 ├── AGENTS.md
-├── CHANGELOG.md                            # Release notes (v0.2.0)
+├── CHANGELOG.md                            # Release notes (v0.3.0)
 ├── LICENSE
 └── README.md
 ```
@@ -75,18 +75,19 @@ agy plugin install ./plugin
 
 ## 2. Usage (`/gravity-metrics` & Interactive Widget)
 
-### One-command capture + automatic widget opening
+### One-command capture, unified Bridge tree & immutable archiving
 
-Run **`/gravity-metrics [label] [-l|--label <label>] [-n|--note "note"] [--profile <name>] [--full]`** at the end of a session:
-1. The `PreInvocation` hook intercepts `/gravity-metrics` **before** the model call, captures the exact window (`[first /gravity-workflow or /gravity after previous capture → strictly before /gravity-metrics]`, or the entire conversation with `--full`), updates the centralized store, and displays a compact Markdown summary inline.
-2. The agent then calls `open_metrics_dashboard` to automatically open the interactive **Gravity Metrics** widget in the side panel (`aux_pane`) directly in the **`detail`** view for the captured session (scoped to the active project), or in the **`history`** view filtered on the active project (or global outside a project) when no new LLM activity was captured.
+Run **`/gravity-metrics [label] [-l|--label <label>] [-n|--note "note"] [--profile <name>] [--full] [--force]`**, **`/gravity-metrics archive <uuid_or_prefix> [label] [--full] [--force]`**, or **`/gravity-metrics pending`**:
+1. The `PreInvocation` hook intercepts `/gravity-metrics` **before** the model call (while passing through combined `/gravity-metrics /other-cmd` or long prose `> 60` chars / `> 6` words without `-l`), measures the unified Gravity session (`[first /gravity, /gravity-workflow, /gravity-architect, or /gravity-bridge after previous capture → strictly before /gravity-metrics]`, including native subagents and **Gravity Bridge** children across `depth 2+` via strict read-only `bridge.db` + transcript fallback), and archives it immutably (`schema_version 2.1.0`, blocked when active Bridge jobs exist unless `--force` is passed).
+2. The agent then calls `open_metrics_dashboard` to automatically open the interactive **Gravity Metrics** widget in the side panel (`aux_pane`) directly in the **`detail`** view for the archived session (including `by_workspace` and Bridge tree), or in the **`history`** view showing archived and `pending` sessions.
 
 ### Zero-token interactive widget (`MCP App` — `transition-mcp` → `gravity`)
 
 Open anytime with **zero LLM tokens** from **Plugins > Gravity Metrics** in the Antigravity sidebar (`global`, all projects) or the side panel launcher (`aux_pane`):
 - **Scope toggle:** switch seamlessly between the **active project** and **global (all projects)**.
+- **Pending queue & one-click archive:** inspect unarchived root Gravity sessions (excluding Bridge child conversations) and archive them with Bridge job-safety guards.
 - **Tariff toggle:** compare `2026` pricing vs `2027` projection across KPI cards, SVG charts, and tables.
-- **Session drill-down:** click any session or chart point to inspect categories, execution phases, models, agents, waste signals, tools, and errors.
+- **Session drill-down:** click any session or chart point to inspect categories, execution phases, workspaces (`by_workspace`), Bridge inter-workspace tree, models, agents, waste signals, tools, and errors.
 - **Built-in actions:** auto-refresh (every 4s while visible), **Ouvrir `.md`**, **Joindre au prompt**, **Analyser**, and **Supprimer** (with optional `reports/` purge).
 
 ### MCP App Tools & Resource (`plugin/mcp/server.py`)
@@ -94,8 +95,9 @@ Open anytime with **zero LLM tokens** from **Plugins > Gravity Metrics** in the 
 | Surface | Visibility | Purpose |
 |---|---|---|
 | `open_metrics_dashboard` | `model`, `app` | Opens the widget (`aux_pane` / `global`) with optional `project`, `target`, `view` (`history` \| `detail`) |
-| `metrics_get_state` | `app` | Polls `history.jsonl` changes (`since_signature`) and returns canonical projects |
+| `metrics_get_state` | `app` | Polls `history.jsonl` and pending session changes (`since_signature`), returning `records`, `pending_sessions`, and canonical projects |
 | `metrics_get_session` | `app` | Loads detailed JSON session metrics (`reports/<slug>.json` or live recompute fallback) |
+| `metrics_archive_session` | `app` | Analyzes and immutably archives a pending Gravity session (respects Bridge active-job guards and `force`) |
 | `metrics_remove_session` | `app` | Removes a session from history (with optional `purge_reports`) and regenerates `METRICS.md` |
 | `ui://gravity-metrics/dashboard.html` | UI Resource | Self-contained HTML/SVG/JS widget (`text/html;profile=mcp-app`) |
 
@@ -117,10 +119,12 @@ During capture, the plugin performs a read-only lookup of the current project na
 ## 4. CLI & Verification
 
 ```powershell
-# Direct CLI usage (add supports --latest, <UUID>, -l/--label, -n/--note, --gravity-window, --full, --workspace, --profile, --summary-only)
+# Direct CLI usage (add/archive support <UUID|prefix>, -l/--label, -n/--note, --gravity-window, --full, --workspace, --profile, --bridge-db, --summary-only, --force)
 python plugin/scripts/cli.py list
 python plugin/scripts/cli.py list --regen
+python plugin/scripts/cli.py pending
 python plugin/scripts/cli.py add --latest -l "my-run" -n "Short note"
+python plugin/scripts/cli.py archive <uuid_or_prefix> -l "my-run"
 python plugin/scripts/cli.py inspect <label_or_uuid>
 python plugin/scripts/cli.py remove <label_or_uuid> --purge-reports
 
@@ -134,7 +138,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 ## 5. Documentation & Releases
 
-- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.2.0`)
+- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.2.0`, `v0.3.0`)
 - [`plugin/README.md`](plugin/README.md) — Plugin documentation (French)
 - [`AGENTS.md`](AGENTS.md) — Repository invariants and verification commands
 

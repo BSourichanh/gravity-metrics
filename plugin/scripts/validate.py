@@ -42,7 +42,7 @@ REQUIRED_MODULE_FIELDS = {
 }
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 UTF8_BOM = b"\xef\xbb\xbf"
-ALLOWED_LOCAL_MODULES = {"metrics", "hook_runtime", "cli", "validate", "mcp", "widget_html"}
+ALLOWED_LOCAL_MODULES = {"metrics", "bridge_links", "hook_runtime", "cli", "validate", "mcp", "widget_html"}
 FLAT_HOOK_EVENTS = ("SessionStart", "PreInvocation", "PostInvocation", "Stop")
 GROUPED_HOOK_EVENTS = ("PreToolUse", "PostToolUse")
 
@@ -299,6 +299,8 @@ def _run_hook_dry_runs(plugin_root: Path, report: Report) -> None:
             {"lastUserInput": "/gravity fast corrige le bug"},
             {"lastUserInput": "/gravity metrics"},
             {"lastUserInput": "/gravity-metrics-service"},
+            {"lastUserInput": "/gravity-metrics /grill-me analyse tout ce depot"},
+            {"lastUserInput": "/gravity-metrics voici une longue question libre de plus de soixante caracteres sans label explicite"},
         ]
         for payload in passthrough_inputs:
             proc = subprocess.run(

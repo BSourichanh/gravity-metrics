@@ -160,7 +160,7 @@ class TestPreInvocationHook(unittest.TestCase):
             after_ws_files = sorted(p.relative_to(ws).as_posix() for p in ws.rglob("*"))
             self.assertEqual(before_ws_files, after_ws_files)
 
-            # Cas (b) : /gravity-metrics déjà flushé sur disque (même fenêtre mise à jour avec label explicite)
+            # Cas (b1) : /gravity-metrics déjà flushé sur disque sans --force -> immuabilité (pas d'écrasement)
             tpath_b = _write_transcript(
                 brain / cid,
                 base_lines
@@ -168,11 +168,26 @@ class TestPreInvocationHook(unittest.TestCase):
                     {"step_index": 4, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T15:02:00Z", "content": "/gravity-metrics mon-run -n \"test note\""},
                 ],
             )
-            payload_b = {
+            payload_b_immut = {
                 "conversationId": cid,
                 "transcriptPath": str(tpath_b),
                 "cwd": str(ws),
                 "lastUserInput": '/gravity-metrics mon-run -n "test note"',
+            }
+            out_immut = _run_hook(json.dumps(payload_b_immut), store, brain)
+            self.assertNotIn("terminationBehavior", out_immut)
+            md_immut = out_immut["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
+            self.assertIn("déjà archivée", md_immut)
+            records_immut = load_history(store / "data" / "history.jsonl")
+            self.assertEqual(len(records_immut), 1)
+            self.assertEqual(records_immut[0]["label"], records[0]["label"])
+
+            # Cas (b2) : avec --force sur la même fenêtre -> mise à jour explicite autorisée
+            payload_b = {
+                "conversationId": cid,
+                "transcriptPath": str(tpath_b),
+                "cwd": str(ws),
+                "lastUserInput": '/gravity-metrics mon-run -n "test note" --force',
             }
             out_b = _run_hook(json.dumps(payload_b), store, brain)
             self.assertNotIn("terminationBehavior", out_b)
@@ -184,6 +199,7 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertEqual(records_b[0]["label"], "mon-run")
             self.assertEqual(records_b[0]["note"], "test note")
             self.assertEqual(records_b[0]["input_tokens"], 150_000)
+            self.assertEqual(records_b[0]["status"], "archived")
 
     def test_handoff_loop_guard_double_metrics_and_invalid_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -379,6 +395,188 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertEqual(records[0]["input_tokens"], 40_000)
             self.assertEqual(records[0]["window_mode"], "gravity_session")
             self.assertIn("gravity", records[0]["features_used"])
+
+    def test_strict_passthrough_long_prompt_and_slug_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            ws = root / "ProjetPass"
+            ws.mkdir()
+            cid = "6666ffff-0000-0000-0000-000000000006"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T12:00:00Z", "content": "/gravity test"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T12:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                ],
+            )
+
+            long_grill = "/gravity-metrics /grill-me " + ("a " * 170)
+            long_prose = "/gravity-metrics Explique moi pourquoi cette session coute si cher par rapport aux autres"
+            seven_words = "/gravity-metrics un deux trois quatre cinq six sept"
+            for prompt in (long_grill, long_prose, seven_words):
+                out = _run_hook(
+                    json.dumps(
+                        {
+                            "conversationId": cid,
+                            "transcriptPath": str(tpath),
+                            "cwd": str(ws),
+                            "lastUserInput": prompt,
+                        }
+                    ),
+                    store,
+                    brain,
+                )
+                self.assertEqual(out, {}, f"Passthrough attendu pour {prompt!r}")
+            self.assertFalse((store / "data" / "history.jsonl").exists())
+
+            long_explicit_lbl = "super-long-label-" + ("x" * 100)
+            out_lbl = _run_hook(
+                json.dumps(
+                    {
+                        "conversationId": cid,
+                        "transcriptPath": str(tpath),
+                        "cwd": str(ws),
+                        "lastUserInput": f'/gravity-metrics -l "{long_explicit_lbl}"',
+                    }
+                ),
+                store,
+                brain,
+            )
+            self.assertNotIn("terminationBehavior", out_lbl)
+            recs = load_history(store / "data" / "history.jsonl")
+            self.assertEqual(len(recs), 1)
+            self.assertLessEqual(len(recs[0]["detail_slug"]), 64)
+
+    def test_pending_archive_and_bridge_job_block(self) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            bridge_home = root / "bridge"
+            bridge_home.mkdir()
+            db_path = bridge_home / "bridge.db"
+            ws = root / "GravityStudio"
+            ws.mkdir()
+
+            root_cid = "7777aaaa-1111-2222-3333-444455556666"
+            child_cid = "8888bbbb-1111-2222-3333-444455556666"
+            _write_transcript(
+                brain / root_cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T13:00:00Z", "content": "/gravity-architect sync"},
+                    {
+                        "step_index": 1,
+                        "type": "PLANNER_RESPONSE",
+                        "status": "DONE",
+                        "created_at": "2026-11-22T13:00:10Z",
+                        "model": "gemini-3.8-flash-tiered",
+                        "input_tokens": 10_000,
+                        "cache_read_tokens": 0,
+                        "output_tokens": 200,
+                        "tool_calls": [
+                            {
+                                "name": "call_mcp_tool",
+                                "args": {
+                                    "ServerName": '"gravity-bridge_bridge"',
+                                    "ToolName": '"send_message"',
+                                    "Arguments": json.dumps(
+                                        {
+                                            "from_workspace": "gravity-studio",
+                                            "to_workspace": "gravity-metrics",
+                                            "msg_type": "handoff",
+                                            "dispatch": True,
+                                        }
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "step_index": 2,
+                        "type": "GENERIC",
+                        "status": "DONE",
+                        "content": json.dumps({"thread_id": "thr-20261122-abc123", "to_workspace": "gravity-metrics", "msg_type": "handoff"}),
+                    },
+                ],
+            )
+            _write_transcript(
+                brain / child_cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T13:00:20Z", "content": "[GRAVITY-BRIDGE | thread=thr-20261122-abc123]"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T13:00:30Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                ],
+            )
+
+            con = sqlite3.connect(str(db_path))
+            con.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, msg_type TEXT, status TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, created_at TEXT)"
+            )
+            con.execute(
+                "CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, action TEXT, target_conversation_id TEXT, status TEXT, created_at TEXT)"
+            )
+            con.execute(
+                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("thr-20261122-abc123", "gravity-studio", "gravity-metrics", "handoff", "open", child_cid, root_cid, "2026-11-22T13:00:15Z"),
+            )
+            con.execute(
+                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("job-1", "thr-20261122-abc123", "gravity-metrics", "new_conversation", child_cid, "dispatched", "2026-11-22T13:00:15Z"),
+            )
+            con.commit()
+            con.close()
+
+            extra_env = {"GRAVITY_BRIDGE_HOME": str(bridge_home)}
+
+            # 1) /gravity-metrics pending -> liste uniquement la racine (exclut child_cid) sans écrire
+            out_pend = _run_hook(
+                json.dumps({"cwd": str(ws), "lastUserInput": "/gravity-metrics pending"}),
+                store,
+                brain,
+                extra_env=extra_env,
+            )
+            self.assertNotIn("terminationBehavior", out_pend)
+            md_pend = out_pend["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
+            self.assertIn("7777aaaa", md_pend)
+            self.assertNotIn("8888bbbb", md_pend)
+            self.assertIn("job actif", md_pend)
+            self.assertFalse((store / "data" / "history.jsonl").exists())
+
+            # 2) Archivage bloqué tant que le job Bridge est 'dispatched' (zéro écriture)
+            out_blk = _run_hook(
+                json.dumps({"cwd": str(ws), "lastUserInput": "/gravity-metrics archive 7777aaaa"}),
+                store,
+                brain,
+                extra_env=extra_env,
+            )
+            self.assertEqual(out_blk.get("terminationBehavior"), "terminate")
+            md_blk = out_blk["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
+            self.assertIn("--force", md_blk)
+            self.assertFalse((store / "data" / "history.jsonl").exists())
+
+            # 3) Clôture du job Bridge -> /gravity-metrics archive <prefix> réussit et unifie les tokens
+            con = sqlite3.connect(str(db_path))
+            con.execute("UPDATE jobs SET status = 'completed' WHERE id = 'job-1'")
+            con.commit()
+            con.close()
+
+            out_arch = _run_hook(
+                json.dumps({"cwd": str(ws), "lastUserInput": "/gravity-metrics archive 7777aaaa e2e-arch"}),
+                store,
+                brain,
+                extra_env=extra_env,
+            )
+            self.assertNotIn("terminationBehavior", out_arch)
+            recs = load_history(store / "data" / "history.jsonl")
+            self.assertEqual(len(recs), 1)
+            self.assertEqual(recs[0]["label"], "e2e-arch")
+            self.assertEqual(recs[0]["agents"], 2)
+            self.assertEqual(recs[0]["input_tokens"], 15_000)
+            self.assertEqual(recs[0]["bridge_children_count"], 1)
+            self.assertEqual(recs[0]["bridge_workspaces"], ["gravity-metrics"])
 
 
 if __name__ == "__main__":

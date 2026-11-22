@@ -295,6 +295,8 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
   }
   .pill.ok { background: var(--gm-success-bg); border-color: var(--gm-success); color: var(--gm-success); }
   .pill.flag { background: var(--gm-danger-bg); border-color: var(--gm-danger); color: var(--gm-danger); margin-right: 3px; }
+  .pill.bridge { background: var(--gm-info-bg); border-color: var(--gm-info); color: var(--gm-info); margin-right: 3px; }
+  .pill.warn { border-color: var(--gm-warning); color: var(--gm-warning); margin-right: 3px; }
   .confirm-bar {
     display: flex;
     flex-wrap: wrap;
@@ -391,6 +393,7 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
     hostCaps: {},
     hostCtx: {},
     records: [],
+    pendingSessions: [],
     projects: [],
     signature: "",
     metricsMdUri: "",
@@ -413,6 +416,8 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
     detailLoading: false,
     confirmDeleteTarget: "",
     confirmPurge: true,
+    archivingCid: "",
+    confirmForceArchiveCid: "",
     toast: null,
     loading: true,
     pollInFlight: false,
@@ -548,6 +553,7 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
   function hydrateFromStatePayload(sc, isInitialToolResult) {
     if (!sc || typeof sc !== "object") return;
     if (Array.isArray(sc.records)) state.records = sc.records;
+    if (Array.isArray(sc.pending_sessions)) state.pendingSessions = sc.pending_sessions;
     if (Array.isArray(sc.projects)) state.projects = sc.projects;
     if (typeof sc.signature === "string") state.signature = sc.signature;
     if (typeof sc.metrics_md_uri === "string") state.metricsMdUri = sc.metrics_md_uri;
@@ -692,6 +698,43 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
       }
     } catch (err) {
       showToast("Erreur suppression : " + err.message, true);
+    }
+  }
+
+  async function archivePendingSession(cid, force) {
+    if (!cid || !state.hostCaps.serverTools || state.archivingCid) return;
+    state.archivingCid = cid;
+    if (force) state.confirmForceArchiveCid = "";
+    render();
+    try {
+      const res = await callServerTool("metrics_archive_session", {
+        conversation_id: cid,
+        force: Boolean(force)
+      });
+      if (res && res.isError) {
+        const errMsg = (res.content && res.content[0] && res.content[0].text) || "Archivage refusé";
+        if (!force && errMsg.indexOf("--force") >= 0) {
+          state.confirmForceArchiveCid = cid;
+        }
+        throw new Error(errMsg);
+      }
+      const sc = extractStructured(res);
+      state.confirmForceArchiveCid = "";
+      if (sc) {
+        hydrateFromStatePayload(sc, false);
+        const lbl = (sc.archived && sc.archived.label) || cid.slice(0, 8);
+        showToast(
+          sc.already_archived
+            ? "Session « " + lbl + " » déjà archivée (immuable)."
+            : "Session « " + lbl + " » archivée.",
+          false
+        );
+      }
+    } catch (err) {
+      showToast(err.message, true);
+    } finally {
+      state.archivingCid = "";
+      render();
     }
   }
 
@@ -974,11 +1017,15 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
       ? '<button type="button" class="btn" data-action="refresh">Rafraîchir</button>'
       : "";
 
+    const pendingNote = state.pendingSessions.length
+      ? ' · ' + esc(state.pendingSessions.length) + ' en attente'
+      : '';
+
     return '<div class="topbar">' +
       '<div class="brand">' +
       '<span class="brand-dot" title="Synchronisation 0 token active"></span>' +
       '<div><div class="brand-title">Gravity Metrics</div>' +
-      '<div class="brand-sub">' + esc(state.records.length) + ' session(s) au total' +
+      '<div class="brand-sub">' + esc(state.records.length) + ' session(s) archivée(s)' + pendingNote +
       (state.scope === "project" && state.selectedProject ? ' · filtre : ' + esc(state.selectedProject) : ' · vue globale') +
       '</div></div></div>' +
       '<div class="controls">' + scopeHtml + projSelect + tariffHtml + openGlobalMdBtn + refreshBtn + '</div>' +
@@ -986,16 +1033,62 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
   }
 
   function renderDeleteConfirm() {
-    if (!state.confirmDeleteTarget) return "";
-    return '<div class="confirm-bar">' +
-      '<div><strong>Supprimer la session « ' + esc(state.confirmDeleteTarget) + ' » ?</strong> ' +
-      '<label style="margin-left:8px;font-size:12px;cursor:pointer;">' +
-      '<input id="gm-purge-cb" type="checkbox"' + (state.confirmPurge ? " checked" : "") + ' /> Purger aussi <code>reports/</code>' +
-      '</label></div>' +
-      '<div class="confirm-actions">' +
-      '<button type="button" class="btn danger" data-action="confirm-delete">Confirmer</button>' +
-      '<button type="button" class="btn" data-action="cancel-delete">Annuler</button>' +
-      '</div></div>';
+    let html = "";
+    if (state.confirmDeleteTarget) {
+      html += '<div class="confirm-bar">' +
+        '<div><strong>Supprimer la session « ' + esc(state.confirmDeleteTarget) + ' » ?</strong> ' +
+        '<label style="margin-left:8px;font-size:12px;cursor:pointer;">' +
+        '<input id="gm-purge-cb" type="checkbox"' + (state.confirmPurge ? " checked" : "") + ' /> Purger aussi <code>reports/</code>' +
+        '</label></div>' +
+        '<div class="confirm-actions">' +
+        '<button type="button" class="btn danger" data-action="confirm-delete">Confirmer</button>' +
+        '<button type="button" class="btn" data-action="cancel-delete">Annuler</button>' +
+        '</div></div>';
+    }
+    if (state.confirmForceArchiveCid) {
+      html += '<div class="confirm-bar">' +
+        '<div><strong>Jobs Bridge encore actifs pour <code>' + esc(state.confirmForceArchiveCid.slice(0, 8)) + '</code>.</strong> ' +
+        'Forcer l’archivage immuable maintenant ?</div>' +
+        '<div class="confirm-actions">' +
+        '<button type="button" class="btn danger" data-action="confirm-force-archive" data-cid="' + esc(state.confirmForceArchiveCid) + '">Forcer l’archivage</button>' +
+        '<button type="button" class="btn" data-action="cancel-force-archive">Annuler</button>' +
+        '</div></div>';
+    }
+    return html;
+  }
+
+  function renderPendingPanel() {
+    const pend = state.pendingSessions || [];
+    if (!pend.length) return "";
+    let rows = "";
+    pend.forEach((p) => {
+      const cid = String(p.conversation_id || "");
+      const bCnt = Number(p.bridge_children_count) || 0;
+      const pJobs = Number(p.bridge_pending_jobs_count) || 0;
+      const wss = (p.bridge_workspaces || []).join(", ");
+      let bridgeHtml = "—";
+      if (pJobs > 0) {
+        bridgeHtml = '<span class="pill warn">Bridge:' + bCnt + ' · actif(' + pJobs + ')</span>';
+      } else if (bCnt > 0) {
+        bridgeHtml = '<span class="pill bridge">Bridge:' + bCnt + (wss ? ' · ' + esc(wss) : '') + '</span>';
+      }
+      const isBusy = state.archivingCid === cid;
+      const archBtn = state.hostCaps.serverTools
+        ? '<button type="button" class="btn primary row-del" data-action="archive-pending" data-cid="' + esc(cid) + '"' + (isBusy ? ' disabled' : '') + '>' + (isBusy ? '...' : 'Archiver') + '</button>'
+        : "";
+      rows += '<tr>' +
+        '<td><code>' + esc(cid.slice(0, 8)) + '</code></td>' +
+        '<td><strong>' + esc(p.title || "(sans titre)") + '</strong><div class="subline">' + esc(p.window_mode || "") + '</div></td>' +
+        '<td><code>' + esc(String(p.updated_at || "").slice(0, 16).replace("T", " ")) + '</code></td>' +
+        '<td class="num">' + fmtInt(p.llm_calls) + '</td>' +
+        '<td>' + bridgeHtml + '</td>' +
+        '<td>' + archBtn + '</td>' +
+        '</tr>';
+    });
+    return '<div class="panel"><div class="panel-head"><span class="panel-title">Sessions en attente d’archivage (' + pend.length + ')</span></div>' +
+      '<div class="table-wrap"><table><thead><tr>' +
+      '<th>ID</th><th>Session</th><th>MAJ (UTC)</th><th class="num">Appels</th><th>Bridge</th><th></th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
   }
 
   function renderHistoryView() {
@@ -1063,7 +1156,10 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
 
       const mode = String(r.execution_mode || "single");
       const gp = String(r.gravity_profile || "");
-      const modeCell = '<code>' + esc(mode) + '</code>' + (gp ? '<div class="subline">' + esc(gp) + '</div>' : '');
+      const bCnt = Number(r.bridge_children_count) || 0;
+      const bBadge = bCnt > 0 ? ' <span class="pill bridge">bridge:' + bCnt + '</span>' : '';
+      const stBadge = '<span class="pill ok">' + esc(r.status === "archived" || !r.status ? "archivé" : r.status) + '</span>';
+      const modeCell = '<code>' + esc(mode) + '</code>' + bBadge + ' ' + stBadge + (gp ? '<div class="subline">' + esc(gp) + '</div>' : '');
 
       const delBtn = state.hostCaps.serverTools
         ? '<button type="button" class="btn row-del" data-action="ask-delete" data-target="' + esc(rowKey) + '" title="Supprimer">✕</button>'
@@ -1118,7 +1214,8 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
       tableContent +
       '</div>';
 
-    return kpis + charts + listPanel;
+    const pendingPanel = renderPendingPanel();
+    return kpis + pendingPanel + charts + listPanel;
   }
 
   function renderDetailView() {
@@ -1158,11 +1255,15 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
       actionBtns += '<button type="button" class="btn danger" data-action="ask-delete" data-target="' + esc(d.label) + '">Supprimer</button>';
     }
 
+    const bridgeMeta = d.bridge || {};
+    const bridgeCount = Number(bridgeMeta.children_count) || 0;
     const headPanel = '<div class="panel detail-head">' +
       '<div class="detail-row">' +
       '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
       '<button type="button" class="btn" data-action="back-history">← Historique</button>' +
       '<strong style="font-size:15px;">' + esc(d.label) + '</strong>' +
+      '<span class="pill ok">archivé</span>' +
+      (bridgeCount > 0 ? '<span class="pill bridge">Bridge:' + bridgeCount + '</span>' : '') +
       '</div>' +
       '<div class="controls">' + actionBtns + '</div>' +
       '</div>' +
@@ -1211,6 +1312,57 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
       '</div>' +
       '<div class="panel"><div class="panel-head"><span class="panel-title">Coût par Phase d’Exécution</span></div><div class="svg-box">' + renderHorizontalBarsSvg(phaseItems) + '</div></div>';
 
+    const wsEntries = Object.entries(d.by_workspace || {});
+    let wsPanel = "";
+    if (wsEntries.length > 1 || bridgeCount > 0) {
+      const wsItems = wsEntries.map(([wsName, wData], idx) => {
+        const costObj = use2027 ? (wData.cost_usd_projection || wData.cost_usd) : wData.cost_usd;
+        const colors = ["var(--gm-c1)", "var(--gm-c2)", "var(--gm-c3)", "var(--gm-c4)", "var(--gm-c6)", "var(--gm-c7)"];
+        return {
+          label: wsName,
+          val: Number((costObj || {}).total_usd || 0),
+          color: colors[idx % colors.length]
+        };
+      });
+      let wsRows = "";
+      wsEntries.forEach(([wsName, wData]) => {
+        const costObj = use2027 ? (wData.cost_usd_projection || wData.cost_usd) : wData.cost_usd;
+        wsRows += '<tr>' +
+          '<td><code>' + esc(wsName) + '</code></td>' +
+          '<td class="num">' + (wData.agents || 0) + '</td>' +
+          '<td class="num">' + fmtInt(wData.llm_calls) + '</td>' +
+          '<td class="num">$' + Number((costObj || {}).total_usd || 0).toFixed(4) + '</td>' +
+          '<td class="num">' + Number(wData.cost_share_pct || 0).toFixed(1) + '%</td>' +
+          '</tr>';
+      });
+      wsPanel = '<div class="panel"><div class="panel-head"><span class="panel-title">Répartition par Workspace (' + wsEntries.length + ')</span></div>' +
+        '<div class="panels two">' +
+        '<div class="svg-box">' + renderHorizontalBarsSvg(wsItems) + '</div>' +
+        '<div class="table-wrap"><table><thead><tr><th>Workspace</th><th class="num">Ag.</th><th class="num">Appels</th><th class="num">Coût</th><th class="num">Part</th></tr></thead><tbody>' + wsRows + '</tbody></table></div>' +
+        '</div></div>';
+    }
+
+    const bridgeAgents = (d.agents || []).filter((ag) => ag.source === "bridge");
+    let bridgePanel = "";
+    if (bridgeAgents.length) {
+      let bRows = "";
+      bridgeAgents.forEach((ag) => {
+        const costObj = use2027 ? (ag.cost_usd_projection || ag.cost_usd) : ag.cost_usd;
+        const ws = ag.bridge_workspace || ag.workspace || "unknown";
+        bRows += '<tr>' +
+          '<td><code>' + esc(ws) + '</code></td>' +
+          '<td><code>' + esc(ag.bridge_thread_id || "—") + '</code> <span class="subline">' + esc(String(ag.conversation_id || "").slice(0, 8)) + '</span></td>' +
+          '<td><code>' + esc(ag.type_name || "bridge") + '</code></td>' +
+          '<td class="num">' + (ag.depth || 1) + '</td>' +
+          '<td class="num">' + fmtInt(ag.llm_calls) + '</td>' +
+          '<td class="num"><strong>$' + Number((costObj || {}).total_usd || 0).toFixed(4) + '</strong></td>' +
+          '<td><code>' + esc(ag.bridge_job_status || ag.subagent_state || "—") + '</code></td>' +
+          '</tr>';
+      });
+      bridgePanel = '<div class="panel"><div class="panel-head"><span class="panel-title">Arbre Bridge Inter-Workspaces (' + bridgeAgents.length + ')</span></div>' +
+        '<div class="table-wrap"><table><thead><tr><th>Workspace</th><th>Thread</th><th>Type</th><th class="num">Prof.</th><th class="num">Appels</th><th class="num">Coût</th><th>Job</th></tr></thead><tbody>' + bRows + '</tbody></table></div></div>';
+    }
+
     let modelRows = "";
     Object.entries(d.by_model || {}).forEach(([mName, mData]) => {
       const c26 = Number((mData.cost_usd || {}).total_usd || 0);
@@ -1253,9 +1405,12 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
       const statusHtml = flags.length
         ? flags.map((f) => '<span class="pill flag">' + esc(f) + '</span>').join("")
         : '<span class="pill ok">OK</span>';
+      const srcBadge = ag.source === "bridge"
+        ? ' <span class="pill bridge">' + esc(ag.bridge_workspace || ag.workspace || "bridge") + '</span>'
+        : '';
       agRows += '<tr>' +
         '<td><code>' + esc(String(ag.conversation_id || "").slice(0, 8)) + '</code></td>' +
-        '<td>' + esc(ag.role) + '</td>' +
+        '<td>' + esc(ag.role) + srcBadge + '</td>' +
         '<td><span class="pill" style="border-color:' + def.color + ';color:' + def.color + '">' + esc(ag.category) + '</span></td>' +
         '<td class="num">' + (ag.depth || 0) + '</td>' +
         '<td class="num">' + fmtInt(ag.llm_calls) + '</td>' +
@@ -1297,7 +1452,7 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
       '<li>JSON malformés : <code>' + (dq.malformed_lines || 0) + '</code></li>' +
       '</ul></div></div></div>';
 
-    return headPanel + kpis + charts + modelsPanel + agentsPanel + diagPanel;
+    return headPanel + kpis + charts + wsPanel + bridgePanel + modelsPanel + agentsPanel + diagPanel;
   }
 
   function render() {
@@ -1357,6 +1512,22 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
     }
     if (action === "confirm-delete") {
       confirmDeleteSession();
+      return;
+    }
+    if (action === "archive-pending") {
+      ev.stopPropagation();
+      const cid = target.getAttribute("data-cid") || "";
+      if (cid) archivePendingSession(cid, false);
+      return;
+    }
+    if (action === "confirm-force-archive") {
+      const cid = target.getAttribute("data-cid") || "";
+      if (cid) archivePendingSession(cid, true);
+      return;
+    }
+    if (action === "cancel-force-archive") {
+      state.confirmForceArchiveCid = "";
+      render();
       return;
     }
     if (action === "close-toast") {
@@ -1518,7 +1689,7 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
   async function initBridge() {
     try {
       const initRes = await sendRequest("ui/initialize", {
-        appInfo: { name: "gravity-metrics", version: "0.2.0" },
+        appInfo: { name: "gravity-metrics", version: "0.3.0" },
         appCapabilities: {},
         protocolVersion: PROTOCOL_VERSION
       });

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-22
+
+### Added
+- **Unified Gravity Session & Bridge Tree (`plugin/metrics/bridge_links.py`, `collector.py`, `pricing.py`):**
+  - Added strict read-only `bridge.db` resolver (`--bridge-db` > `$GRAVITY_BRIDGE_HOME/bridge.db` > `$GRAVITY_HOME/bridge/bridge.db` > `~/.gemini/gravity/bridge/bridge.db`) using SQLite `?mode=ro` URI, tolerant of missing databases and `v0.1.0` schemas without `caller_conversation_id`.
+  - Dual discovery combining `bridge.db` (`caller_conversation_id` on `v0.2.0+`) and parent transcript MCP parsing (`gravity-bridge_bridge` `send_message`/`dispatch_thread` on `v0.1.0`), deduplicated by `thread_id` and enqueued into `discover_agent_tree()` BFS (`source="bridge"`, `type_name="bridge_<msg_type>"`, `role="bridge:<to_workspace>"`, `depth 2+` native subagent recursion).
+  - Added `by_workspace` aggregation (with inherited `bridge_workspace` across `depth 2+` subtrees), `bridge` execution mode/feature priority (`teamwork > swarm > workflow > bridge > subagents > single`), `TYPE_TO_CATEGORY` mappings (`bridge_handoff`, `bridge_question`, `bridge_info`, `bridge`), and `by_phase` subtree aggregation for `bridge:<workspace>`.
+  - Added `is_bridge_child_conversation()` and `list_pending_sessions()` excluding Bridge child conversations (`[GRAVITY-BRIDGE |` or `target_conversation_id` in `bridge.db`) by default unless `--all` is passed.
+- **Immutable Archiving & Bridge Job Safety (`plugin/metrics/history.py`, `store.py`, `cli.py`):**
+  - Bumped history schema to `2.1.0` (backward-compatible with `2.0.0`, defaulting missing `status` to `"archived"`) with `status`, `archived_at`, `bridge_children_count`, `bridge_workspaces`, and `workspace_share_pct`.
+  - Enforced immutability on `(conversation_id, window_start_step)` (`already_archived=True` unless `--force`) and introduced `PendingBridgeJobsError` blocking archival when Bridge child jobs are `queued`, `claimed`, or `dispatched` unless `--force` is passed.
+  - Added `cli.py archive` (supporting UUID or unique prefix), `cli.py pending` (zero-write), and `--force` / `--bridge-db` flags.
+- **MCP App Pending & Archiving Support (`plugin/mcp/server.py`, `plugin/mcp/widget_html.py`):**
+  - Exposed `pending_sessions` in `open_metrics_dashboard` and `metrics_get_state`, added app-only `metrics_archive_session` tool with Bridge job-safety guards, and added UI panels for pending sessions, `by_workspace`, and Bridge inter-workspace tree.
+
+### Changed
+- **4 Gravity Session Entrypoints (`plugin/metrics/collector.py`):**
+  - Extended `_GRAVITY_CMD_RE`, `_GRAVITY_LEADING_AXES_RE`, and `_extract_slash_commands()` to `/gravity`, `/gravity-workflow`, `/gravity-architect`, and `/gravity-bridge` (excluding `/gravity-metrics`).
+- **Strict `PreInvocation` Hook & Slug Bounds (`plugin/hooks/pre_invocation_metrics.py`, `collector.py`):**
+  - Bounded `slugify_label()` to `<= 64` characters with deterministic `-{sha256[:8]}` suffix on truncation.
+  - Added passthrough for combined slash commands (`/gravity-metrics /other ...`) and long free text (`> 60` chars or `> 6` words without `-l`/`--label`), plus `/gravity-metrics archive <uuid>` and `/gravity-metrics pending` subcommands.
+- **Reports, Manifest & Docs (`plugin/metrics/markdown_report.py`, `formatters.py`, `plugin/plugin.json`, `plugin/rules/AGENTS.md`, `plugin/skills/gravity-metrics/SKILL.md`, `README.md`, `plugin/README.md`):**
+  - Updated Markdown/terminal/chat views with `archivé` status, `bridge` badges, `by_workspace`, Bridge tree, and `pending` tables, and bumped manifest/MCP App versions to `0.3.0`.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

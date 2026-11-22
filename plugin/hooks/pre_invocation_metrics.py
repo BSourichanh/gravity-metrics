@@ -4,7 +4,6 @@
 import json
 from pathlib import Path
 import re
-import shlex
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,61 +34,6 @@ _METRICS_CMD_RE = re.compile(
     r"^/gravity-metrics(?::gravity-metrics)?(?:\s+(.*))?$",
     re.IGNORECASE | re.DOTALL,
 )
-
-
-def _split_tokens(raw_args: str) -> List[str]:
-    text = (raw_args or "").strip()
-    if not text:
-        return []
-    try:
-        return shlex.split(text)
-    except ValueError:
-        return text.split()
-
-
-def _parse_capture_args(tokens: List[str]) -> Dict[str, Any]:
-    label = ""
-    note = ""
-    profile = "2026_nov_standard"
-    full = False
-    positionals: List[str] = []
-
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok in ("-l", "--label"):
-            if i + 1 >= len(tokens):
-                raise ValueError(f"Option {tok} sans valeur.")
-            label = tokens[i + 1]
-            i += 2
-        elif tok in ("-n", "--note"):
-            if i + 1 >= len(tokens):
-                raise ValueError(f"Option {tok} sans valeur.")
-            note = tokens[i + 1]
-            i += 2
-        elif tok == "--profile":
-            if i + 1 >= len(tokens):
-                raise ValueError("Option --profile sans valeur.")
-            profile = tokens[i + 1]
-            i += 2
-        elif tok == "--full":
-            full = True
-            i += 1
-        elif tok.startswith("-"):
-            raise ValueError(f"Option inconnue : `{tok}`.")
-        else:
-            positionals.append(tok)
-            i += 1
-
-    if not label and positionals:
-        label = " ".join(positionals)
-
-    return {
-        "label": label.strip(),
-        "note": note.strip(),
-        "profile": profile.strip(),
-        "full": full,
-    }
 
 
 def _resolve_transcript_path(
@@ -195,21 +139,36 @@ def _build_handoff_system_message(
 def _run_metrics_command(
     payload: Dict[str, Any], raw_input: str, rest: str
 ) -> Optional[Tuple[str, str]]:
+    if rest.startswith("/"):
+        return None
+
     if str(PLUGIN_ROOT) not in sys.path:
         sys.path.insert(0, str(PLUGIN_ROOT))
 
     from metrics import (
         METRICS_MARKER,
+        PendingBridgeJobsError,
+        archive_conversation,
+        classify_metrics_prompt,
         collect_run_metrics,
         default_brain_dir,
+        list_pending_sessions,
+        load_history,
         read_gravity_profile_summary,
         record_session_metrics,
         render_chat_summary_markdown,
+        render_pending_markdown,
+        resolve_conversation_id_in_brain,
         resolve_store_paths,
     )
 
-    tokens = _split_tokens(rest)
-    opts = _parse_capture_args(tokens)
+    parsed = classify_metrics_prompt(raw_input)
+    action = parsed.get("action")
+    if action == "passthrough":
+        return None
+    if action == "error":
+        raise ValueError(parsed.get("error") or "Syntaxe invalide.")
+
     store_dir, history_path = resolve_store_paths()
     brain_dir = resolve_brain_dir(payload) or default_brain_dir()
     cid = resolve_conversation_id(payload)
@@ -221,8 +180,65 @@ def _run_metrics_command(
     project = ws_root.name if ws_root else ""
     gravity_profile = read_gravity_profile_summary(ws_root)
 
-    if not cid:
+    if action == "pending":
+        pending = list_pending_sessions(brain_dir, history_path)
+        md_out = render_pending_markdown(pending)
         tool_args: Dict[str, Any] = {"view": "history"}
+        if project:
+            tool_args["project"] = project
+        sys_msg = _build_handoff_system_message(
+            METRICS_MARKER,
+            summary_line=f"{len(pending)} session(s) Gravity en attente d'archivage affichée(s).",
+            tool_args=tool_args,
+            repeat_warning="sans répéter le tableau déjà affiché",
+        )
+        return md_out, sys_msg
+
+    if action == "archive":
+        target_cid = resolve_conversation_id_in_brain(parsed["target"], brain_dir)
+        same_conv = bool(cid and target_cid == cid)
+        saved_rec, _, metrics = archive_conversation(
+            target_cid,
+            store_dir=store_dir,
+            history_path=history_path,
+            brain_dir=brain_dir,
+            catalog_path=PLUGIN_ROOT / "config" / "pricing_catalog.json",
+            label=parsed["label"],
+            note=parsed["note"],
+            pricing_profile=parsed["profile"],
+            gravity_window=not parsed["full"],
+            full_conversation=parsed["full"],
+            project=project if same_conv else "",
+            gravity_profile=gravity_profile if same_conv else "",
+            force=parsed["force"],
+        )
+        already = bool(saved_rec.get("already_archived"))
+        md_out = render_chat_summary_markdown(
+            metrics,
+            saved_rec,
+            store_dir,
+            reports_written=not already,
+            already_archived=already,
+        )
+        tool_args = {"target": saved_rec["label"], "view": "detail"}
+        if saved_rec.get("project"):
+            tool_args["project"] = saved_rec["project"]
+        elif project:
+            tool_args["project"] = project
+        sys_msg = _build_handoff_system_message(
+            METRICS_MARKER,
+            summary_line=(
+                f"Session `{saved_rec['label']}` déjà archivée (immuable)."
+                if already
+                else f"Session `{saved_rec['label']}` archivée et résumée à l'écran."
+            ),
+            tool_args=tool_args,
+            repeat_warning="sans répéter le tableau déjà affiché",
+        )
+        return md_out, sys_msg
+
+    if not cid:
+        tool_args = {"view": "history"}
         if project:
             tool_args["project"] = project
         md_out = (
@@ -240,12 +256,12 @@ def _run_metrics_command(
         root_id=cid,
         brain_dir=brain_dir,
         pricing_catalog_path=PLUGIN_ROOT / "config" / "pricing_catalog.json",
-        pricing_profile=opts["profile"],
-        label=opts["label"],
-        gravity_window=not opts["full"],
+        pricing_profile=parsed["profile"],
+        label=parsed["label"],
+        gravity_window=not parsed["full"],
         current_prompt_is_metrics=True,
         current_prompt=raw_input,
-        full_conversation=opts["full"],
+        full_conversation=parsed["full"],
         project=project,
         gravity_profile=gravity_profile,
     )
@@ -254,6 +270,25 @@ def _run_metrics_command(
         tool_args = {"view": "history"}
         if project:
             tool_args["project"] = project
+        archived_for_cid = [
+            r for r in load_history(history_path) if r.get("conversation_id") == cid
+        ]
+        if archived_for_cid:
+            last_lbl = archived_for_cid[-1].get("label") or cid[:8]
+            tool_args = {"target": last_lbl, "view": "detail"}
+            if project:
+                tool_args["project"] = project
+            md_out = (
+                "### Gravity Metrics — Session déjà archivée\n\n"
+                f"Aucune nouvelle activité LLM à capturer depuis l'archivage de `{last_lbl}` ; "
+                "ouverture du tableau de bord."
+            )
+            sys_msg = _build_handoff_system_message(
+                METRICS_MARKER,
+                summary_line=f"Session `{last_lbl}` déjà archivée sans nouvelle activité LLM.",
+                tool_args=tool_args,
+            )
+            return md_out, sys_msg
         scope_note = f" sur le projet `{project}`" if project else ""
         md_out = (
             "### Gravity Metrics — Ouverture du widget\n\n"
@@ -267,26 +302,37 @@ def _run_metrics_command(
         )
         return md_out, sys_msg
 
-    saved_rec, _ = record_session_metrics(
-        metrics,
-        store_dir=store_dir,
-        history_path=history_path,
-        label=opts["label"],
-        note=opts["note"],
-        auto_label=not bool(opts["label"]),
-    )
+    try:
+        saved_rec, _ = record_session_metrics(
+            metrics,
+            store_dir=store_dir,
+            history_path=history_path,
+            label=parsed["label"],
+            note=parsed["note"],
+            auto_label=not bool(parsed["label"]),
+            force=parsed["force"],
+        )
+    except PendingBridgeJobsError:
+        raise
+
+    already = bool(saved_rec.get("already_archived"))
     md_out = render_chat_summary_markdown(
         metrics,
         saved_rec,
         store_dir,
-        reports_written=True,
+        reports_written=not already,
+        already_archived=already,
     )
     tool_args = {"target": saved_rec["label"], "view": "detail"}
     if project:
         tool_args["project"] = project
     sys_msg = _build_handoff_system_message(
         METRICS_MARKER,
-        summary_line=f"Session `{saved_rec['label']}` déjà capturée et résumée à l'écran.",
+        summary_line=(
+            f"Session `{saved_rec['label']}` déjà archivée (immuable)."
+            if already
+            else f"Session `{saved_rec['label']}` déjà capturée et résumée à l'écran."
+        ),
         tool_args=tool_args,
         repeat_warning="sans répéter le tableau déjà affiché",
     )
@@ -323,13 +369,24 @@ def main() -> int:
         return 0
 
     rest = (match.group(1) or "").strip()
+    if rest.startswith("/"):
+        emit_passthrough()
+        return 0
+
     try:
         result = _run_metrics_command(payload, raw_input, rest)
     except Exception as exc:
+        if exc.__class__.__name__ == "PendingBridgeJobsError":
+            emit_user_markdown(
+                f"### Gravity Metrics — Archivage bloqué (Bridge actif)\n\n{exc}"
+            )
+            return 0
         emit_user_markdown(
             f"### Gravity Metrics — Erreur\n\n"
             f"`{exc}`\n\n"
-            f"Syntaxe : `/gravity-metrics [label] [-n \"note\"] [--full]`"
+            'Syntaxe : `/gravity-metrics [label] [-n "note"] [--full] [--force]` · '
+            '`/gravity-metrics archive <uuid> [label] [--full] [--force]` · '
+            '`/gravity-metrics pending`'
         )
         return 0
 

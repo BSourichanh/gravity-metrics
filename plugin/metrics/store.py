@@ -6,8 +6,14 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .collector import collect_run_metrics, slugify_label, suggest_auto_label
+from .collector import (
+    collect_run_metrics,
+    resolve_conversation_id_in_brain,
+    slugify_label,
+    suggest_auto_label,
+)
 from .history import (
+    find_archived_session,
     history_lock,
     load_history,
     remove_session,
@@ -18,6 +24,23 @@ from .history import (
 )
 from .markdown_report import render_metrics_markdown, render_session_detail_markdown
 from .pricing import default_store_dir
+
+
+class PendingBridgeJobsError(RuntimeError):
+    """Erreur levée lorsqu'un archivage est bloqué par des jobs Gravity Bridge encore actifs."""
+
+    def __init__(self, pending_jobs: List[Dict[str, Any]]) -> None:
+        self.pending_jobs = list(pending_jobs)
+        details = ", ".join(
+            f"{j.get('thread_id') or '?'}->{j.get('to_workspace') or '?'} ({j.get('status') or 'actif'})"
+            for j in self.pending_jobs[:5]
+        )
+        if len(self.pending_jobs) > 5:
+            details += f", +{len(self.pending_jobs) - 5} autre(s)"
+        super().__init__(
+            f"Archivage bloqué : {len(self.pending_jobs)} job(s) Gravity Bridge encore actif(s) "
+            f"[{details}]. Attendez leur clôture ou relancez avec --force."
+        )
 
 
 def resolve_store_paths(
@@ -95,20 +118,35 @@ def record_session_metrics(
     note: str = "",
     summary_only: bool = False,
     auto_label: bool = False,
+    force: bool = False,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """Enregistre une session sous verrou dans `history.jsonl` et régénère les vues."""
+    """Enregistre/archive une session de manière immuable sous verrou dans `history.jsonl`."""
     explicit_label = label.strip()
     metrics_to_write = dict(metrics)
 
     with history_lock(history_path):
         records = load_history(history_path)
+        cid = str(metrics_to_write.get("root_conversation_id") or "").strip()
+        win = metrics_to_write.get("window") or {}
+        w_start = win.get("start_step_index")
+        existing = find_archived_session(records, cid, w_start)
+        if existing is not None and not force:
+            ret = dict(existing)
+            ret["already_archived"] = True
+            return ret, records
+
+        pending_jobs = list(metrics_to_write.get("bridge_pending_jobs") or [])
+        if pending_jobs and not force:
+            raise PendingBridgeJobsError(pending_jobs)
+
         harmonized_proj = _harmonize_project_name(str(metrics_to_write.get("project") or ""), records)
         metrics_to_write["project"] = harmonized_proj
         metrics["project"] = harmonized_proj
         if explicit_label:
             resolved_label = explicit_label
+        elif existing is not None and existing.get("label"):
+            resolved_label = str(existing["label"]).strip()
         elif auto_label:
-            win = metrics_to_write.get("window") or {}
             resolved_label = suggest_auto_label(
                 project=str(metrics_to_write.get("project") or ""),
                 first_prompt=str(win.get("first_prompt") or ""),
@@ -141,6 +179,51 @@ def record_session_metrics(
     return saved_rec, updated
 
 
+def archive_conversation(
+    target: str,
+    *,
+    store_dir: Path,
+    history_path: Path,
+    brain_dir: Path,
+    catalog_path: Path,
+    label: str = "",
+    note: str = "",
+    pricing_profile: str = "2026_nov_standard",
+    gravity_window: bool = True,
+    full_conversation: bool = False,
+    project: str = "",
+    gravity_profile: str = "",
+    summary_only: bool = False,
+    force: bool = False,
+    bridge_db_path: Optional[Path] = None,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+    """Résout un UUID ou préfixe, collecte la session et l'archive avec garde-fous."""
+    cid = resolve_conversation_id_in_brain(target, brain_dir)
+    metrics = collect_run_metrics(
+        root_id=cid,
+        brain_dir=brain_dir,
+        pricing_catalog_path=catalog_path,
+        pricing_profile=pricing_profile,
+        label=label,
+        gravity_window=bool(gravity_window and not full_conversation),
+        full_conversation=bool(full_conversation),
+        project=project,
+        gravity_profile=gravity_profile,
+        bridge_db_path=bridge_db_path,
+    )
+    saved_rec, records = record_session_metrics(
+        metrics,
+        store_dir=store_dir,
+        history_path=history_path,
+        label=label,
+        note=note,
+        summary_only=summary_only,
+        auto_label=not bool(label.strip()),
+        force=force,
+    )
+    return saved_rec, records, metrics
+
+
 def load_session_for_inspect(
     target: str,
     *,
@@ -149,6 +232,7 @@ def load_session_for_inspect(
     brain_dir: Path,
     catalog_path: Path,
     pricing_profile: str = "2026_nov_standard",
+    bridge_db_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, Any], str]:
     """Charge une session depuis `reports/<slug>.json` (hors-ligne) ou la recalcule depuis `brain_dir`."""
     records = load_history(history_path)
@@ -180,6 +264,7 @@ def load_session_for_inspect(
         pricing_catalog_path=catalog_path,
         pricing_profile=pricing_profile,
         label=label,
+        bridge_db_path=bridge_db_path,
     )
     return metrics, slug
 

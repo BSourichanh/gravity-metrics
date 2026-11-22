@@ -91,10 +91,36 @@ def to_session_record(
 
     cid = metrics["root_conversation_id"]
     resolved_label = (label or metrics.get("label") or f"run-{cid[:8]}").strip()
+    now_iso = _fmt_iso_utc(datetime.now(timezone.utc))
+
+    bridge_meta = metrics.get("bridge") or {}
+    agents_list = metrics.get("agents") or []
+    bridge_children_count = int(
+        bridge_meta["children_count"]
+        if bridge_meta.get("children_count") is not None
+        else sum(1 for a in agents_list if a.get("source") == "bridge")
+    )
+    bridge_workspaces = list(
+        bridge_meta.get("workspaces")
+        or sorted(
+            {
+                str(a.get("bridge_workspace") or a.get("workspace") or "").strip()
+                for a in agents_list
+                if a.get("source") == "bridge"
+                and str(a.get("bridge_workspace") or a.get("workspace") or "").strip()
+            }
+        )
+    )
+    workspace_shares = {
+        ws: data["cost_share_pct"]
+        for ws, data in (metrics.get("by_workspace") or {}).items()
+    }
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "added_at": _fmt_iso_utc(datetime.now(timezone.utc)),
+        "status": "archived",
+        "added_at": now_iso,
+        "archived_at": now_iso,
         "label": resolved_label,
         "detail_slug": slugify_label(resolved_label, f"session-{cid[:8]}"),
         "conversation_id": cid,
@@ -110,6 +136,9 @@ def to_session_record(
         "parallelism_factor": s.get("parallelism_factor", 1.0),
         "execution_mode": s.get("execution_mode", "single"),
         "features_used": s.get("features_used", ["single"]),
+        "bridge_children_count": bridge_children_count,
+        "bridge_workspaces": bridge_workspaces,
+        "workspace_share_pct": workspace_shares,
         "primary_model": primary_model,
         "models": models_compact,
         "agents": s["total_agents"],
@@ -139,7 +168,7 @@ def to_session_record(
 
 
 def load_history(history_path: Union[Path, str]) -> List[Dict[str, Any]]:
-    """Charge la liste chronologique des sessions depuis history.jsonl."""
+    """Charge la liste chronologique des sessions depuis history.jsonl (rétrocompatible 2.0.0)."""
     hpath = Path(history_path)
     if not hpath.is_file():
         return []
@@ -153,8 +182,26 @@ def load_history(history_path: Union[Path, str]) -> List[Dict[str, Any]]:
         except Exception:
             continue
         if isinstance(obj, dict) and obj.get("conversation_id"):
+            if not obj.get("status"):
+                obj["status"] = "archived"
             records.append(obj)
     return records
+
+
+def find_archived_session(
+    records: List[Dict[str, Any]],
+    conversation_id: str,
+    window_start_step: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """Retourne l'enregistrement archivé correspondant à `(conversation_id, window_start_step)` s'il existe."""
+    for rec in records:
+        if (
+            rec.get("conversation_id") == conversation_id
+            and rec.get("window_start_step") == window_start_step
+            and str(rec.get("status") or "archived").lower() == "archived"
+        ):
+            return dict(rec)
+    return None
 
 
 def save_history(history_path: Union[Path, str], records: List[Dict[str, Any]]) -> None:

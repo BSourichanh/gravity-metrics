@@ -1,14 +1,14 @@
 {
   "name": "gravity-metrics",
   "displayName": "Gravity Metrics",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Capture /gravity-metrics, historique centralisé et widget MCP App interactif des coûts, tokens et cache Antigravity.",
   "logo": "assets/logo.svg",
   "homepage": "https://github.com/BSourichanh/gravity-metrics",
   "repository": "https://github.com/BSourichanh/gravity-metrics.git",
   "suggestedPrompts": [
     "/gravity-metrics",
-    "/gravity-metrics --full",
+    "/gravity-metrics pending",
     "Analyse les coûts et le taux de cache de mes sessions Gravity"
   ],
   "author": {
