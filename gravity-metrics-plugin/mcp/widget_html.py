@@ -1518,7 +1518,7 @@ _WIDGET_HTML = r"""<!DOCTYPE html>
   async function initBridge() {
     try {
       const initRes = await sendRequest("ui/initialize", {
-        appInfo: { name: "gravity-metrics", version: "0.1.1" },
+        appInfo: { name: "gravity-metrics", version: "0.1.2" },
         appCapabilities: {},
         protocolVersion: PROTOCOL_VERSION
       });

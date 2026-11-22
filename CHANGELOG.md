@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-11-22
+
+### Changed
+- **Repository Agent Guidelines (`AGENTS.md`):**
+  - Aligned root `AGENTS.md` on the Gravity ecosystem 3-section standard (`## Périmètre & Architecture`, `## Invariants`, `## Vérifications obligatoires`) under 2,500 UTF-8 bytes (`2,209` bytes) and added the orchestrator-only Git & versioning invariant.
+
 ## [0.1.1] - 2026-11-21
 
 ### Added

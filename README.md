@@ -20,7 +20,7 @@ gravity-metrics/
 │   └── scripts/                            # cli.py + validate.py (--strict, --fix-python-cmd)
 ├── tests/                                  # Unit & integrity test suite (engine, hook, MCP server, installer)
 ├── AGENTS.md
-├── CHANGELOG.md                            # Release notes (v0.1.1)
+├── CHANGELOG.md                            # Release notes (v0.1.2)
 ├── LICENSE
 └── README.md
 ```
@@ -124,7 +124,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 ## 5. Documentation & Releases
 
-- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0`, `v0.1.1`)
+- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0`, `v0.1.1`, `v0.1.2`)
 - [`gravity-metrics-plugin/README.md`](gravity-metrics-plugin/README.md) — Plugin documentation (French)
 - [`AGENTS.md`](AGENTS.md) — Repository invariants and verification commands
 

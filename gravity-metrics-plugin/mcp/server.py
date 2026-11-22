@@ -26,7 +26,7 @@ from metrics import (  # noqa: E402
 from widget_html import render_mcp_widget_html  # noqa: E402
 
 SERVER_NAME = "gravity-metrics"
-SERVER_VERSION = "0.1.1"
+SERVER_VERSION = "0.1.2"
 APP_URI = "ui://gravity-metrics/dashboard.html"
 APP_MIME = "text/html;profile=mcp-app"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
