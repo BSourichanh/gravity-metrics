@@ -106,7 +106,7 @@ class TestMcpServer(unittest.TestCase):
             expected_version = json.loads(
                 (PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8")
             )["version"]
-            self.assertEqual(expected_version, "0.4.1")
+            self.assertEqual(expected_version, "0.4.2")
             self.assertEqual(by_id[1]["serverInfo"]["name"], "gravity-metrics")
             self.assertEqual(by_id[1]["serverInfo"]["version"], expected_version)
             self.assertEqual(by_id[2], {})

@@ -356,9 +356,12 @@ def render_inspect_text(metrics: Dict[str, Any]) -> str:
     lines.append("--- Top 10 agents par coût ---")
     for idx, ag in enumerate(metrics["agents"][:10], start=1):
         st = "OK" if ag["clean_termination"] else "INTERRUPTED"
-        src_tag = f" [bridge]" if ag.get("source") == "bridge" else ""
+        src = ag.get("source")
+        src_tag = " [bridge]" if src == "bridge" else (" [workflow]" if src == "workflow" else "")
+        max_role_len = 34 - len(src_tag)
+        role_display = f"{ag['role'][:max_role_len]}{src_tag}"
         lines.append(
-            f"  {idx:2d}. {(ag['role'] + src_tag)[:34]:34s} [{ag['category']:13s}] "
+            f"  {idx:2d}. {role_display:34s} [{ag['category']:13s}] "
             f"{ag['llm_calls']:3d} calls | maxCtx={ag['max_context_tokens']:7,d} | "
             f"${ag['cost_usd']['total_usd']:.4f} ({st})"
         )
@@ -477,8 +480,11 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
     for idx, ag in enumerate(metrics["agents"][:15], start=1):
         term = "Propre" if ag["clean_termination"] else "Interrompu"
         role_cell = _md_cell(ag.get("role"), "—")
-        if ag.get("source") == "bridge":
+        src = ag.get("source")
+        if src == "bridge":
             role_cell = f"{role_cell} [bridge · d.{int(ag.get('depth') or 1)}]"
+        elif src == "workflow":
+            role_cell = f"{role_cell} [workflow · d.{int(ag.get('depth') or 1)}]"
         lines.append(
             f"| {idx} | {role_cell} (`{ag['conversation_id'][:8]}`) | {ag['category']} | "
             f"{ag['llm_calls']} | {_fmt_int(ag['max_context_tokens'])} | "

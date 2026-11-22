@@ -14,7 +14,7 @@
 gravity-metrics/
 ├── install.py                              # Cross-platform installer / uninstaller (atomic copy + agy)
 ├── plugin/                                 # Standalone plugin ready to install
-│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.4.1)
+│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.4.2)
 │   ├── hooks.json                          # PreInvocation hook (pre-capture on /gravity-metrics)
 │   ├── mcp_config.json                     # MCP App stdio server configuration
 │   ├── README.md                           # Plugin documentation (French)
@@ -30,7 +30,7 @@ gravity-metrics/
 │   └── scripts/                            # cli.py + validate.py (--strict, --fix-python-cmd)
 ├── tests/                                  # Unit & integrity test suite (engine, hook, MCP server, audits_reader, installer)
 ├── AGENTS.md
-├── CHANGELOG.md                            # Release notes (v0.4.1)
+├── CHANGELOG.md                            # Release notes (v0.4.2)
 ├── LICENSE
 └── README.md
 ```
@@ -141,7 +141,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 ## 5. Documentation & Releases
 
-- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.4.1`)
+- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.4.1`, `v0.4.2`)
 - [`plugin/README.md`](plugin/README.md) — Plugin documentation (French)
 - [`AGENTS.md`](AGENTS.md) — Repository invariants and verification commands
 

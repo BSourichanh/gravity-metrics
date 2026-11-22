@@ -53,10 +53,19 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> Set[str]:
         return set()
 
 
+def _is_callback_job(job: Any) -> bool:
+    """Retourne True si un job Bridge correspond à un callback retour."""
+    if not isinstance(job, dict) or not job:
+        return False
+    direction = str(job.get("direction") or "").strip().lower()
+    action = str(job.get("action") or "").strip().lower()
+    return direction == "callback" or action == "send_message"
+
+
 def load_bridge_target_conversation_ids(
     bridge_db: Optional[Union[Path, str]] = None,
 ) -> Set[str]:
-    """Retourne tous les `target_conversation_id` connus dans `bridge.db` (threads et jobs)."""
+    """Retourne tous les `target_conversation_id` des enfants Bridge connus (hors callbacks)."""
     db_path = resolve_bridge_db_path(bridge_db)
     conn = _connect_ro(db_path)
     if conn is None:
@@ -64,13 +73,28 @@ def load_bridge_target_conversation_ids(
     targets: Set[str] = set()
     try:
         with closing(conn):
-            for tbl in ("threads", "jobs"):
-                cols = _table_columns(conn, tbl)
-                if "target_conversation_id" not in cols:
-                    continue
+            tcols = _table_columns(conn, "threads")
+            if "target_conversation_id" in tcols:
                 for row in conn.execute(
-                    f"SELECT DISTINCT target_conversation_id FROM {tbl} "
+                    "SELECT DISTINCT target_conversation_id FROM threads "
                     "WHERE target_conversation_id IS NOT NULL AND TRIM(target_conversation_id) != ''"
+                ):
+                    val = str(row[0] or "").strip()
+                    if val:
+                        targets.add(val)
+
+            jcols = _table_columns(conn, "jobs")
+            if "target_conversation_id" in jcols:
+                clauses = [
+                    "target_conversation_id IS NOT NULL AND TRIM(target_conversation_id) != ''"
+                ]
+                if "direction" in jcols:
+                    clauses.append("COALESCE(LOWER(TRIM(direction)), '') != 'callback'")
+                if "action" in jcols:
+                    clauses.append("COALESCE(LOWER(TRIM(action)), '') != 'send_message'")
+                where_sql = " AND ".join(clauses)
+                for row in conn.execute(
+                    f"SELECT DISTINCT target_conversation_id FROM jobs WHERE {where_sql}"
                 ):
                     val = str(row[0] or "").strip()
                     if val:
@@ -78,6 +102,32 @@ def load_bridge_target_conversation_ids(
     except sqlite3.Error:
         return set()
     return targets
+
+
+def load_bridge_caller_conversation_ids(
+    bridge_db: Optional[Union[Path, str]] = None,
+) -> Set[str]:
+    """Retourne tous les `caller_conversation_id` connus dans `threads` de `bridge.db`."""
+    db_path = resolve_bridge_db_path(bridge_db)
+    conn = _connect_ro(db_path)
+    if conn is None:
+        return set()
+    callers: Set[str] = set()
+    try:
+        with closing(conn):
+            tcols = _table_columns(conn, "threads")
+            if "caller_conversation_id" not in tcols:
+                return set()
+            for row in conn.execute(
+                "SELECT DISTINCT caller_conversation_id FROM threads "
+                "WHERE caller_conversation_id IS NOT NULL AND TRIM(caller_conversation_id) != ''"
+            ):
+                val = str(row[0] or "").strip()
+                if val:
+                    callers.add(val)
+    except sqlite3.Error:
+        return set()
+    return callers
 
 
 def _decode_json_str(raw: Any) -> str:
@@ -262,17 +312,40 @@ def _parse_transcript_bridge_calls(transcript_path: Path) -> List[Dict[str, Any]
     return discovered
 
 
+def _record_thread_job(
+    jobs_by_tid: Dict[str, Dict[str, Dict[str, Any]]],
+    tid: str,
+    job: Dict[str, Any],
+) -> None:
+    """Classe un job dans `outbound`, `active_outbound` et `active_callback` par `thread_id`."""
+    bucket = jobs_by_tid.setdefault(
+        tid,
+        {"outbound": {}, "active_outbound": {}, "active_callback": {}},
+    )
+    status = str(job.get("status") or "").strip().lower()
+    is_active = status in ACTIVE_BRIDGE_JOB_STATUSES
+    if _is_callback_job(job):
+        if is_active:
+            bucket["active_callback"] = job
+    else:
+        bucket["outbound"] = job
+        if is_active:
+            bucket["active_outbound"] = job
+
+
 def _query_bridge_db_for_threads(
     conn: sqlite3.Connection,
     parent_cid: str,
     thread_ids: List[str],
-) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Dict[str, Any]]]]:
     """Interroge `threads` et `jobs` par `caller_conversation_id` (v0.2.0+) et par `thread_id`."""
     threads_by_id: Dict[str, Dict[str, Any]] = {}
-    latest_job_by_thread: Dict[str, Dict[str, Any]] = {}
+    jobs_by_tid: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     thread_cols = _table_columns(conn, "threads")
     job_cols = _table_columns(conn, "jobs")
+    order_cols = [c for c in ("created_at", "id") if c in job_cols]
+    order_sql = f" ORDER BY {', '.join(f'{c} ASC' for c in order_cols)}" if order_cols else ""
 
     if "caller_conversation_id" in thread_cols:
         for row in conn.execute(
@@ -286,19 +359,21 @@ def _query_bridge_db_for_threads(
 
     if "caller_conversation_id" in job_cols:
         for row in conn.execute(
-            "SELECT * FROM jobs WHERE caller_conversation_id = ? ORDER BY created_at ASC",
+            f"SELECT * FROM jobs WHERE caller_conversation_id = ?{order_sql}",
             (parent_cid,),
         ):
             r = dict(row)
+            if _is_callback_job(r):
+                continue
             tid = str(r.get("thread_id") or "").strip()
             if tid:
-                latest_job_by_thread[tid] = r
+                _record_thread_job(jobs_by_tid, tid, r)
                 if tid not in threads_by_id and thread_cols:
                     trow = conn.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
                     if trow is not None:
                         threads_by_id[tid] = dict(trow)
 
-    all_tids = sorted(set(thread_ids) | set(threads_by_id.keys()))
+    all_tids = sorted(set(thread_ids) | set(threads_by_id.keys()) | set(jobs_by_tid.keys()))
     if all_tids and thread_cols:
         placeholders = ",".join("?" for _ in all_tids)
         for row in conn.execute(
@@ -311,17 +386,19 @@ def _query_bridge_db_for_threads(
                 threads_by_id[tid] = r
 
     if all_tids and job_cols:
+        for tid in all_tids:
+            jobs_by_tid.pop(tid, None)
         placeholders = ",".join("?" for _ in all_tids)
         for row in conn.execute(
-            f"SELECT * FROM jobs WHERE thread_id IN ({placeholders}) ORDER BY created_at ASC, id ASC",
+            f"SELECT * FROM jobs WHERE thread_id IN ({placeholders}){order_sql}",
             tuple(all_tids),
         ):
             r = dict(row)
             tid = str(r.get("thread_id") or "").strip()
             if tid:
-                latest_job_by_thread[tid] = r
+                _record_thread_job(jobs_by_tid, tid, r)
 
-    return threads_by_id, latest_job_by_thread
+    return threads_by_id, jobs_by_tid
 
 
 def discover_bridge_links(
@@ -347,7 +424,7 @@ def discover_bridge_links(
     db_path = resolve_bridge_db_path(bridge_db)
     conn = _connect_ro(db_path)
     threads_by_id: Dict[str, Dict[str, Any]] = {}
-    jobs_by_tid: Dict[str, Dict[str, Any]] = {}
+    jobs_by_tid: Dict[str, Dict[str, Dict[str, Any]]] = {}
     if conn is not None:
         try:
             with closing(conn):
@@ -360,7 +437,7 @@ def discover_bridge_links(
 
     ordered_tids: List[str] = []
     seen_tids: Set[str] = set()
-    for tid in list(tx_by_tid.keys()) + sorted(threads_by_id.keys()):
+    for tid in list(tx_by_tid.keys()) + sorted(set(threads_by_id.keys()) | set(jobs_by_tid.keys())):
         if tid not in seen_tids:
             seen_tids.add(tid)
             ordered_tids.append(tid)
@@ -369,22 +446,26 @@ def discover_bridge_links(
     for tid in ordered_tids:
         tx = tx_by_tid.get(tid, {})
         th = threads_by_id.get(tid, {})
-        jb = jobs_by_tid.get(tid, {})
+        jb_info = jobs_by_tid.get(tid, {})
+        outbound_jb = jb_info.get("outbound") or {}
+        active_out_jb = jb_info.get("active_outbound") or {}
+        active_cb_jb = jb_info.get("active_callback") or {}
 
         to_workspace = str(
-            th.get("to_workspace") or jb.get("target_workspace") or tx.get("to_workspace") or ""
+            th.get("to_workspace") or outbound_jb.get("target_workspace") or tx.get("to_workspace") or ""
         ).strip()
         msg_type = str(th.get("msg_type") or tx.get("msg_type") or "").strip().lower()
         target_cid = str(
             th.get("target_conversation_id")
-            or jb.get("target_conversation_id")
+            or outbound_jb.get("target_conversation_id")
             or tx.get("target_conversation_id")
             or ""
         ).strip()
-        job_status = str(jb.get("status") or "").strip().lower()
+        has_active_job = bool(active_out_jb or active_cb_jb)
+        display_jb = active_out_jb or active_cb_jb or outbound_jb
+        job_status = str(display_jb.get("status") or "").strip().lower()
         thread_status = str(th.get("status") or "").strip().lower()
-        has_active_job = job_status in ACTIVE_BRIDGE_JOB_STATUSES
-        dispatched = bool(tx.get("dispatched")) or bool(jb) or bool(target_cid)
+        dispatched = bool(tx.get("dispatched")) or bool(outbound_jb) or bool(target_cid)
 
         if not dispatched and not has_active_job:
             continue
@@ -397,11 +478,14 @@ def discover_bridge_links(
                 "target_conversation_id": target_cid,
                 "spawn_step_index": tx.get("spawn_step_index"),
                 "thread_status": thread_status or "open",
-                "job_id": str(jb.get("id") or ""),
+                "job_id": str(display_jb.get("id") or ""),
                 "job_status": job_status,
-                "job_action": str(jb.get("action") or ""),
+                "job_action": str(display_jb.get("action") or ""),
                 "has_active_job": has_active_job,
-                "created_at": str(th.get("created_at") or jb.get("created_at") or tx.get("created_at") or "") or None,
+                "created_at": str(
+                    th.get("created_at") or outbound_jb.get("created_at") or tx.get("created_at") or ""
+                )
+                or None,
             }
         )
     return links

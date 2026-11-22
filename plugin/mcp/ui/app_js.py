@@ -1942,7 +1942,7 @@ APP_JS = r"""
   async function initBridge() {
     try {
       const initRes = await sendRequest("ui/initialize", {
-        appInfo: { name: "gravity-metrics", version: "0.4.1" },
+        appInfo: { name: "gravity-metrics", version: "0.4.2" },
         appCapabilities: {},
         protocolVersion: PROTOCOL_VERSION
       });

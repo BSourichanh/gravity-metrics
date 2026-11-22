@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-11-22
+
+### Fixed
+- **Bridge v0.2.0 Callback Handling (`plugin/metrics/bridge_links.py`):**
+  - Added `_is_callback_job()` (`direction == "callback"` or `action == "send_message"`) and dynamically excluded callback jobs in `load_bridge_target_conversation_ids()` (preserving compatibility with v0.1.0 schemas lacking `direction`), preventing root conversations from being misclassified as Bridge children.
+  - Added `load_bridge_caller_conversation_ids()` (`?mode=ro`) to identify root caller conversations from `threads.caller_conversation_id`.
+  - Separated outbound jobs from callback jobs in `_query_bridge_db_for_threads()` and `discover_bridge_links()`: only non-callback outbound jobs can add threads via `jobs.caller_conversation_id` or provide `to_workspace`, `target_conversation_id`, and `created_at` fallbacks, while active callback jobs (`queued`, `claimed`, `dispatched`) still flag `has_active_job=True` and expose their `job_id`, `job_status`, and `job_action` when outbound is completed or absent.
+
+### Added
+- **`run_workflow` Child Discovery & Public Exports (`plugin/metrics/collector.py`, `markdown_report.py`, `__init__.py`):**
+  - Added `discover_workflow_children()` (read-only across `.system_generated/tasks/task-*.log`, `.system_generated/messages/*.json` excluding `read.json`, and synchronous `transcript.jsonl` `GENERIC`/`SYSTEM_MESSAGE` fallback) with UUID deduplication preserving the first valid `spawn_step_index` and strict `parent_cid` exclusion.
+  - Enqueued `run_workflow` children (`source="workflow"`, inheriting `bridge_workspace`) in `discover_agent_tree()` BFS, updated `_detect_execution_mode()` to recognize `source == "workflow"`, and added `[workflow]` / `[workflow · d.<depth>]` tags in `render_inspect_text()` and `render_session_detail_markdown()`.
+  - Exported `load_bridge_caller_conversation_ids`, `discover_workflow_children`, and `load_known_child_conversation_ids` in `plugin/metrics/__init__.py`.
+
+### Changed
+- **Strict Root Session Filtering & Version Bump (`plugin/metrics/collector.py`, `plugin/plugin.json`, `plugin/mcp/server.py`, `plugin/mcp/ui/app_js.py`, `tests/test_mcp_server.py`, `README.md`, `plugin/README.md`):**
+  - Added `load_known_child_conversation_ids()` (aggregating Bridge targets, `subagents/*.json` excluding `typeName`/`type_name == "root"` and self-references, and `run_workflow` children) and removed `_has_gravity_workspace_uri()` and loose `"gravity"` substring heuristics from `list_gravity_conversations()` and `list_pending_sessions()`.
+  - Root sessions are now strictly identified by explicit `/gravity*` slash commands, `runs.jsonl` entries, or `bridge.db` `caller_conversation_id` while excluding all known child conversations.
+  - Bumped plugin manifest, MCP server, UI appInfo, documentation, and test expectations to `0.4.2`.
+
 ## [0.4.1] - 2026-11-22
 
 ### Changed

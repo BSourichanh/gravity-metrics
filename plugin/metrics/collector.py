@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from .bridge_links import (
     discover_bridge_links,
+    load_bridge_caller_conversation_ids,
     load_bridge_target_conversation_ids,
 )
 from .pricing import (
@@ -45,6 +46,11 @@ _GRAVITY_LEADING_AXES_RE = re.compile(
     r"(?:\s+(?:low|medium|high|ultra|evo|evolutive|slow|fast|safe|unsafe|auto|init|status|evals|modules|doctor|sync|spec|handoff|archive|workspaces|link|send|read|take|reply|done|prune))*\s*",
     re.IGNORECASE,
 )
+_WORKFLOW_AGENT_LINE_RE = re.compile(
+    r"^\s*-\s+\[agent:([^\]]+)\]\s+([^:]+?):\s*([^(]+?)\s*"
+    r"\(([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)"
+)
+_TASK_STEP_RE = re.compile(r"^task-(\d+)\.log$", re.IGNORECASE)
 _STOPWORDS = {
     "a",
     "an",
@@ -423,21 +429,203 @@ def _collect_known_gravity_session_ids(runs_jsonl_paths: Optional[List[Path]]) -
     return ids
 
 
-def _has_gravity_workspace_uri(conv_dir: Path) -> bool:
-    sub_dir = conv_dir / ".system_generated" / "subagents"
-    if not sub_dir.is_dir():
-        return False
-    for fn in sub_dir.iterdir():
-        if not fn.is_file() or fn.suffix.lower() != ".json":
+def _task_log_sort_key(path: Path) -> Tuple[int, int, str]:
+    m = _TASK_STEP_RE.match(path.name)
+    if m:
+        return (0, int(m.group(1)), path.name)
+    return (1, 0, path.name)
+
+
+def _extract_workflow_children_from_text(
+    text: str,
+    spawn_step_index: Optional[int],
+    parent_cid_lower: str,
+    by_cid: Dict[str, Dict[str, Any]],
+    ordered_keys: List[str],
+) -> None:
+    """Extrait les lignes `- [agent:<type>] <role>: <state> (<UUID>)` dans `by_cid`."""
+    if not text or "[agent:" not in text:
+        return
+    for line in text.splitlines():
+        m = _WORKFLOW_AGENT_LINE_RE.match(line)
+        if not m:
             continue
+        type_name = m.group(1).strip()
+        role = m.group(2).strip()
+        state = m.group(3).strip()
+        wcid = m.group(4).strip()
+        key = wcid.lower()
+        if not wcid or key == parent_cid_lower:
+            continue
+        if key not in by_cid:
+            by_cid[key] = {
+                "conversation_id": wcid,
+                "type_name": type_name,
+                "role": role,
+                "state": state,
+                "spawn_step_index": spawn_step_index,
+            }
+            ordered_keys.append(key)
+        elif by_cid[key]["spawn_step_index"] is None and spawn_step_index is not None:
+            by_cid[key]["spawn_step_index"] = spawn_step_index
+
+
+def discover_workflow_children(
+    parent_cid: str,
+    brain_dir: Union[Path, str],
+) -> List[Dict[str, Any]]:
+    """Découvre en lecture seule les sous-agents `run_workflow` d'une conversation."""
+    clean_parent = str(parent_cid or "").strip()
+    if not clean_parent:
+        return []
+    base = Path(brain_dir)
+    cdir = base / clean_parent
+    if not cdir.is_dir():
+        return []
+
+    parent_cid_lower = clean_parent.lower()
+    by_cid: Dict[str, Dict[str, Any]] = {}
+    ordered_keys: List[str] = []
+
+    tasks_dir = cdir / ".system_generated" / "tasks"
+    if tasks_dir.is_dir():
+        task_logs = sorted(
+            (
+                p
+                for p in tasks_dir.iterdir()
+                if p.is_file()
+                and p.name.lower().startswith("task-")
+                and p.suffix.lower() == ".log"
+            ),
+            key=_task_log_sort_key,
+        )
+        for tlog in task_logs:
+            m_step = _TASK_STEP_RE.match(tlog.name)
+            step_idx = int(m_step.group(1)) if m_step else None
+            try:
+                content = tlog.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            _extract_workflow_children_from_text(
+                content, step_idx, parent_cid_lower, by_cid, ordered_keys
+            )
+
+    msgs_dir = cdir / ".system_generated" / "messages"
+    if msgs_dir.is_dir():
+        for mpath in sorted(msgs_dir.iterdir(), key=lambda p: p.name):
+            if (
+                not mpath.is_file()
+                or mpath.suffix.lower() != ".json"
+                or mpath.name.lower() == "read.json"
+            ):
+                continue
+            try:
+                obj = json.loads(mpath.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            sm = obj.get("sourceMetadata")
+            tool_meta = sm.get("tool") if isinstance(sm, dict) else None
+            tool_call = tool_meta.get("toolCall") if isinstance(tool_meta, dict) else None
+            tool_name = (
+                str(tool_call.get("name") or "").strip() if isinstance(tool_call, dict) else ""
+            )
+            content = obj.get("content")
+            content_str = content if isinstance(content, str) else ""
+            if tool_name != "run_workflow" and "[agent:" not in content_str:
+                continue
+            raw_step = tool_meta.get("stepIndex") if isinstance(tool_meta, dict) else None
+            step_idx = (
+                raw_step
+                if isinstance(raw_step, int) and not isinstance(raw_step, bool)
+                else None
+            )
+            _extract_workflow_children_from_text(
+                content_str, step_idx, parent_cid_lower, by_cid, ordered_keys
+            )
+
+    tpath = cdir / ".system_generated" / "logs" / "transcript.jsonl"
+    if tpath.is_file():
         try:
-            sd = json.loads(fn.read_text(encoding="utf-8"))
-        except Exception:
+            raw_lines = tpath.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            raw_lines = []
+        for raw_line in raw_lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("type") not in ("GENERIC", "SYSTEM_MESSAGE"):
+                continue
+            content = obj.get("content")
+            if not isinstance(content, str) or "[agent:" not in content:
+                continue
+            raw_step = obj.get("step_index")
+            step_idx = (
+                raw_step
+                if isinstance(raw_step, int) and not isinstance(raw_step, bool)
+                else None
+            )
+            _extract_workflow_children_from_text(
+                content, step_idx, parent_cid_lower, by_cid, ordered_keys
+            )
+
+    return [by_cid[k] for k in ordered_keys]
+
+
+def load_known_child_conversation_ids(
+    brain_dir: Union[Path, str],
+    bridge_db_path: Optional[Union[Path, str]] = None,
+) -> Set[str]:
+    """Agrège tous les identifiants connus de conversations enfants (Bridge, subagents, workflow)."""
+    child_ids: Set[str] = set(load_bridge_target_conversation_ids(bridge_db_path))
+    base = Path(brain_dir)
+    if not base.is_dir():
+        return child_ids
+
+    for cdir in base.iterdir():
+        if not cdir.is_dir():
             continue
-        for uri in sd.get("workspaceUris") or []:
-            if isinstance(uri, str) and "gravity" in uri.lower():
-                return True
-    return False
+        cdir_lower = cdir.name.lower()
+        sub_dir = cdir / ".system_generated" / "subagents"
+        if sub_dir.is_dir():
+            for fn in sub_dir.iterdir():
+                if not fn.is_file() or fn.suffix.lower() != ".json":
+                    continue
+                try:
+                    sd = json.loads(fn.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(sd, dict):
+                    continue
+                scid = str(sd.get("conversationId") or "").strip()
+                if not scid or scid == cdir.name or scid.lower() == cdir_lower:
+                    continue
+                desc = sd.get("subagentDescriptor")
+                raw_type = (
+                    desc.get("typeName")
+                    if isinstance(desc, dict) and desc.get("typeName") is not None
+                    else sd.get("type_name")
+                )
+                if str(raw_type or "").strip().lower() == "root":
+                    continue
+                child_ids.add(scid)
+
+        for w in discover_workflow_children(cdir.name, base):
+            wcid = str(w.get("conversation_id") or "").strip()
+            if not wcid or wcid == cdir.name or wcid.lower() == cdir_lower:
+                continue
+            if str(w.get("type_name") or "").strip().lower() == "root":
+                continue
+            child_ids.add(wcid)
+
+    return child_ids
 
 
 def is_bridge_child_conversation(
@@ -521,6 +709,8 @@ def list_gravity_conversations(
 
     known_session_ids = _collect_known_gravity_session_ids(runs_jsonl_paths)
     bridge_target_ids = load_bridge_target_conversation_ids(bridge_db_path)
+    bridge_caller_ids = load_bridge_caller_conversation_ids(bridge_db_path)
+    known_child_ids = load_known_child_conversation_ids(base, bridge_db_path=bridge_db_path)
     results: List[Dict[str, Any]] = []
 
     for cdir in base.iterdir():
@@ -561,17 +751,15 @@ def list_gravity_conversations(
             first_prompt_raw=first_prompt_raw,
             bridge_target_ids=bridge_target_ids,
         )
-        if not include_all and is_bridge_child:
+        is_child = is_bridge_child or (cdir.name in known_child_ids)
+        if not include_all and is_child:
             continue
 
         title = _clean_user_prompt(first_prompt_raw)
-        is_gravity = (not is_bridge_child) and (
+        is_gravity = (not is_child) and (
             has_gravity_cmd
-            or "/gravity" in first_prompt_raw.lower()
-            or "gravity" in title.lower()
-            or "gravity" in first_prompt_raw.lower()
-            or cdir.name in known_session_ids
-            or _has_gravity_workspace_uri(cdir)
+            or (cdir.name in known_session_ids)
+            or (cdir.name in bridge_caller_ids)
         )
         if not include_all and not is_gravity:
             continue
@@ -987,6 +1175,32 @@ def discover_agent_tree(
                     }
                 )
 
+        workflow_children = discover_workflow_children(cid, base)
+        for w in workflow_children:
+            wcid = str(w.get("conversation_id") or "").strip()
+            if not wcid or wcid in visited:
+                continue
+            if wcid not in children_ids:
+                children_ids.append(wcid)
+            if wcid not in enqueued:
+                enqueued.add(wcid)
+                queue.append(
+                    {
+                        "cid": wcid,
+                        "parent_id": cid,
+                        "depth": depth + 1,
+                        "type_name": w["type_name"],
+                        "role": w["role"],
+                        "state": w["state"],
+                        "spawn_step": w["spawn_step_index"],
+                        "source": "workflow",
+                        "bridge_thread_id": None,
+                        "bridge_workspace": cur_bridge_ws,
+                        "bridge_job_status": None,
+                        "bridge_created_at": None,
+                    }
+                )
+
         type_name = item["type_name"]
         role = item["role"]
         nodes.append(
@@ -1300,7 +1514,9 @@ def _detect_execution_mode(
 
     is_teamwork = any(tn.startswith("teamwork") for tn in type_names) or "teamwork" in cmds
     is_swarm = bool(tool_counter.get("swarm")) or "swarm" in cmds
-    is_workflow = bool(tool_counter.get("run_workflow"))
+    is_workflow = bool(tool_counter.get("run_workflow")) or any(
+        a.get("source") == "workflow" for a in enriched_agents
+    )
     is_bridge = any(
         a.get("source") == "bridge" or str(a.get("type_name") or "").lower().startswith("bridge")
         for a in enriched_agents
@@ -1905,6 +2121,8 @@ def list_pending_sessions(
     archived_keys = _load_archived_keys(history_path)
     known_session_ids = _collect_known_gravity_session_ids(runs_jsonl_paths)
     bridge_target_ids = load_bridge_target_conversation_ids(bridge_db_path)
+    bridge_caller_ids = load_bridge_caller_conversation_ids(bridge_db_path)
+    known_child_ids = load_known_child_conversation_ids(base, bridge_db_path=bridge_db_path)
     pending: List[Dict[str, Any]] = []
 
     for cdir in base.iterdir():
@@ -1936,19 +2154,19 @@ def list_pending_sessions(
 
         if first_prompt_raw is None:
             continue
-        if is_bridge_child_conversation(
+        is_bridge_child = is_bridge_child_conversation(
             cdir.name,
             first_prompt_raw=first_prompt_raw,
             bridge_target_ids=bridge_target_ids,
-        ):
+        )
+        is_child = is_bridge_child or (cdir.name in known_child_ids)
+        if is_child:
             continue
 
         is_gravity = (
             has_gravity_cmd
-            or "/gravity" in first_prompt_raw.lower()
-            or "gravity" in first_prompt_raw.lower()
-            or cdir.name in known_session_ids
-            or _has_gravity_workspace_uri(cdir)
+            or (cdir.name in known_session_ids)
+            or (cdir.name in bridge_caller_ids)
         )
         if not is_gravity:
             continue
