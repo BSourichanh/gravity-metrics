@@ -18,10 +18,14 @@ Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque s
 
 ## Widget MCP App (`open_metrics_dashboard`)
 
-- **Statut UI :** transition MCP App (`transition-mcp` -> `gravity`).
-- **Points d'entrée :** panneau latéral (`aux_pane`) et pleine page (`global`).
-- **Navigation & archivage :** bascule projet actif / vue globale, comparateur tarifaire `2026` / `Proj. 2027`, file des sessions `pending` avec bouton **Archiver** (`metrics_archive_session`), rafraîchissement automatique toutes les `4s` lorsque le widget est visible.
-- **Exploration & actions :** graphiques SVG, ventilation par catégorie, phase, **workspace** (`by_workspace`), **arbre Bridge inter-workspaces**, modèle, agent, gaspillage, outil et erreur, ainsi que **Ouvrir .md**, **Joindre au prompt**, **Analyser** et **Supprimer** (avec purge optionnelle de `reports/`).
+- **Statut UI :** transition MCP App (`transition-mcp` -> `gravity`), assemblée dynamiquement depuis `mcp/ui/` sans `.html` statique.
+- **Points d'entrée :** panneau latéral (`aux_pane`) et pleine page (`global`), avec synchronisation thème clair/sombre (`hostContext`) et masquage automatique des actions dépendant du chat en vue `global`.
+- **App Shell 4 onglets :**
+  - **`Vue d'ensemble` (`overview`) :** KPIs, répartition `%` par projet (`by_project`), courbes SVG et tableau filtrable.
+  - **`Rapports` (`reports`) :** vue Master-Detail (`global`), barre rapide `← Préc. | Sélecteur | Suiv. →` + `Alt+←`/`Alt+→` (`aux_pane`), sous-onglets (`Synthèse & Dossiers (%)` avec `by_workspace`, `Agents & Bridge`, `Diagnostic & Outils`) et comparateur **`A vs B`**.
+  - **`À archiver` (`pending`) :** file des sessions Gravity racines en attente avec archivage immuable (`metrics_archive_session`, garde-fous Bridge).
+  - **`Audits` (`audits`) :** découverte lecture seule (`$GRAVITY_AUDITS_DIR` > `<workspace>/audits/` > `bridge.db`), lecteur Markdown anti-XSS, `README.md` épinglé et liens croisés bidirectionnels Audit ↔ Rapports.
+- **Actions & synchronisation :** rafraîchissement automatique toutes les `4s` lorsque le widget est visible, comparateur `2026` / `Proj. 2027`, **Ouvrir .md**, **Joindre au prompt**, **Analyser** et **Supprimer** (avec purge optionnelle de `reports/`).
 
 ## Stockage centralisé
 

@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Façade publique du moteur de métriques Gravity Metrics (100 % stdlib Python 3)."""
 
+from .audits_reader import (
+    MAX_AUDIT_BYTES,
+    build_audit_links_by_session,
+    discover_audit_roots,
+    list_audits,
+    read_audit,
+)
 from .bridge_links import (
     ACTIVE_BRIDGE_JOB_STATUSES,
     default_bridge_db_path,
@@ -75,10 +82,15 @@ from .store import (
 __all__ = [
     "SCHEMA_VERSION",
     "METRICS_MARKER",
+    "MAX_AUDIT_BYTES",
     "CATEGORY_ORDER",
     "CATEGORY_LABELS_FR",
     "TYPE_TO_CATEGORY",
     "ACTIVE_BRIDGE_JOB_STATUSES",
+    "discover_audit_roots",
+    "list_audits",
+    "read_audit",
+    "build_audit_links_by_session",
     "default_brain_dir",
     "default_bridge_db_path",
     "resolve_bridge_db_path",

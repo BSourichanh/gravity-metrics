@@ -117,11 +117,15 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual(open_meta["ui"]["visibility"], ["model", "app"])
             eps = open_meta["com.google.antigravity/ui"]["entrypoints"]
             self.assertEqual({e["type"] for e in eps}, {"aux_pane", "global"})
+            view_enum = tools["open_metrics_dashboard"]["inputSchema"]["properties"]["view"]["enum"]
+            self.assertEqual(view_enum, ["overview", "reports", "pending", "audits", "history", "detail"])
             for helper_name in (
                 "metrics_get_state",
                 "metrics_get_session",
                 "metrics_archive_session",
                 "metrics_remove_session",
+                "metrics_list_audits",
+                "metrics_read_audit",
             ):
                 self.assertEqual(tools[helper_name]["_meta"]["ui"]["visibility"], ["app"])
 
@@ -141,6 +145,14 @@ class TestMcpServer(unittest.TestCase):
                 "com.google.antigravity/toggle-aux-pane",
                 "ui/update-model-context",
                 "ui/message",
+                "Vue d'ensemble",
+                "Rapports",
+                "À archiver",
+                "Audits",
+                "Comparer A vs B",
+                "renderSafeMarkdown",
+                "renderProjectShareBars",
+                "renderWorkspaceSharePanel",
             ):
                 self.assertIn(required_token, html_txt)
             self.assertIn(f'version: "{expected_version}"', html_txt)
@@ -369,6 +381,67 @@ class TestMcpServer(unittest.TestCase):
             self.assertFalse(by_id[4]["isError"])
             self.assertTrue(by_id[4]["structuredContent"]["already_archived"])
             self.assertEqual(by_id[4]["structuredContent"]["archived"]["label"], "mcp-run")
+
+    def test_by_project_and_audits_mcp_tools_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            audits_dir = root / "studio" / "audits"
+            audits_dir.mkdir(parents=True)
+            self._seed_store(store, brain)
+
+            (audits_dir / "README.md").write_text(
+                "# Matrice Audits\n\nVerdict : PASS\n\nIndex principal.\n",
+                encoding="utf-8",
+            )
+            (audits_dir / "2026-11-22-audit-alpha.md").write_text(
+                "# Audit Alpha\n\nVerdict : NON BLOQUANT\n\nConcerne 11111111-aaaa-bbbb-cccc-000000000001.\n",
+                encoding="utf-8",
+            )
+            (audits_dir / "ignore.txt").write_text("texte brut", encoding="utf-8")
+            (root / "secret.md").write_text("# Secret\n", encoding="utf-8")
+
+            env_extra = {"GRAVITY_AUDITS_DIR": str(audits_dir)}
+            resps = _call_mcp_stdio(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {"view": "audits"}}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "metrics_get_state", "arguments": {}}},
+                    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "metrics_list_audits", "arguments": {}}},
+                    {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "metrics_read_audit", "arguments": {"audit_id": "studio:2026-11-22-audit-alpha.md"}}},
+                    {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "metrics_read_audit", "arguments": {"audit_id": "studio:../secret.md"}}},
+                    {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "metrics_read_audit", "arguments": {"audit_id": "studio:ignore.txt"}}},
+                ],
+                store,
+                brain,
+                extra_env=env_extra,
+            )
+            by_id = {r["id"]: r["result"] for r in resps}
+
+            sc_open = by_id[1]["structuredContent"]
+            self.assertEqual(sc_open["initial_view"], "audits")
+            self.assertEqual(sc_open["audits_count"], 2)
+            by_proj = sc_open["by_project"]
+            self.assertEqual({p["project"] for p in by_proj}, {"ProjA", "ProjB"})
+            self.assertAlmostEqual(sum(p["share_pct"] for p in by_proj), 100.0, delta=0.2)
+            self.assertIn("11111111-aaaa-bbbb-cccc-000000000001", sc_open["audit_links_by_session"])
+
+            sc_state = by_id[2]["structuredContent"]
+            self.assertEqual(sc_state["audits_count"], 2)
+            self.assertEqual(len(sc_state["by_project"]), 2)
+
+            sc_list = by_id[3]["structuredContent"]
+            self.assertEqual(sc_list["count"], 2)
+            self.assertTrue(sc_list["audits"][0]["is_index"])
+
+            self.assertFalse(by_id[4]["isError"])
+            audit_obj = by_id[4]["structuredContent"]["audit"]
+            self.assertEqual(audit_obj["title"], "Audit Alpha")
+            self.assertEqual(audit_obj["verdict_tone"], "ok")
+            self.assertEqual(audit_obj["linked_sessions"][0]["label"], "alpha-run")
+
+            self.assertTrue(by_id[5]["isError"])
+            self.assertTrue(by_id[6]["isError"])
 
 
 if __name__ == "__main__":

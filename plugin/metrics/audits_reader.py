@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+"""Découverte et lecture sécurisée en lecture seule des dossiers audits/ (100 % stdlib)."""
+
+from contextlib import closing
+from datetime import datetime, timezone
+import os
+from pathlib import Path, PurePosixPath
+import re
+import sqlite3
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+
+from .bridge_links import _connect_ro, _table_columns, resolve_bridge_db_path
+
+MAX_AUDIT_BYTES = 262_144
+
+_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+_HEX_PREFIX_RE = re.compile(r"\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){0,3}\b")
+_TITLE_RE = re.compile(r"^\s*#\s+(.+?)\s*$", re.MULTILINE)
+_DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\b")
+_VERDICT_LINE_RE = re.compile(
+    r"(?:^|\n)\s*(?:[-*]\s+)?(?:\*\*|__)?(?:Verdict|Statut|Status|Conclusion|Résultat|Result)(?:\*\*|__)?\s*[:：]\s*(.+)",
+    re.IGNORECASE,
+)
+_VERDICT_HEADING_RE = re.compile(
+    r"(?:^|\n)\s*#{1,4}\s+(?:Verdict|Conclusion|Statut)\s*\n+([^\n#]+)",
+    re.IGNORECASE,
+)
+_WIN_ABS_RE = re.compile(r"^[A-Za-z]:[/\\]")
+
+
+def _norm_key(path: Path) -> str:
+    return os.path.normcase(str(path.resolve()))
+
+
+def _slugify_root_id(raw: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", (raw or "").strip().lower()).strip("-")
+    return slug or "audits"
+
+
+def _split_env_dirs(raw: str) -> List[Path]:
+    parts = [p.strip() for p in raw.split(os.pathsep) if p.strip()]
+    return [Path(p).expanduser() for p in parts]
+
+
+def _load_bridge_workspace_dirs(bridge_db: Optional[Union[Path, str]] = None) -> List[Tuple[str, Path]]:
+    db_path = resolve_bridge_db_path(bridge_db)
+    conn = _connect_ro(db_path)
+    if conn is None:
+        return []
+    out: List[Tuple[str, Path]] = []
+    try:
+        with closing(conn):
+            cols = _table_columns(conn, "workspaces")
+            if "canonical_path" not in cols:
+                return []
+            select_cols = ["canonical_path"]
+            if "slug" in cols:
+                select_cols.append("slug")
+            if "display_name" in cols:
+                select_cols.append("display_name")
+            order_col = "slug" if "slug" in cols else "canonical_path"
+            rows = conn.execute(
+                f"SELECT {', '.join(select_cols)} FROM workspaces "
+                f"WHERE canonical_path IS NOT NULL AND TRIM(canonical_path) != '' "
+                f"ORDER BY {order_col} ASC"
+            ).fetchall()
+            for row in rows:
+                r = dict(row)
+                cpath = str(r.get("canonical_path") or "").strip()
+                if not cpath:
+                    continue
+                ws_name = str(r.get("slug") or r.get("display_name") or Path(cpath).name or "").strip()
+                out.append((ws_name, Path(cpath).expanduser()))
+    except sqlite3.Error:
+        return []
+    return out
+
+
+def discover_audit_roots(
+    *,
+    audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
+    workspace_dirs: Optional[Sequence[Union[Path, str]]] = None,
+    bridge_db: Optional[Union[Path, str]] = None,
+    include_cwd: bool = True,
+) -> List[Dict[str, Any]]:
+    """Découvre les dossiers `audits/` en lecture seule selon la priorité Gravity."""
+    candidates: List[Tuple[str, Path, str]] = []
+
+    if audits_dir is not None:
+        if isinstance(audits_dir, (str, Path)):
+            raw_list = _split_env_dirs(str(audits_dir)) if isinstance(audits_dir, str) else [audits_dir]
+        else:
+            raw_list = [Path(p).expanduser() for p in audits_dir]
+        for p in raw_list:
+            candidates.append((p.parent.name or p.name or "audits", p, "explicit"))
+    else:
+        env_audits = os.environ.get("GRAVITY_AUDITS_DIR", "").strip()
+        if env_audits:
+            for p in _split_env_dirs(env_audits):
+                candidates.append((p.parent.name or p.name or "audits", p, "env"))
+        else:
+            if workspace_dirs:
+                for ws in workspace_dirs:
+                    ws_path = Path(ws).expanduser()
+                    candidates.append((ws_path.name or "workspace", ws_path / "audits", "workspace"))
+            if include_cwd:
+                cwd = Path.cwd()
+                candidates.append((cwd.name or "workspace", cwd / "audits", "workspace"))
+            for ws_name, ws_path in _load_bridge_workspace_dirs(bridge_db):
+                candidates.append((ws_name or ws_path.name or "workspace", ws_path / "audits", "bridge_db"))
+
+    roots: List[Dict[str, Any]] = []
+    seen_paths: Set[str] = set()
+    used_ids: Set[str] = set()
+
+    for ws_label, root_path, source in candidates:
+        try:
+            if not root_path.is_dir():
+                continue
+            resolved = root_path.resolve()
+            key = _norm_key(resolved)
+        except OSError:
+            continue
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+
+        base_id = _slugify_root_id(ws_label)
+        root_id = base_id
+        suffix = 2
+        while root_id in used_ids:
+            root_id = f"{base_id}-{suffix}"
+            suffix += 1
+        used_ids.add(root_id)
+
+        roots.append(
+            {
+                "root_id": root_id,
+                "workspace": ws_label,
+                "path": resolved,
+                "source": source,
+            }
+        )
+    return roots
+
+
+def _classify_verdict_tone(verdict_text: str) -> str:
+    up = verdict_text.upper()
+    if re.search(r"(?<!NON[\s-])\bBLOQUANT\b", up):
+        return "danger"
+    if any(tok in up for tok in ("FAIL", "REJECT", "REFUS", "CRITIQUE", "ERROR")):
+        return "danger"
+    if re.search(r"\bKO\b", up):
+        return "danger"
+    if any(tok in up for tok in ("WARN", "PARTIEL", "ATTENTION", "CORRIGER", "CONDITIONAL", "MITIG")):
+        return "warn"
+    if "NON BLOQUANT" in up or "NON-BLOQUANT" in up:
+        return "ok"
+    if any(tok in up for tok in ("PASS", "VALID", "APPROUV", "APPROVED", "CLEAN", "SUCC")):
+        return "ok"
+    if re.search(r"\bOK\b", up):
+        return "ok"
+    return "neutral"
+
+
+def _clean_md_inline(text: str) -> str:
+    cleaned = re.sub(r"[*_`]+", "", text or "").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
+
+def _extract_verdict(text: str) -> Tuple[str, str]:
+    head_chunk = text[:16_384]
+    match = _VERDICT_LINE_RE.search(head_chunk)
+    raw_verdict = ""
+    if match:
+        raw_verdict = match.group(1)
+    else:
+        h_match = _VERDICT_HEADING_RE.search(head_chunk)
+        if h_match:
+            raw_verdict = h_match.group(1)
+
+    if not raw_verdict:
+        return "", "neutral"
+    val = _clean_md_inline(raw_verdict.split("|", 1)[0])
+    if len(val) > 40:
+        val = val[:37].rstrip() + "..."
+    return val, _classify_verdict_tone(val) if val else "neutral"
+
+
+def _extract_title(text: str, fallback: str) -> str:
+    match = _TITLE_RE.search(text[:8_192])
+    if match:
+        title = _clean_md_inline(match.group(1))
+        if title:
+            return title
+    return fallback
+
+
+def _extract_excerpt(text: str) -> str:
+    for line in text[:4_096].splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith("---") or s.startswith("|") or s.startswith("<!--"):
+            continue
+        cleaned = _clean_md_inline(s)
+        if len(cleaned) >= 12:
+            return cleaned if len(cleaned) <= 160 else cleaned[:157].rstrip() + "..."
+    return ""
+
+
+def _extract_linked_sessions(text: str, records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not records or not text:
+        return []
+    by_cid: Dict[str, List[Dict[str, Any]]] = {}
+    for rec in records:
+        cid = str(rec.get("conversation_id") or "").strip().lower()
+        if cid:
+            by_cid.setdefault(cid, []).append(rec)
+    if not by_cid:
+        return []
+
+    all_cids = list(by_cid.keys())
+    matched: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    for full_uuid in _UUID_RE.findall(text):
+        key = full_uuid.lower()
+        for rec in by_cid.get(key, []):
+            cid = str(rec.get("conversation_id") or "")
+            lbl = str(rec.get("label") or cid[:8])
+            matched.setdefault(
+                (cid, lbl),
+                {
+                    "conversation_id": cid,
+                    "label": lbl,
+                    "project": str(rec.get("project") or ""),
+                    "cost_usd": float(rec.get("cost_usd") or 0.0),
+                    "cost_2027_usd": float(rec.get("cost_2027_usd") or 0.0),
+                    "cache_hit_rate_pct": float(rec.get("cache_hit_rate_pct") or 0.0),
+                    "started_at": rec.get("started_at") or rec.get("added_at") or "",
+                    "matched_by": "uuid",
+                },
+            )
+
+    text_no_full = _UUID_RE.sub(" ", text)
+    for tok in _HEX_PREFIX_RE.findall(text_no_full):
+        low = tok.lower()
+        if len(low) < 8:
+            continue
+        cid_hits = [c for c in all_cids if c.startswith(low)]
+        if len(cid_hits) != 1:
+            continue
+        for rec in by_cid[cid_hits[0]]:
+            cid = str(rec.get("conversation_id") or "")
+            lbl = str(rec.get("label") or cid[:8])
+            matched.setdefault(
+                (cid, lbl),
+                {
+                    "conversation_id": cid,
+                    "label": lbl,
+                    "project": str(rec.get("project") or ""),
+                    "cost_usd": float(rec.get("cost_usd") or 0.0),
+                    "cost_2027_usd": float(rec.get("cost_2027_usd") or 0.0),
+                    "cache_hit_rate_pct": float(rec.get("cache_hit_rate_pct") or 0.0),
+                    "started_at": rec.get("started_at") or rec.get("added_at") or "",
+                    "matched_by": "prefix",
+                },
+            )
+
+    return sorted(
+        matched.values(),
+        key=lambda item: (str(item.get("started_at") or ""), str(item.get("label") or "")),
+        reverse=True,
+    )
+
+
+def _read_bounded_markdown(path: Path) -> Tuple[str, int, bool]:
+    stat = path.stat()
+    size_bytes = int(stat.st_size)
+    with path.open("rb") as fh:
+        raw = fh.read(MAX_AUDIT_BYTES + 1)
+    truncated = len(raw) > MAX_AUDIT_BYTES
+    if truncated:
+        raw = raw[:MAX_AUDIT_BYTES]
+    text = raw.decode("utf-8", errors="replace").lstrip("\ufeff")
+    return text, size_bytes, truncated
+
+
+def _build_audit_record(
+    root: Dict[str, Any],
+    file_path: Path,
+    *,
+    records: Sequence[Dict[str, Any]] = (),
+    include_content: bool = False,
+) -> Dict[str, Any]:
+    root_resolved = root["path"].resolve()
+    file_resolved = file_path.resolve()
+    rel_posix = file_resolved.relative_to(root_resolved).as_posix()
+    audit_id = f"{root['root_id']}:{rel_posix}"
+
+    text, size_bytes, truncated = _read_bounded_markdown(file_resolved)
+    stat = file_resolved.stat()
+    updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    date_m = _DATE_PREFIX_RE.match(file_resolved.name)
+    date_str = date_m.group(1) if date_m else updated_at[:10]
+
+    is_index = rel_posix.lower() == "readme.md"
+    title = _extract_title(text, file_resolved.stem)
+    verdict, verdict_tone = _extract_verdict(text)
+    linked_sessions = _extract_linked_sessions(text, records)
+
+    entry: Dict[str, Any] = {
+        "audit_id": audit_id,
+        "root_id": root["root_id"],
+        "workspace": root["workspace"],
+        "filename": file_resolved.name,
+        "rel_path": rel_posix,
+        "is_index": is_index,
+        "title": title,
+        "verdict": verdict,
+        "verdict_tone": verdict_tone,
+        "date": date_str,
+        "updated_at": updated_at,
+        "size_bytes": size_bytes,
+        "truncated": truncated,
+        "excerpt": _extract_excerpt(text),
+        "linked_sessions": linked_sessions,
+        "uri": file_resolved.as_uri(),
+    }
+    if include_content:
+        entry["content"] = text
+    return entry
+
+
+def _is_safe_rel_posix(rel_part: str) -> bool:
+    if not rel_part or "\x00" in rel_part or "\\" in rel_part:
+        return False
+    if rel_part.startswith("/") or _WIN_ABS_RE.match(rel_part):
+        return False
+    posix = PurePosixPath(rel_part)
+    if posix.is_absolute():
+        return False
+    return ".." not in posix.parts
+
+
+def _resolve_audit_target(
+    audit_id: str,
+    roots: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Path]:
+    raw = str(audit_id or "").strip()
+    if not raw or "\x00" in raw:
+        raise ValueError("Identifiant d'audit vide ou invalide.")
+    if raw.startswith(("/", "\\")) or _WIN_ABS_RE.match(raw):
+        raise ValueError("Chemin absolu interdit pour un audit.")
+
+    if ":" in raw:
+        root_key, rel_part = raw.split(":", 1)
+        if not root_key or not _is_safe_rel_posix(rel_part):
+            raise ValueError(f"Chemin d'audit invalide ou traversal détecté : {audit_id!r}")
+        matched_roots = [r for r in roots if r["root_id"] == root_key]
+        if not matched_roots:
+            raise FileNotFoundError(f"Racine d'audits introuvable pour {audit_id!r}")
+    else:
+        if not _is_safe_rel_posix(raw):
+            raise ValueError(f"Chemin d'audit invalide ou traversal détecté : {audit_id!r}")
+        rel_part = raw
+        matched_roots = roots
+
+    for root in matched_roots:
+        root_resolved = root["path"].resolve()
+        candidate = (root_resolved / rel_part).resolve()
+        if not candidate.is_relative_to(root_resolved):
+            raise ValueError(f"Path traversal détecté : {audit_id!r}")
+        if candidate.suffix.lower() != ".md":
+            raise ValueError("Seuls les fichiers Markdown (.md) peuvent être lus.")
+        if candidate.is_file():
+            return root, candidate
+
+    # Dernière vérification traversal si un suffixe non-.md a été passé sans ":"
+    if not rel_part.lower().endswith(".md"):
+        raise ValueError("Seuls les fichiers Markdown (.md) peuvent être lus.")
+    raise FileNotFoundError(f"Audit introuvable : {audit_id!r}")
+
+
+def list_audits(
+    *,
+    records: Sequence[Dict[str, Any]] = (),
+    audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
+    workspace_dirs: Optional[Sequence[Union[Path, str]]] = None,
+    bridge_db: Optional[Union[Path, str]] = None,
+    include_cwd: bool = True,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    """Liste les fichiers `.md` découverts dans les dossiers `audits/` en lecture seule."""
+    roots = discover_audit_roots(
+        audits_dir=audits_dir,
+        workspace_dirs=workspace_dirs,
+        bridge_db=bridge_db,
+        include_cwd=include_cwd,
+    )
+    audits: List[Dict[str, Any]] = []
+    for root in roots:
+        root_resolved = root["path"].resolve()
+        try:
+            candidates = sorted(root_resolved.rglob("*"))
+        except OSError:
+            continue
+        for fpath in candidates:
+            try:
+                if not fpath.is_file() or fpath.suffix.lower() != ".md":
+                    continue
+                resolved_file = fpath.resolve()
+                if not resolved_file.is_relative_to(root_resolved):
+                    continue
+                audits.append(
+                    _build_audit_record(root, resolved_file, records=records, include_content=False)
+                )
+            except OSError:
+                continue
+
+    pinned = sorted(
+        [a for a in audits if a.get("is_index")],
+        key=lambda a: (
+            str(a.get("workspace") or "").casefold(),
+            str(a.get("rel_path") or "").casefold(),
+        ),
+    )
+    regular = sorted(
+        [a for a in audits if not a.get("is_index")],
+        key=lambda a: (
+            str(a.get("date") or ""),
+            str(a.get("updated_at") or ""),
+            str(a.get("rel_path") or ""),
+        ),
+        reverse=True,
+    )
+    roots_meta = [
+        {
+            "root_id": r["root_id"],
+            "workspace": r["workspace"],
+            "source": r["source"],
+        }
+        for r in roots
+    ]
+    return pinned + regular, roots_meta
+
+
+def read_audit(
+    audit_id: str,
+    *,
+    records: Sequence[Dict[str, Any]] = (),
+    audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
+    workspace_dirs: Optional[Sequence[Union[Path, str]]] = None,
+    bridge_db: Optional[Union[Path, str]] = None,
+    include_cwd: bool = True,
+) -> Dict[str, Any]:
+    """Lit en toute sécurité un audit Markdown (anti-traversal, .md only, plafond 256 Ko)."""
+    roots = discover_audit_roots(
+        audits_dir=audits_dir,
+        workspace_dirs=workspace_dirs,
+        bridge_db=bridge_db,
+        include_cwd=include_cwd,
+    )
+    if not roots:
+        raise FileNotFoundError("Aucun dossier audits/ découvert.")
+    root, target = _resolve_audit_target(audit_id, roots)
+    return _build_audit_record(root, target, records=records, include_content=True)
+
+
+def build_audit_links_by_session(audits: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Indexe les audits associés par `conversation_id` pour liens croisés bidirectionnels."""
+    links: Dict[str, List[Dict[str, Any]]] = {}
+    for audit in audits:
+        compact = {
+            "audit_id": audit.get("audit_id") or "",
+            "title": audit.get("title") or audit.get("filename") or "",
+            "verdict": audit.get("verdict") or "",
+            "verdict_tone": audit.get("verdict_tone") or "neutral",
+            "workspace": audit.get("workspace") or "",
+            "is_index": bool(audit.get("is_index")),
+            "date": audit.get("date") or "",
+        }
+        for sess in audit.get("linked_sessions") or []:
+            cid = str(sess.get("conversation_id") or "").strip()
+            if not cid:
+                continue
+            bucket = links.setdefault(cid, [])
+            if not any(x.get("audit_id") == compact["audit_id"] for x in bucket):
+                bucket.append(compact)
+    return links

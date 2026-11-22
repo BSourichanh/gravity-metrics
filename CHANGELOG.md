@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-22
+
+### Added
+- **Read-Only Audits Reader (`plugin/metrics/audits_reader.py`, `plugin/metrics/__init__.py`):**
+  - Generic read-only discovery (`$GRAVITY_AUDITS_DIR` > `<workspace>/audits/` > `<canonical_path>/audits/` from `bridge.db` opened strictly with `?mode=ro`).
+  - Strict anti-path-traversal enforcement (`target.resolve().is_relative_to(root.resolve())`), `.md`-only filtering, `262 144`-byte (`256 Ko`) read cap with `truncated` flag, and metadata extraction (`title`, `verdict`, `verdict_tone`, `is_index` for `README.md`, `linked_sessions` matched by UUID/prefix against `history.jsonl`).
+- **4-Tab Interactive MCP App UI & Modular Package (`plugin/mcp/ui/`, `plugin/mcp/widget_html.py`, `plugin/mcp/server.py`):**
+  - Modularized the monolithic HTML/CSS/JS widget into `plugin/mcp/ui/{__init__.py,styles.py,charts.py,markdown_view.py,app_js.py}` assembled dynamically by `render_mcp_widget_html()` with zero static `.html` files on disk.
+  - Added 4-tab App Shell (`Vue d'ensemble`, `Rapports`, `À archiver`, `Audits`) with host theme synchronization (`hostContext` + `ui/notifications/host-context-changed`) and capability-aware action hiding in `global` mode (`hostCaps.message`, `hostCaps.updateModelContext`, `aux_pane`).
+  - Added `by_project` `%` cost aggregation in `Vue d'ensemble`, enhanced `by_workspace` `%` distribution (with clean `2.0.0` fallback) in `Rapports → Synthèse & Dossiers (%)`, Master-Detail layout (`global`), sticky `← Préc. | Sélecteur rapide | Suiv. →` + `Alt+←`/`Alt+→` navigation (`aux_pane`), detail sub-tabs, and **`A vs B`** comparator.
+  - Added `metrics_list_audits` and `metrics_read_audit` (`visibility: ["app"]`) MCP tools, built-in anti-XSS Markdown renderer (`markdown_view.py`), pinned `README.md` index, and bidirectional Audit ↔ Report cross-links (`audit_links_by_session`).
+
+### Changed
+- **MCP Dashboard Entrypoint & Versioning (`plugin/mcp/server.py`, `plugin/plugin.json`, `README.md`, `plugin/README.md`):**
+  - Extended `open_metrics_dashboard.view` enum to `["overview", "reports", "pending", "audits", "history", "detail"]` while preserving `"history"` and `"detail"` backward compatibility under `MAX_TRAJECTORY_BYTES`.
+  - Bumped manifest and MCP App server/widget versions to `0.4.0`.
+
 ## [0.3.0] - 2026-11-22
 
 ### Added

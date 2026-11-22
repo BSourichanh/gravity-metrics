@@ -19,22 +19,26 @@ from metrics import (  # noqa: E402
     PendingBridgeJobsError,
     apply_remove,
     archive_conversation,
+    build_audit_links_by_session,
     default_brain_dir,
+    list_audits,
     list_pending_sessions,
     load_history,
     load_session_for_inspect,
+    read_audit,
     resolve_session_index,
     resolve_store_paths,
     slugify_label,
 )
-from widget_html import render_mcp_widget_html  # noqa: E402
+from mcp.widget_html import render_mcp_widget_html  # noqa: E402
 
 SERVER_NAME = "gravity-metrics"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 APP_URI = "ui://gravity-metrics/dashboard.html"
 APP_MIME = "text/html;profile=mcp-app"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 MAX_TRAJECTORY_BYTES = 450_000
+VALID_DASHBOARD_VIEWS = {"overview", "reports", "pending", "audits", "history", "detail"}
 
 
 def _history_signature(history_path: Path) -> str:
@@ -94,16 +98,95 @@ def _pending_signature(pending: List[Dict[str, Any]]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
-def _load_state_snapshot(
-    store_dir: Path, history_path: Path
-) -> Tuple[str, List[Dict[str, Any]], List[str], str, List[Dict[str, Any]]]:
+def _aggregate_by_project(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Agrège les coûts, pourcentages, sessions et cache moyen par projet canonique."""
+    proj_map = _canonical_projects_map(records)
+    buckets: Dict[str, Dict[str, Any]] = {}
+    total_2026 = 0.0
+    total_2027 = 0.0
+
+    for rec in records:
+        raw_p = str(rec.get("project") or "").strip()
+        canon_p = proj_map.get(raw_p.casefold(), raw_p) if raw_p else "(sans projet)"
+        key = canon_p.casefold()
+        if key not in buckets:
+            buckets[key] = {
+                "project": canon_p,
+                "sessions": 0,
+                "cost_usd": 0.0,
+                "cost_2027_usd": 0.0,
+                "cache_sum": 0.0,
+                "llm_calls": 0,
+                "agents": 0,
+                "wall_clock_s": 0.0,
+                "bridge_sessions": 0,
+            }
+        b = buckets[key]
+        c26 = float(rec.get("cost_usd") or 0.0)
+        raw_27 = rec.get("cost_2027_usd")
+        c27 = float(raw_27) if raw_27 is not None else c26
+        b["sessions"] += 1
+        b["cost_usd"] += c26
+        b["cost_2027_usd"] += c27
+        b["cache_sum"] += float(rec.get("cache_hit_rate_pct") or 0.0)
+        b["llm_calls"] += int(rec.get("llm_calls") or 0)
+        b["agents"] += int(rec.get("agents") or 0)
+        b["wall_clock_s"] += float(rec.get("wall_clock_s") or 0.0)
+        if int(rec.get("bridge_children_count") or 0) > 0:
+            b["bridge_sessions"] += 1
+        total_2026 += c26
+        total_2027 += c27
+
+    out: List[Dict[str, Any]] = []
+    for b in buckets.values():
+        sess = b["sessions"]
+        out.append(
+            {
+                "project": b["project"],
+                "sessions": sess,
+                "cost_usd": round(b["cost_usd"], 6),
+                "cost_2027_usd": round(b["cost_2027_usd"], 6),
+                "share_pct": round((b["cost_usd"] / total_2026) * 100.0, 2) if total_2026 > 0 else 0.0,
+                "share_2027_pct": round((b["cost_2027_usd"] / total_2027) * 100.0, 2) if total_2027 > 0 else 0.0,
+                "avg_cache_hit_rate_pct": round(b["cache_sum"] / sess, 2) if sess > 0 else 0.0,
+                "llm_calls": b["llm_calls"],
+                "agents": b["agents"],
+                "wall_clock_s": round(b["wall_clock_s"], 2),
+                "bridge_sessions": b["bridge_sessions"],
+            }
+        )
+    out.sort(key=lambda item: (-item["cost_usd"], -item["sessions"], item["project"].casefold()))
+    return out
+
+
+def _audits_signature(audits: List[Dict[str, Any]]) -> str:
+    compact = [(a.get("audit_id"), a.get("size_bytes"), a.get("updated_at")) for a in audits]
+    raw = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _load_state_snapshot(store_dir: Path, history_path: Path) -> Dict[str, Any]:
     hist_sig = _history_signature(history_path)
     records = load_history(history_path)
     projects = _collect_projects(records)
+    by_project = _aggregate_by_project(records)
     metrics_md_uri = _file_uri_if_exists(store_dir / "METRICS.md")
     pending_sessions = list_pending_sessions(default_brain_dir(), history_path)
-    sig = f"{hist_sig}|p:{_pending_signature(pending_sessions)}"
-    return sig, records, projects, metrics_md_uri, pending_sessions
+    audits, audits_roots = list_audits(records=records)
+    audit_links_by_session = build_audit_links_by_session(audits)
+    sig = f"{hist_sig}|p:{_pending_signature(pending_sessions)}|a:{_audits_signature(audits)}"
+    return {
+        "signature": sig,
+        "records": records,
+        "projects": projects,
+        "by_project": by_project,
+        "metrics_md_uri": metrics_md_uri,
+        "pending_sessions": pending_sessions,
+        "audits": audits,
+        "audits_roots": audits_roots,
+        "audits_count": len(audits),
+        "audit_links_by_session": audit_links_by_session,
+    }
 
 
 def _tool_definitions() -> List[Dict[str, Any]]:
@@ -128,8 +211,8 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     },
                     "view": {
                         "type": "string",
-                        "enum": ["history", "detail"],
-                        "description": "Vue initiale souhaitée : history ou detail (optionnel).",
+                        "enum": ["overview", "reports", "pending", "audits", "history", "detail"],
+                        "description": "Onglet/vue initial souhaité : overview, reports, pending, audits, history ou detail (optionnel).",
                     },
                 },
             },
@@ -241,6 +324,45 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                 "ui": {"visibility": ["app"]},
             },
         },
+        {
+            "name": "metrics_list_audits",
+            "title": "Lister les audits Markdown",
+            "description": "Découvre en lecture seule les fichiers Markdown des dossiers audits/ et leurs liens de sessions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {
+                        "type": "string",
+                        "description": "Filtrer par nom de workspace (optionnel).",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Filtre texte sur titre, chemin ou verdict (optionnel).",
+                    },
+                },
+            },
+            "_meta": {
+                "ui": {"visibility": ["app"]},
+            },
+        },
+        {
+            "name": "metrics_read_audit",
+            "title": "Lire un audit Markdown",
+            "description": "Lit en lecture seule un fichier .md autorisé d'un dossier audits/ (plafond 256 Ko).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audit_id": {
+                        "type": "string",
+                        "description": "Identifiant de l'audit (<root_id>:<rel_path>).",
+                    }
+                },
+                "required": ["audit_id"],
+            },
+            "_meta": {
+                "ui": {"visibility": ["app"]},
+            },
+        },
     ]
 
 
@@ -259,14 +381,26 @@ def _tool_err(message: str) -> Dict[str, Any]:
     }
 
 
+def _state_payload(snap: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "signature": snap["signature"],
+        "records": snap["records"],
+        "projects": snap["projects"],
+        "by_project": snap["by_project"],
+        "pending_sessions": snap["pending_sessions"],
+        "audits_count": snap["audits_count"],
+        "audit_links_by_session": snap["audit_links_by_session"],
+        "metrics_md_uri": snap["metrics_md_uri"],
+    }
+
+
 def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
     store_dir, history_path = resolve_store_paths()
     brain_dir = default_brain_dir()
     catalog_path = PLUGIN_ROOT / "config" / "pricing_catalog.json"
 
-    sig, records, projects, metrics_md_uri, pending_sessions = _load_state_snapshot(
-        store_dir, history_path
-    )
+    snap = _load_state_snapshot(store_dir, history_path)
+    records = snap["records"]
     proj_map = _canonical_projects_map(records)
     raw_project = str(args.get("project") or "").strip()
     initial_project = proj_map.get(raw_project.casefold(), raw_project) if raw_project else ""
@@ -275,7 +409,7 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
     req_view = str(args.get("view") or "").strip().lower()
 
     initial_target = ""
-    initial_view = "history"
+    initial_view = req_view if req_view in VALID_DASHBOARD_VIEWS else "history"
     initial_detail: Optional[Dict[str, Any]] = None
     initial_detail_slug = ""
     initial_detail_md_uri = ""
@@ -289,8 +423,8 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
                 rec_proj = str(rec["project"]).strip()
                 initial_project = proj_map.get(rec_proj.casefold(), rec_proj)
                 initial_scope = "project"
-            if req_view != "history":
-                initial_view = "detail"
+            if req_view in ("", "detail", "reports"):
+                initial_view = "reports" if req_view == "reports" else "detail"
                 metrics, slug = load_session_for_inspect(
                     initial_target,
                     store_dir=store_dir,
@@ -307,19 +441,26 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
                 )
         except Exception:
             initial_target = ""
-            initial_view = "history"
+            if initial_view == "detail":
+                initial_view = "history"
+    elif initial_view == "detail":
+        initial_view = "history"
 
-    structured: Dict[str, Any] = {
-        "signature": sig,
-        "records": records,
-        "projects": projects,
-        "pending_sessions": pending_sessions,
-        "metrics_md_uri": metrics_md_uri,
-        "initial_scope": initial_scope,
-        "initial_project": initial_project,
-        "initial_view": initial_view,
-        "initial_target": initial_target,
-    }
+    structured: Dict[str, Any] = _state_payload(snap)
+    structured.update(
+        {
+            "initial_scope": initial_scope,
+            "initial_project": initial_project,
+            "initial_view": initial_view,
+            "initial_target": initial_target,
+        }
+    )
+
+    if snap["audits"]:
+        cand_aud = dict(structured)
+        cand_aud["audits"] = snap["audits"]
+        if len(json.dumps(cand_aud, ensure_ascii=False).encode("utf-8")) <= MAX_TRAJECTORY_BYTES:
+            structured = cand_aud
 
     if initial_detail is not None:
         candidate = dict(structured)
@@ -358,21 +499,15 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_metrics_get_state(args: Dict[str, Any]) -> Dict[str, Any]:
     store_dir, history_path = resolve_store_paths()
     since_sig = str(args.get("since_signature") or "").strip()
-    sig, records, projects, metrics_md_uri, pending_sessions = _load_state_snapshot(
-        store_dir, history_path
-    )
+    snap = _load_state_snapshot(store_dir, history_path)
+    sig = snap["signature"]
     if since_sig and since_sig == sig:
         return _tool_ok("Inchangé.", {"changed": False, "signature": sig})
+    payload = _state_payload(snap)
+    payload["changed"] = True
     return _tool_ok(
-        f"{len(records)} session(s) chargée(s), {len(pending_sessions)} en attente.",
-        {
-            "changed": True,
-            "signature": sig,
-            "records": records,
-            "projects": projects,
-            "pending_sessions": pending_sessions,
-            "metrics_md_uri": metrics_md_uri,
-        },
+        f"{len(snap['records'])} session(s) chargée(s), {len(snap['pending_sessions'])} en attente, {snap['audits_count']} audit(s).",
+        payload,
     )
 
 
@@ -435,27 +570,16 @@ def _handle_metrics_archive_session(args: Dict[str, Any]) -> Dict[str, Any]:
     except PendingBridgeJobsError as exc:
         return _tool_err(str(exc))
 
-    sig, records, projects, metrics_md_uri, pending_sessions = _load_state_snapshot(
-        store_dir, history_path
-    )
+    snap = _load_state_snapshot(store_dir, history_path)
     already = bool(saved_rec.get("already_archived"))
     msg = (
         f"Session '{saved_rec.get('label')}' déjà archivée (immuable)."
         if already
         else f"Session '{saved_rec.get('label')}' archivée."
     )
-    return _tool_ok(
-        msg,
-        {
-            "archived": saved_rec,
-            "already_archived": already,
-            "signature": sig,
-            "records": records,
-            "projects": projects,
-            "pending_sessions": pending_sessions,
-            "metrics_md_uri": metrics_md_uri,
-        },
-    )
+    payload = _state_payload(snap)
+    payload.update({"archived": saved_rec, "already_archived": already})
+    return _tool_ok(msg, payload)
 
 
 def _handle_metrics_remove_session(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -470,20 +594,65 @@ def _handle_metrics_remove_session(args: Dict[str, Any]) -> Dict[str, Any]:
         history_path=history_path,
         purge_reports=purge_reports,
     )
-    sig, records, projects, metrics_md_uri, pending_sessions = _load_state_snapshot(
-        store_dir, history_path
-    )
+    snap = _load_state_snapshot(store_dir, history_path)
+    payload = _state_payload(snap)
+    payload.update({"removed": removed, "remaining": remaining})
     return _tool_ok(
         f"Session '{removed.get('label')}' supprimée ({remaining} restante(s)).",
+        payload,
+    )
+
+
+def _handle_metrics_list_audits(args: Dict[str, Any]) -> Dict[str, Any]:
+    _, history_path = resolve_store_paths()
+    records = load_history(history_path)
+    audits, roots = list_audits(records=records)
+
+    ws_filter = str(args.get("workspace") or "").strip().casefold()
+    query = str(args.get("query") or "").strip().casefold()
+    filtered = []
+    for audit in audits:
+        if ws_filter and str(audit.get("workspace") or "").strip().casefold() != ws_filter:
+            continue
+        if query:
+            hay = " ".join(
+                [
+                    str(audit.get("title") or ""),
+                    str(audit.get("rel_path") or ""),
+                    str(audit.get("workspace") or ""),
+                    str(audit.get("verdict") or ""),
+                    str(audit.get("excerpt") or ""),
+                ]
+            ).casefold()
+            if query not in hay:
+                continue
+        filtered.append(audit)
+
+    links = build_audit_links_by_session(audits)
+    return _tool_ok(
+        f"{len(filtered)} audit(s) Markdown découvert(s).",
         {
-            "removed": removed,
-            "remaining": remaining,
-            "signature": sig,
-            "records": records,
-            "projects": projects,
-            "pending_sessions": pending_sessions,
-            "metrics_md_uri": metrics_md_uri,
+            "audits": filtered,
+            "roots": roots,
+            "count": len(filtered),
+            "audit_links_by_session": links,
         },
+    )
+
+
+def _handle_metrics_read_audit(args: Dict[str, Any]) -> Dict[str, Any]:
+    audit_id = str(args.get("audit_id") or "").strip()
+    if not audit_id:
+        return _tool_err("Le paramètre 'audit_id' est requis.")
+    _, history_path = resolve_store_paths()
+    records = load_history(history_path)
+    try:
+        audit_data = read_audit(audit_id, records=records)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return _tool_err(str(exc))
+    return _tool_ok(
+        f"Audit '{audit_data.get('title') or audit_id}' chargé.",
+        {"audit": audit_data},
     )
 
 
@@ -493,6 +662,8 @@ _TOOL_DISPATCH = {
     "metrics_get_session": _handle_metrics_get_session,
     "metrics_archive_session": _handle_metrics_archive_session,
     "metrics_remove_session": _handle_metrics_remove_session,
+    "metrics_list_audits": _handle_metrics_list_audits,
+    "metrics_read_audit": _handle_metrics_read_audit,
 }
 
 
