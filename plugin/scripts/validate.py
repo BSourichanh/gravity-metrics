@@ -28,6 +28,20 @@ OFFICIAL_PLUGIN_FIELDS = {
     "repository",
     "disabled",
 }
+REQUIRED_PLUGIN_FIELDS = OFFICIAL_PLUGIN_FIELDS - {"disabled"}
+REQUIRED_MODULE_FIELDS = {
+    "schema_version",
+    "id",
+    "plugin_name",
+    "role",
+    "storage",
+    "commands",
+    "capabilities",
+    "ui",
+    "signals",
+}
+SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+UTF8_BOM = b"\xef\xbb\xbf"
 ALLOWED_LOCAL_MODULES = {"metrics", "hook_runtime", "cli", "validate", "mcp", "widget_html"}
 FLAT_HOOK_EVENTS = ("SessionStart", "PreInvocation", "PostInvocation", "Stop")
 GROUPED_HOOK_EVENTS = ("PreToolUse", "PostToolUse")
@@ -450,22 +464,127 @@ def _run_mcp_dry_run(plugin_root: Path, report: Report) -> None:
             report.error(f"MCP open_metrics_dashboard résultat invalide : {call_res!r}")
 
 
+def _read_json_no_bom(path: Path, label: str, report: Report) -> Optional[Dict[str, Any]]:
+    """Lit un fichier JSON objet en vérifiant l'absence de BOM UTF-8."""
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        report.error(f"{label} illisible : {exc}")
+        return None
+    if raw_bytes.startswith(UTF8_BOM):
+        report.error(f"{label} ne doit pas contenir de BOM UTF-8.")
+    try:
+        data = json.loads(raw_bytes.decode("utf-8"))
+    except Exception as exc:
+        report.error(f"{label} invalide : {exc}")
+        return None
+    if not isinstance(data, dict):
+        report.error(f"{label} doit contenir un objet JSON.")
+        return None
+    return data
+
+
+def _is_str_list(val: Any, *, allow_empty: bool = False) -> bool:
+    if not isinstance(val, list):
+        return False
+    if not allow_empty and not val:
+        return False
+    return all(isinstance(item, str) and bool(item.strip()) for item in val)
+
+
+def _validate_module_contract(
+    root: Path, manifest: Dict[str, Any], report: Report
+) -> None:
+    """Valide le contrat modulaire v1 dans config/module.json."""
+    module_path = root / "config" / "module.json"
+    if not module_path.is_file():
+        report.error("config/module.json introuvable.")
+        return
+
+    data = _read_json_no_bom(module_path, "config/module.json", report)
+    if data is None:
+        return
+
+    missing = sorted(REQUIRED_MODULE_FIELDS - set(data.keys()))
+    if missing:
+        report.error(f"config/module.json : champs requis manquants : {missing}")
+    unknown = sorted(set(data.keys()) - REQUIRED_MODULE_FIELDS)
+    if unknown:
+        report.error(f"config/module.json : champs inconnus détectés : {unknown}")
+
+    sv = data.get("schema_version")
+    if isinstance(sv, bool) or sv != 1:
+        report.error(f"config/module.json : 'schema_version' doit être 1, obtenu {sv!r}.")
+
+    if data.get("id") != "metrics":
+        report.error(f"config/module.json : 'id' doit être 'metrics', obtenu {data.get('id')!r}.")
+
+    expected_pname = manifest.get("name") or "gravity-metrics"
+    if data.get("plugin_name") != expected_pname:
+        report.error(
+            f"config/module.json : 'plugin_name' doit être {expected_pname!r}, obtenu {data.get('plugin_name')!r}."
+        )
+
+    role = data.get("role")
+    if not isinstance(role, str) or not role.strip():
+        report.error("config/module.json : 'role' doit être une chaîne non vide.")
+
+    storage = data.get("storage")
+    if not isinstance(storage, dict):
+        report.error("config/module.json : 'storage' doit être un objet.")
+    else:
+        if storage.get("subdir") != "metrics":
+            report.error(
+                f"config/module.json : 'storage.subdir' doit être 'metrics', obtenu {storage.get('subdir')!r}."
+            )
+        if storage.get("env_override") != "GRAVITY_METRICS_HOME":
+            report.error(
+                "config/module.json : 'storage.env_override' doit être 'GRAVITY_METRICS_HOME', "
+                f"obtenu {storage.get('env_override')!r}."
+            )
+
+    commands = data.get("commands")
+    if not _is_str_list(commands) or "/gravity-metrics" not in commands or not all(
+        c.startswith("/") for c in commands
+    ):
+        report.error("config/module.json : 'commands' doit lister des commandes '/' incluant '/gravity-metrics'.")
+
+    if not _is_str_list(data.get("capabilities")):
+        report.error("config/module.json : 'capabilities' doit être une liste non vide de chaînes.")
+
+    ui = data.get("ui")
+    if not isinstance(ui, dict):
+        report.error("config/module.json : 'ui' doit être un objet.")
+    else:
+        if not isinstance(ui.get("mode"), str) or not ui["mode"].strip():
+            report.error("config/module.json : 'ui.mode' doit être une chaîne non vide.")
+        if not isinstance(ui.get("target"), str) or not ui["target"].strip():
+            report.error("config/module.json : 'ui.target' doit être une chaîne non vide.")
+
+    signals = data.get("signals")
+    if not isinstance(signals, dict):
+        report.error("config/module.json : 'signals' doit être un objet.")
+    else:
+        if not _is_str_list(signals.get("produces"), allow_empty=True):
+            report.error("config/module.json : 'signals.produces' doit être une liste de chaînes.")
+        if not _is_str_list(signals.get("consumes"), allow_empty=True):
+            report.error("config/module.json : 'signals.consumes' doit être une liste de chaînes.")
+
+
 def validate_plugin(root: Path, report: Report) -> None:
-    """Audite la structure, le manifeste, les règles, les hooks, le serveur MCP App et la conformité stdlib."""
+    """Audite la structure, le manifeste, le contrat module, les règles, les hooks, le serveur MCP App et la conformité stdlib."""
     manifest_path = root / "plugin.json"
     if not manifest_path.is_file():
         report.error("plugin.json introuvable à la racine du plugin.")
         return
 
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        report.error(f"plugin.json invalide : {exc}")
+    manifest = _read_json_no_bom(manifest_path, "plugin.json", report)
+    if manifest is None:
         return
 
-    if not isinstance(manifest, dict):
-        report.error("plugin.json doit contenir un objet JSON.")
-        return
+    missing_keys = sorted(REQUIRED_PLUGIN_FIELDS - set(manifest.keys()))
+    if missing_keys:
+        report.error(f"plugin.json : champs officiels requis manquants : {missing_keys}")
 
     unknown_keys = sorted(set(manifest.keys()) - OFFICIAL_PLUGIN_FIELDS)
     if unknown_keys:
@@ -474,9 +593,26 @@ def validate_plugin(root: Path, report: Report) -> None:
     if manifest.get("name") != "gravity-metrics":
         report.error(f"plugin.json : 'name' doit être 'gravity-metrics', obtenu {manifest.get('name')!r}.")
 
+    display_name = manifest.get("displayName")
+    if not isinstance(display_name, str) or not display_name.strip():
+        report.error("plugin.json : 'displayName' doit être une chaîne non vide.")
+
+    version = manifest.get("version")
+    if not isinstance(version, str) or not SEMVER_RE.match(version.strip()):
+        report.error(f"plugin.json : 'version' SemVer invalide : {version!r}.")
+
     desc = str(manifest.get("description") or "")
     if not desc or len(desc) > 160:
         report.error(f"plugin.json : 'description' vide ou > 160 caractères ({len(desc)}).")
+
+    author = manifest.get("author")
+    if not isinstance(author, dict) or not isinstance(author.get("name"), str) or not author["name"].strip():
+        report.error("plugin.json : 'author.name' doit être une chaîne non vide.")
+
+    for url_key in ("homepage", "repository"):
+        val = manifest.get(url_key)
+        if not isinstance(val, str) or not val.strip():
+            report.error(f"plugin.json : '{url_key}' doit être une chaîne non vide.")
 
     prompts = manifest.get("suggestedPrompts")
     if not isinstance(prompts, list) or len(prompts) != 3 or not all(isinstance(p, str) and p.strip() for p in prompts):
@@ -495,6 +631,7 @@ def validate_plugin(root: Path, report: Report) -> None:
         if not vb or float(vb.group(1)) <= 0 or float(vb.group(1)) != float(vb.group(2)):
             report.error(f"Logo {logo_rel} : viewBox carré 1:1 non détecté.")
 
+    _validate_module_contract(root, manifest, report)
     _validate_skills(root, report)
     _validate_mcp_config(root, report)
 

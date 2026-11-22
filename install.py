@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent
-PLUGIN_SOURCE = REPO_ROOT / "gravity-metrics-plugin"
+PLUGIN_SOURCE = REPO_ROOT / "plugin"
 PLUGIN_NAME = "gravity-metrics"
 
 EXEC_SCRIPTS: Tuple[str, ...] = (
@@ -157,15 +157,26 @@ def run_fix_python_cmd(plugin_dir: Path) -> subprocess.CompletedProcess:
     )
 
 
+def resolve_store_dir() -> Path:
+    """Resolve centralized store directory ($GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics)."""
+    env_home = os.environ.get("GRAVITY_METRICS_HOME", "").strip()
+    if env_home:
+        return Path(env_home).expanduser()
+    gravity_home = os.environ.get("GRAVITY_HOME", "").strip()
+    if gravity_home:
+        return Path(gravity_home).expanduser() / "metrics"
+    return Path.home() / ".gemini" / "gravity" / "metrics"
+
+
 def print_next_steps(target_dir: Optional[Path]) -> None:
     """Print concise post-install instructions without touching config.json."""
-    store_dir = Path.home() / ".gemini" / "gravity-metrics"
+    store_dir = resolve_store_dir()
     print("\nNext steps:")
     if target_dir is not None:
         print(f"  - Installed plugin location : {target_dir}")
     print(f"  - Centralized metrics store : {store_dir}")
     print("  - Manage plugin in Antigravity : [Gravity Metrics](customization://gravity-metrics)")
-    print("  - Run /gravity-metrics at the end of a Gravity session to capture metrics and open the widget.")
+    print("  - Run /gravity-metrics at the end of a session to capture metrics and open the widget.")
     print("  - Or open the global dashboard anytime from Plugins -> Gravity Metrics (zero tokens).")
 
 
@@ -388,7 +399,7 @@ def install_agy(plugin_src: Path, *, dry_run: bool = False) -> int:
     if os.name == "nt" and not has_real_python3():
         print(
             "[NOTE]  Windows without real 'python3' detected: if hooks fail, run\n"
-            "        'python gravity-metrics-plugin/scripts/validate.py --plugin-root <installed-dir> --fix-python-cmd'\n"
+            "        'python plugin/scripts/validate.py --plugin-root <installed-dir> --fix-python-cmd'\n"
             "        against your installed copy."
         )
     return 0

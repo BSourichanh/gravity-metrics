@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-22
+
+### Added
+- **Module Contract v1 (`plugin/config/module.json`):**
+  - Declared `id: "metrics"`, `plugin_name: "gravity-metrics"`, unified storage metadata (`subdir: "metrics"`, `env_override: "GRAVITY_METRICS_HOME"`), command `/gravity-metrics`, capabilities (`session-telemetry`, `cost-analytics`, `workflow-signals`), UI transition mode (`transition-mcp` -> `gravity`), and signal declarations (`produces: ["session-metrics", "cost-telemetry"]`).
+- **Contract & Precedence Validation (`plugin/scripts/validate.py`, `tests/`):**
+  - Extended `validate.py` to strictly validate `plugin/config/module.json` v1, all 9 required official `plugin.json` fields, and absence of UTF-8 BOM.
+  - Added tests covering `$GRAVITY_METRICS_HOME` > `$GRAVITY_HOME/metrics` > `~/.gemini/gravity/metrics` storage precedence, `/gravity-workflow` window detection, and `module.json` contract validation.
+
+### Changed
+- **Standardized `plugin/` Layout:**
+  - Renamed `gravity-metrics-plugin/` to `plugin/` across the repository, `install.py` (`PLUGIN_SOURCE = REPO_ROOT / "plugin"`), and `tests/`.
+  - Bumped manifest (`plugin/plugin.json`) and MCP App server/widget (`plugin/mcp/server.py`, `plugin/mcp/widget_html.py`) to `0.2.0`.
+- **Unified Centralized Storage (`plugin/metrics/pricing.py`, `install.py`, `plugin/rules/AGENTS.md`):**
+  - Updated `default_store_dir()` and installer/documentation references to resolve `$GRAVITY_METRICS_HOME` > `$GRAVITY_HOME/metrics` > `~/.gemini/gravity/metrics`.
+- **Session Window Detection (`plugin/metrics/collector.py`):**
+  - Preserved `--gravity-window` and `features_used` matching for both `/gravity-workflow` and `/gravity` (including namespaced invocations and `auto` mode axis stripping).
+- **Lot 4b Ecosystem Alignment (`README.md`, `plugin/README.md`, `AGENTS.md`):**
+  - Clearly distinguished `gravity` Core (`BSourichanh/gravity`) and `gravity-workflow` (`/gravity-workflow`, `BSourichanh/gravity-workflow`), documented `gravity-metrics`'s signal role for `gravity-workflow` `auto` mode and MCP App UI transition toward `gravity` Core, and codified KISS/YAGNI/DRY/SOLID/CUPID invariants in `AGENTS.md`.
+
 ## [0.1.2] - 2026-11-22
 
 ### Changed

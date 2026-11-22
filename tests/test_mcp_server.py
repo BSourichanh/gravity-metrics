@@ -7,10 +7,11 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from typing import Optional
 import unittest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PLUGIN_ROOT = PROJECT_ROOT / "gravity-metrics-plugin"
+PLUGIN_ROOT = PROJECT_ROOT / "plugin"
 SERVER_SCRIPT = PLUGIN_ROOT / "mcp" / "server.py"
 CATALOG_PATH = PLUGIN_ROOT / "config" / "pricing_catalog.json"
 
@@ -27,10 +28,13 @@ def _write_transcript(conv_dir: Path, lines: list) -> None:
 
 
 def _call_mcp_stdio(
-    messages: list, store_dir: Path, brain_dir: Path, extra_env: dict = None
+    messages: list, store_dir: Optional[Path], brain_dir: Path, extra_env: dict = None
 ) -> list:
     env = dict(os.environ)
-    env["GRAVITY_METRICS_HOME"] = str(store_dir)
+    if store_dir is not None:
+        env["GRAVITY_METRICS_HOME"] = str(store_dir)
+    else:
+        env.pop("GRAVITY_METRICS_HOME", None)
     env["ANTIGRAVITY_BRAIN_DIR"] = str(brain_dir)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     if extra_env:
@@ -253,6 +257,26 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual(sc_proj["initial_project"], "gravity")
             self.assertEqual(sc_proj["initial_scope"], "project")
             self.assertIn("projet 'gravity' : 2 session(s) / 2 au total", by_id[2]["content"][0]["text"])
+
+    def test_mcp_server_uses_gravity_home_metrics_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grav_home = root / "grav-home"
+            store = grav_home / "metrics"
+            brain = root / "brain"
+            self._seed_store(store, brain)
+
+            resps = _call_mcp_stdio(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {}}},
+                ],
+                None,
+                brain,
+                extra_env={"GRAVITY_HOME": str(grav_home)},
+            )
+            sc = resps[0]["result"]["structuredContent"]
+            self.assertEqual(len(sc["records"]), 2)
+            self.assertEqual(sc["projects"], ["ProjA", "ProjB"])
 
 
 if __name__ == "__main__":

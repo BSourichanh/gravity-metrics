@@ -63,7 +63,10 @@ def default_store_dir() -> Path:
     env_home = os.environ.get("GRAVITY_METRICS_HOME", "").strip()
     if env_home:
         return Path(env_home).expanduser()
-    return Path.home() / ".gemini" / "gravity-metrics"
+    gravity_home = os.environ.get("GRAVITY_HOME", "").strip()
+    if gravity_home:
+        return Path(gravity_home).expanduser() / "metrics"
+    return Path.home() / ".gemini" / "gravity" / "metrics"
 
 
 def default_history_path(store_dir: Optional[Union[Path, str]] = None) -> Path:

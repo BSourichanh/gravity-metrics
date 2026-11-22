@@ -7,10 +7,11 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from typing import Optional
 import unittest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PLUGIN_ROOT = PROJECT_ROOT / "gravity-metrics-plugin"
+PLUGIN_ROOT = PROJECT_ROOT / "plugin"
 HOOK_SCRIPT = PLUGIN_ROOT / "hooks" / "pre_invocation_metrics.py"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
@@ -42,10 +43,13 @@ def _write_subagent(parent_dir: Path, child_id: str, type_name: str, role: str, 
 
 
 def _run_hook(
-    payload_raw: str, store_dir: Path, brain_dir: Path, extra_env: dict = None
+    payload_raw: str, store_dir: Optional[Path], brain_dir: Path, extra_env: dict = None
 ) -> dict:
     env = dict(os.environ)
-    env["GRAVITY_METRICS_HOME"] = str(store_dir)
+    if store_dir is not None:
+        env["GRAVITY_METRICS_HOME"] = str(store_dir)
+    else:
+        env.pop("GRAVITY_METRICS_HOME", None)
     env["ANTIGRAVITY_BRAIN_DIR"] = str(brain_dir)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     if extra_env:
@@ -336,6 +340,45 @@ class TestPreInvocationHook(unittest.TestCase):
             md_cap = sys_msg_obj["metadata"]["user_markdown"]
             self.assertIn("evo→medium · slow · safe", md_cap)
             self.assertIn("résumé-cp1252", md_cap)
+
+    def test_gravity_home_fallback_and_gravity_workflow_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grav_home = root / "gravity-home"
+            brain = root / "brain"
+            ws = root / "ProjetWorkflow"
+            ws.mkdir()
+            cid = "5555eeee-0000-0000-0000-000000000005"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T10:00:00Z", "content": "Chat libre"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T10:00:05Z", "model": "gemini-4-neon", "input_tokens": 500_000, "cache_read_tokens": 0, "output_tokens": 2_000, "tool_calls": []},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T10:01:00Z", "content": "/gravity-workflow auto optimise tests"},
+                    {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T10:01:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 40_000, "cache_read_tokens": 60_000, "output_tokens": 1_000, "tool_calls": []},
+                ],
+            )
+            out = _run_hook(
+                json.dumps(
+                    {
+                        "conversationId": cid,
+                        "transcriptPath": str(tpath),
+                        "cwd": str(ws),
+                        "lastUserInput": "/gravity-metrics",
+                    }
+                ),
+                None,
+                brain,
+                extra_env={"GRAVITY_HOME": str(grav_home)},
+            )
+            self.assertNotIn("terminationBehavior", out)
+            expected_history = grav_home / "metrics" / "data" / "history.jsonl"
+            self.assertTrue(expected_history.is_file())
+            records = load_history(expected_history)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["input_tokens"], 40_000)
+            self.assertEqual(records[0]["window_mode"], "gravity_session")
+            self.assertIn("gravity", records[0]["features_used"])
 
 
 if __name__ == "__main__":

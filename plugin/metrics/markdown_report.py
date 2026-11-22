@@ -37,13 +37,13 @@ def _window_desc(win: Dict[str, Any]) -> str:
     bef = int(win.get("excluded_before_steps") or 0)
     aft = int(win.get("excluded_after_steps") or 0)
     if wmode == "gravity_session":
-        return f"Fenêtre `/gravity` (exclus : {bef} avant, {aft} après)"
+        return f"Fenêtre `/gravity-workflow` / `/gravity` (exclus : {bef} avant, {aft} après)"
     if wmode == "since_last_metrics":
-        return f"Depuis dernière collecte (aucun `/gravity` préalable ; exclus : {bef} avant, {aft} après)"
+        return f"Depuis dernière collecte (aucun `/gravity-workflow` ni `/gravity` préalable ; exclus : {bef} avant, {aft} après)"
     if wmode == "custom":
         return f"Fenêtre personnalisée (exclus : {bef} avant, {aft} après)"
     return (
-        f"Conversation entière (repli — aucun `/gravity` préalable ; exclus : {aft} après)"
+        f"Conversation entière (repli — aucun `/gravity-workflow` ni `/gravity` préalable ; exclus : {aft} après)"
         if not win.get("has_gravity_anchor") and aft > 0
         else "Conversation entière"
     )

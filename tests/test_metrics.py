@@ -3,15 +3,18 @@
 
 import ast
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PLUGIN_ROOT = PROJECT_ROOT / "gravity-metrics-plugin"
+PLUGIN_ROOT = PROJECT_ROOT / "plugin"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
@@ -20,6 +23,7 @@ from metrics import (  # noqa: E402
     classify_agent,
     collect_run_metrics,
     compute_call_cost,
+    default_store_dir,
     discover_agent_tree,
     list_gravity_conversations,
     load_history,
@@ -545,6 +549,61 @@ class TestGravityWindowAndProfile(unittest.TestCase):
             auto_lbl = suggest_auto_label("Gravity", win2["first_prompt"], "2026-11-21T21:18:00Z", [])
             self.assertEqual(auto_lbl, "gravity-audit-complet-hooks")
 
+    def test_gravity_workflow_window_and_label_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = Path(tmp) / "brain"
+            cid = "conv-gw-1"
+            _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T09:00:00Z", "content": "Chat hors workflow"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T09:00:05Z", "model": "gemini-4-neon", "input_tokens": 250_000, "cache_read_tokens": 0, "output_tokens": 2_000, "tool_calls": []},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T09:01:00Z", "content": "<USER_REQUEST>\n/gravity-workflow auto corrige bug auth\n</USER_REQUEST>"},
+                    {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T09:01:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 30_000, "cache_read_tokens": 70_000, "output_tokens": 1_500, "tool_calls": []},
+                    {"step_index": 4, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T09:02:00Z", "content": "/gravity-metrics"},
+                ],
+            )
+            m = collect_run_metrics(cid, brain, CATALOG_PATH, gravity_window=True, project="MyApp")
+            self.assertEqual(m["window"]["mode"], "gravity_session")
+            self.assertEqual(m["window"]["start_step_index"], 2)
+            self.assertEqual(m["window"]["end_step_index"], 4)
+            self.assertEqual(m["summary"]["input_tokens"], 30_000)
+            self.assertIn("gravity", m["summary"]["features_used"])
+            self.assertNotIn("gemini-4-neon", m["by_model"])
+
+            lbl = suggest_auto_label("MyApp", m["window"]["first_prompt"], "2026-11-22T09:01:00Z", [])
+            self.assertEqual(lbl, "myapp-corrige-bug-auth")
+
+            lbl_ns = suggest_auto_label(
+                "MyApp",
+                "/gravity-workflow:gravity-workflow high fast ajoute tests",
+                "2026-11-22T09:05:00Z",
+                [],
+            )
+            self.assertEqual(lbl_ns, "myapp-ajoute-tests")
+
+    def test_default_store_dir_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_home = root / "home"
+            grav_home = root / "grav-home"
+            explicit = root / "explicit-store"
+
+            with mock.patch.object(Path, "home", return_value=fake_home):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    self.assertEqual(default_store_dir(), fake_home / ".gemini" / "gravity" / "metrics")
+                with mock.patch.dict(os.environ, {"GRAVITY_HOME": str(grav_home)}, clear=True):
+                    self.assertEqual(default_store_dir(), grav_home / "metrics")
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "GRAVITY_HOME": str(grav_home),
+                        "GRAVITY_METRICS_HOME": str(explicit),
+                    },
+                    clear=True,
+                ):
+                    self.assertEqual(default_store_dir(), explicit)
+
 
 class TestHistoryAndCLI(unittest.TestCase):
     def test_slugify_label(self) -> None:
@@ -1034,6 +1093,36 @@ class TestReconciliationAndCompliance(unittest.TestCase):
                     forbidden_term_re.search(txt),
                     f"Terme hors périmètre trouvé dans {fpath}",
                 )
+
+    def test_validate_module_contract_strict_and_rejection(self) -> None:
+        validate_script = PLUGIN_ROOT / "scripts" / "validate.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_copy = Path(tmp) / "plugin"
+            shutil.copytree(PLUGIN_ROOT, plugin_copy)
+
+            proc_ok = subprocess.run(
+                [sys.executable, "-B", str(validate_script), "--plugin-root", str(plugin_copy), "--strict"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(proc_ok.returncode, 0, proc_ok.stdout + proc_ok.stderr)
+
+            module_json = plugin_copy / "config" / "module.json"
+            bad_contract = json.loads(module_json.read_text(encoding="utf-8"))
+            bad_contract["schema_version"] = 2
+            module_json.write_text(json.dumps(bad_contract), encoding="utf-8")
+
+            proc_bad = subprocess.run(
+                [sys.executable, "-B", str(validate_script), "--plugin-root", str(plugin_copy), "--strict"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertNotEqual(proc_bad.returncode, 0)
+            self.assertIn("schema_version", proc_bad.stdout)
 
 
 if __name__ == "__main__":
