@@ -13,9 +13,9 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SCRIPT = PROJECT_ROOT / "install.py"
-SOURCE_HOOKS = PROJECT_ROOT / "gravity-metrics-plugin" / "hooks.json"
-SOURCE_MCP = PROJECT_ROOT / "gravity-metrics-plugin" / "mcp_config.json"
-VALIDATE_SCRIPT = PROJECT_ROOT / "gravity-metrics-plugin" / "scripts" / "validate.py"
+SOURCE_HOOKS = PROJECT_ROOT / "plugin" / "hooks.json"
+SOURCE_MCP = PROJECT_ROOT / "plugin" / "mcp_config.json"
+VALIDATE_SCRIPT = PROJECT_ROOT / "plugin" / "scripts" / "validate.py"
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -64,6 +64,7 @@ class TestInstaller(unittest.TestCase):
             r_inst = _run_install("--target", str(target))
             self.assertEqual(r_inst.returncode, 0, r_inst.stderr + r_inst.stdout)
             self.assertTrue((target / "plugin.json").is_file())
+            self.assertTrue((target / "config" / "module.json").is_file())
             self.assertTrue((target / "hooks" / "pre_invocation_metrics.py").is_file())
             self.assertTrue((target / "mcp_config.json").is_file())
             self.assertTrue((target / "mcp" / "server.py").is_file())
@@ -181,6 +182,31 @@ class TestInstaller(unittest.TestCase):
             )
             self.assertEqual(r_val.returncode, 0, r_val.stderr + r_val.stdout)
             self.assertIn("[PASS]", r_val.stdout)
+
+    def test_resolve_store_dir_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_home = root / "home"
+            grav_home = root / "grav-home"
+            explicit = root / "explicit-metrics"
+
+            with mock.patch.object(installer.Path, "home", return_value=fake_home):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    self.assertEqual(
+                        installer.resolve_store_dir(),
+                        fake_home / ".gemini" / "gravity" / "metrics",
+                    )
+                with mock.patch.dict(os.environ, {"GRAVITY_HOME": str(grav_home)}, clear=True):
+                    self.assertEqual(installer.resolve_store_dir(), grav_home / "metrics")
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "GRAVITY_HOME": str(grav_home),
+                        "GRAVITY_METRICS_HOME": str(explicit),
+                    },
+                    clear=True,
+                ):
+                    self.assertEqual(installer.resolve_store_dir(), explicit)
 
 
 if __name__ == "__main__":

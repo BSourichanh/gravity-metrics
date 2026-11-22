@@ -31,10 +31,13 @@ _GRAVITY_METRICS_ARGS_RE = re.compile(
     r"^/gravity-metrics(?::gravity-metrics)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL
 )
 _NON_CAPTURE_METRICS_SUBCOMMANDS: Tuple[str, ...] = ()
-_GRAVITY_CMD_RE = re.compile(r"^/(?:gravity(?::gravity)?)(?:\s|$)", re.IGNORECASE)
+_GRAVITY_CMD_RE = re.compile(
+    r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity(?::gravity)?)(?:\s|$)",
+    re.IGNORECASE,
+)
 _GRAVITY_LEADING_AXES_RE = re.compile(
-    r"^/(?:gravity(?::gravity)?)"
-    r"(?:\s+(?:low|medium|high|ultra|evo|evolutive|slow|fast|safe|unsafe|init|status|evals))*\s*",
+    r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity(?::gravity)?)"
+    r"(?:\s+(?:low|medium|high|ultra|evo|evolutive|slow|fast|safe|unsafe|auto|init|status|evals))*\s*",
     re.IGNORECASE,
 )
 _STOPWORDS = {
@@ -156,7 +159,7 @@ def is_gravity_metrics_capture_prompt(raw: str) -> bool:
 
 
 def is_gravity_session_prompt(raw: str) -> bool:
-    """Retourne True si le prompt lance `/gravity ...` (hors `/gravity-metrics`)."""
+    """Retourne True si le prompt lance `/gravity ...` ou `/gravity-workflow ...` (hors `/gravity-metrics`)."""
     txt = extract_user_request_text(raw)
     return bool(_GRAVITY_CMD_RE.match(txt)) and not is_gravity_metrics_prompt(txt)
 
@@ -991,7 +994,7 @@ def _detect_execution_mode(
     is_workflow = bool(tool_counter.get("run_workflow"))
     is_subagents = len(enriched_agents) > 1 or bool(tool_counter.get("invoke_subagent"))
     is_plan = bool(tool_counter.get("exit_plan_mode")) or "plan" in cmds
-    is_gravity = "gravity" in cmds
+    is_gravity = bool(cmds & {"gravity", "gravity-workflow"})
 
     features_used: List[str] = []
     for flag, name in (

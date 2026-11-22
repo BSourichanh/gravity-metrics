@@ -1,19 +1,18 @@
 # Gravity Metrics — Instructions Agents
 
 ## Périmètre & Architecture
-- **Plugin compagnon :** `gravity-metrics-plugin/` fournit le hook `PreInvocation` (`/gravity-metrics`), `skills/gravity-metrics/SKILL.md`, le serveur MCP App `mcp/server.py` (`open_metrics_dashboard` `aux_pane`/`global`) et `rules/AGENTS.md`. Jamais de commande `/metrics` séparée.
-- **Stockage 100 % centralisé :** toutes les données (`data/history.jsonl`, `METRICS.md`, `reports/*.{json,md}`) vivent dans `~/.gemini/gravity-metrics/` (ou `$GRAVITY_METRICS_HOME`). Zéro fichier de métriques dans les workspaces cibles et zéro `.html` statique sur disque.
-- **Périmètre strict Métriques :** collecte, historisation et visualisation des métriques de sessions Antigravity uniquement (aucun terme hors périmètre ni jargon interdit).
+- **Module `metrics` (`plugin/`) :** `plugin/` fournit `config/module.json`, le hook `PreInvocation` (`/gravity-metrics`), `skills/gravity-metrics/SKILL.md`, le serveur MCP App `mcp/server.py` (`open_metrics_dashboard` `aux_pane`/`global`) et `rules/AGENTS.md`. Jamais de commande `/metrics` séparée.
+- **Écosystème Lot 4b :** distinct de `gravity` Core (`BSourichanh/gravity`, initialisation & registre unifié) et de `gravity-workflow` (`/gravity-workflow`, `BSourichanh/gravity-workflow`). Produit `session-metrics` et `cost-telemetry` pour le mode `auto` de `gravity-workflow`, avec UI MCP App en transition vers `gravity` Core (`ui.mode: "transition-mcp"`).
+- **Stockage 100 % centralisé :** résolution `$GRAVITY_METRICS_HOME` > `$GRAVITY_HOME/metrics` > `~/.gemini/gravity/metrics/` (`data/history.jsonl`, `METRICS.md`, `reports/*.{json,md}`). Zéro fichier dans les workspaces cibles et zéro `.html` statique sur disque.
 
 ## Invariants
-- **Branche de développement (`dev`) obligatoire :** tout développement s'effectue sur `dev` (ou branche dédiée), puis est fusionné vers `main` aux releases.
-- **Git & versioning (chef d'orchestre uniquement) :** `dev` / branches dédiées, jamais de commit ni push direct sur `main` ; *Conventional Commits* ; SemVer synchronisé dans `gravity-metrics-plugin/plugin.json` + `CHANGELOG.md` ; tags annotés `vX.Y.Z` aux releases. Sous-agents et workers `swarm` ne committent, ne poussent et ne taguent jamais.
-- **Documentation synchronisée :** toute évolution fonctionnelle ou structurelle met à jour `README.md`, `gravity-metrics-plugin/README.md` et `CHANGELOG.md` dans le même lot.
-- **100 % bibliothèque standard Python 3** dans `gravity-metrics-plugin/`, `install.py` et `tests/`.
-- **Portabilité `"python3"` :** conserver `"python3"` dans `gravity-metrics-plugin/hooks.json` et `mcp_config.json` (adaptation Windows `python` / `py -3` via `install.py` sur la copie installée uniquement).
-- **CLI strictement non-interactif :** ne jamais lancer `python gravity-metrics-plugin/scripts/cli.py add` sans `<UUID>` ni `--latest` dans un terminal non-interactif.
+- **Branche `dev` obligatoire :** tout développement s'effectue sur `dev` (jamais directement sur `main`).
+- **Git & versioning (chef d'orchestre uniquement) :** *Conventional Commits*, SemVer synchronisé dans `plugin/plugin.json` + `CHANGELOG.md`, tags annotés `vX.Y.Z` sur `main` ; sous-agents et workers `swarm` ne committent, ne poussent et ne taguent jamais.
+- **Qualité & stdlib :** appliquer KISS, YAGNI, DRY, SOLID, CUPID ; 100 % bibliothèque standard Python 3.10+ dans `plugin/`, `install.py` et `tests/` (UTF-8 sans BOM, LF).
+- **Documentation & portabilité :** synchroniser `README.md`, `plugin/README.md` et `CHANGELOG.md` dans le même lot ; garder `"python3"` dans `plugin/hooks.json` et `plugin/mcp_config.json` (adaptation Windows via `install.py` sur la copie installée).
+- **CLI non-interactif & fenêtrage :** jamais de `cli.py add` sans UUID ni `--latest` ; préserver la détection `--gravity-window` pour `/gravity` et `/gravity-workflow`, sans terme ni jargon interdit.
 
 ## Vérifications obligatoires
-- `python gravity-metrics-plugin/scripts/validate.py --strict`
-- `agy plugin validate ./gravity-metrics-plugin`
+- `python plugin/scripts/validate.py --strict`
+- `agy plugin validate ./plugin --strict`
 - `python -m unittest discover -s tests -p "test_*.py" -v`
