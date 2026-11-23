@@ -7,20 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- **Compaction `rules/AGENTS.md` & `AGENTS.md` (D4) :**
-  - Compacté `plugin/rules/AGENTS.md` (`1 115 o` → `518 o`, UTF-8 sans BOM, LF) et `AGENTS.md` racine (`2 203 o` → `1 648 o`, 3 sections canoniques conservées) sans perte d'invariants `v0.5.0`.
-  - Mis à jour `README.md` et `plugin/README.md` pour refléter les seuils D4.
-
-### Added
-- **Contrôles D4 dans `plugin/scripts/validate.py` & Tests (`tests/test_validate.py`) :**
-  - Abaissé le seuil d'erreur de `rules/AGENTS.md` à `> 1 000 o` (avertissement pour `601..1 000 o` bloquant sous `--strict`) avec contrôles UTF-8 sans BOM, LF et frontmatter YAML.
-  - Ajouté les contrôles UTF-8 sans BOM, LF et plafonds en octets sur `skills/gravity-metrics/SKILL.md` (`<= 6 000 o`) et `AGENTS.md` racine (`<= 2 500 o` quand `root.name == "plugin"`).
-  - Ajouté la suite isolée `tests/test_validate.py` couvrant seuils D4, BOM, CRLF, frontmatter YAML et garde d'installation.
-
 ## [0.5.0] - 2026-11-23
 
 ### Added
+- **D4 Validator Enforcement & Isolated Tests (`plugin/scripts/validate.py`, `tests/test_validate.py`):**
+  - Enforced `plugin/rules/AGENTS.md` limits (`> 1 000 B` error, `601..1 000 B` `--strict` warning), `SKILL.md <= 6 000 B`, and root `AGENTS.md <= 2 500 B` with UTF-8 no-BOM, LF, and YAML frontmatter checks, covered by `tests/test_validate.py`.
 - **Hybrid Capture Lifecycle & `SessionStart` Hook (`plugin/hooks/session_start_metrics.py`, `pre_invocation_metrics.py`, `plugin/metrics/lifecycle.py`, `hooks.json`):**
   - Added lightweight `SessionStart` hook recording workspace/project provenance into centralized `$GRAVITY_METRICS_HOME/session_meta.json` (fallback via `bridge.db` RO `from_workspace` and `canonical_path` matching).
   - Added zero-token `/gravity-metrics start [label]` (`active_captures.json`) and `/gravity-metrics stop [label]` / `finish` commands, plus immediate auto-archival on `/gravity-architect archive <slug>` (preserving `PendingBridgeJobsError`).
@@ -41,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed `/gravity-metrics pending` to open `view="pending"` (with `--project` support) and prevented incremental JS polling from wiping `detailCache`, scroll, focus, or `A vs B` state.
 
 ### Changed
+- **D4 Rules & Charter Compaction (`plugin/rules/AGENTS.md`, `AGENTS.md`, `README.md`, `plugin/README.md`):**
+  - Compacted `plugin/rules/AGENTS.md` (`1 115 B` → `518 B`) and root `AGENTS.md` (`2 203 B` → `1 648 B`) without losing any `v0.5.0` invariant, and updated D4 docs.
 - **Read-Only Bare `/gravity-metrics` & Version Bump (`plugin/hooks/pre_invocation_metrics.py`, `plugin/plugin.json`, `plugin/mcp/server.py`, `plugin/mcp/ui/app_js.py`, `README.md`, `plugin/README.md`, `CHANGELOG.md`):**
   - Bare `/gravity-metrics` now opens the dashboard in read-only mode without mutating `history.jsonl`.
   - Bumped manifest, MCP server, UI `appInfo`, and documentation to `0.5.0`.
