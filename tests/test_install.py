@@ -42,14 +42,69 @@ def _run_install(*args: str, extra_env: dict = None) -> subprocess.CompletedProc
 class TestInstaller(unittest.TestCase):
     def test_check_and_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "installed-plugin"
-            r_chk = _run_install("--check", "--target", str(target))
+            root = Path(tmp)
+            fake_home = root / "home"
+            fake_home.mkdir()
+            isolated_env = {
+                "HOME": str(fake_home),
+                "USERPROFILE": str(fake_home),
+            }
+            target = root / "installed-plugin"
+            r_chk = _run_install("--check", "--target", str(target), extra_env=isolated_env)
             self.assertEqual(r_chk.returncode, 0, r_chk.stderr)
             self.assertIn("Gravity Metrics Environment Check", r_chk.stdout)
-
-            r_dry = _run_install("--dry-run", "--target", str(target))
-            self.assertEqual(r_dry.returncode, 0, r_dry.stderr)
+            self.assertNotIn("Strict validation:", r_chk.stdout)
             self.assertFalse(target.exists())
+
+            r_chk_strict = _run_install(
+                "--check", "--strict", "--target", str(target), extra_env=isolated_env
+            )
+            self.assertEqual(r_chk_strict.returncode, 0, r_chk_strict.stderr + r_chk_strict.stdout)
+            self.assertIn("Strict validation: PASSED (0 error, 0 warning)", r_chk_strict.stdout)
+            self.assertFalse(target.exists())
+
+            r_dry = _run_install("--dry-run", "--target", str(target), extra_env=isolated_env)
+            self.assertEqual(r_dry.returncode, 0, r_dry.stderr)
+            self.assertIn("Run validate.py --strict", r_dry.stdout)
+            self.assertFalse(target.exists())
+
+            r_dry_skip = _run_install(
+                "--dry-run", "--skip-validate", "--target", str(target), extra_env=isolated_env
+            )
+            self.assertEqual(r_dry_skip.returncode, 0, r_dry_skip.stderr)
+            self.assertNotIn("Run validate.py --strict", r_dry_skip.stdout)
+            self.assertFalse(target.exists())
+
+            r_dry_override = _run_install(
+                "--dry-run", "--strict", "--skip-validate", "--target", str(target), extra_env=isolated_env
+            )
+            self.assertEqual(r_dry_override.returncode, 0, r_dry_override.stderr)
+            self.assertIn("Run validate.py --strict", r_dry_override.stdout)
+            self.assertFalse(target.exists())
+
+    def test_strict_check_failure_and_agy_strict_flag(self) -> None:
+        failed_proc = subprocess.CompletedProcess(
+            args=["validate.py", "--strict"],
+            returncode=1,
+            stdout="",
+            stderr="[FAIL] synthetic error",
+        )
+        with mock.patch.object(installer, "run_plugin_validation", return_value=failed_proc):
+            rc = installer.check_environment(
+                installer.PLUGIN_SOURCE, None, "global", "copy", strict=True
+            )
+            self.assertEqual(rc, 1)
+
+        with mock.patch.object(installer.shutil, "which", return_value="/usr/bin/agy"):
+            ok_proc = subprocess.CompletedProcess(args=["agy"], returncode=0, stdout="", stderr="")
+            with mock.patch.object(installer, "_run_subprocess", return_value=ok_proc) as run_mock:
+                rc_agy = installer.install_agy(installer.PLUGIN_SOURCE, dry_run=False)
+                self.assertEqual(rc_agy, 0)
+                first_cmd = run_mock.call_args_list[0].args[0]
+                self.assertEqual(
+                    first_cmd,
+                    ["/usr/bin/agy", "plugin", "validate", str(installer.PLUGIN_SOURCE), "--strict"],
+                )
 
     def test_copy_install_upgrade_workspace_and_uninstall(self) -> None:
         source_hooks_before = SOURCE_HOOKS.read_text(encoding="utf-8")

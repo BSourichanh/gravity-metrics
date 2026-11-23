@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Installer `--strict` Flag (`install.py`, `tests/test_install.py`):**
+  - Added `--strict` (`11/11` CLI contract) overriding `--skip-validate`, running read-only `validate.py --strict` under `--check`, and passing `--strict` to `agy plugin validate`.
+
 ### Changed
 - **Docs UX Alignment (`plugin/plugin.json`, `README.md`, `plugin/README.md`):**
   - Harmonized `suggestedPrompts` in `plugin/plugin.json` to the common `/cmd — summary` convention (`<= 100` chars).
