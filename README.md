@@ -2,6 +2,13 @@
 
 > **100% Python 3.10+ standard library** telemetry and cost-analytics module (`plugin/config/module.json`, `id: "metrics"`) for the Gravity ecosystem — hybrid capture lifecycle, centralized history, and sober **MCP App** widget (`aux_pane` & `global`) for costs, tokens, context cache, milestones, and agent audits across Google Antigravity sessions.
 
+> **Quick Start (2 min) & Ecosystem Fit**
+>
+> - **Tier 2 — Steering** *(prerequisite: [`gravity` Core](https://github.com/BSourichanh/gravity))*: tracks Antigravity session costs, token/cache savings, milestones, and agent audits.
+> - **First command:** `/gravity-metrics` *(or the unified `gravity` MCP App dashboard)*.
+> - **Hub `gravity/docs/`:** [Getting Started](https://github.com/BSourichanh/gravity/blob/main/docs/getting-started.md) · [User Journey](https://github.com/BSourichanh/gravity/blob/main/docs/user-journey.md)
+> - **Reference:** [Command Cheatsheet](https://github.com/BSourichanh/gravity/blob/main/docs/command-cheatsheet.md) · [Troubleshooting & Lifecycle](https://github.com/BSourichanh/gravity/blob/main/docs/troubleshooting-and-lifecycle.md)
+
 ## Ecosystem Role (Lot 4b Alignment)
 
 - **[`gravity` Core](https://github.com/BSourichanh/gravity)** (`/gravity`): workspace environment initializer (`~/.gemini/gravity/`), module contract registry, and future unified UI host.

@@ -2,6 +2,13 @@
 
 Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque standard Python 3** pour collecter, archiver et visualiser en widget **MCP App** les coûts, tokens, taux de cache, jalons de cycle et signaux de fiabilité des sessions Google Antigravity unifiées (arbre natif + enfants Gravity Bridge).
 
+> **Démarrage 2 min & Positionnement Écosystème**
+>
+> - **Palier 2 — Pilotage** *(prérequis : [`gravity` Core](https://github.com/BSourichanh/gravity))* : mesure les coûts, économies de cache, jalons et audits agents de vos sessions Antigravity.
+> - **Première commande :** `/gravity-metrics` *(ou le dashboard MCP App unifié `gravity`)*.
+> - **Hub `gravity/docs/` :** [Getting Started](https://github.com/BSourichanh/gravity/blob/main/docs/getting-started.md) · [User Journey](https://github.com/BSourichanh/gravity/blob/main/docs/user-journey.md)
+> - **Référence :** [Command Cheatsheet](https://github.com/BSourichanh/gravity/blob/main/docs/command-cheatsheet.md) · [Troubleshooting & Lifecycle](https://github.com/BSourichanh/gravity/blob/main/docs/troubleshooting-and-lifecycle.md)
+
 ## Positionnement dans l'écosystème Gravity (Lot 4b)
 
 - **[`gravity` Core](https://github.com/BSourichanh/gravity)** : socle d'initialisation (`$GRAVITY_HOME` / `~/.gemini/gravity/`), registre des modules (`config/module.json`) et futur hôte UI unifié.

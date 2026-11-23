@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Docs UX Alignment (`plugin/plugin.json`, `README.md`, `plugin/README.md`):**
+  - Harmonized `suggestedPrompts` in `plugin/plugin.json` to the common `/cmd — summary` convention (`<= 100` chars).
+  - Added a concise **Quick Start (2 min) & Ecosystem Fit** / **Démarrage 2 min & Positionnement Écosystème** block (`Tier 2 — Steering` / `Palier 2 — Pilotage`) in `README.md` and `plugin/README.md` with direct links to `gravity/docs/`.
+
 ## [0.5.0] - 2026-11-23
 
 ### Added
