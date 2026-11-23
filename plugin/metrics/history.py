@@ -115,8 +115,29 @@ def to_session_record(
         ws: data["cost_share_pct"]
         for ws, data in (metrics.get("by_workspace") or {}).items()
     }
+    ms_raw = metrics.get("milestones") or {}
+    ms_compact = None
+    if isinstance(ms_raw, dict) and isinstance(ms_raw.get("phases"), list):
+        ms_compact = {
+            "mode": str(ms_raw.get("mode") or "2_phases"),
+            "current_phase": str(ms_raw.get("current_phase") or ""),
+            "phases": [
+                {
+                    "id": str(ph.get("id") or ""),
+                    "label": str(ph.get("label") or ""),
+                    "status": str(ph.get("status") or "pending"),
+                    "agents": int(ph.get("agents") or 0),
+                    "llm_calls": int(ph.get("llm_calls") or 0),
+                    "cost_usd": float(ph.get("cost_usd") or 0.0),
+                    "cost_2027_usd": float(ph.get("cost_2027_usd") or 0.0),
+                    "cost_share_pct": float(ph.get("cost_share_pct") or 0.0),
+                }
+                for ph in ms_raw["phases"]
+                if isinstance(ph, dict)
+            ],
+        }
 
-    return {
+    rec_out = {
         "schema_version": SCHEMA_VERSION,
         "status": "archived",
         "added_at": now_iso,
@@ -165,6 +186,10 @@ def to_session_record(
         "rewind_calls": eff["rewind_waste"]["rewind_calls"],
         "interrupted_agents": eff["interrupted_agents"]["count"],
     }
+    if ms_compact is not None:
+        rec_out["current_phase"] = ms_compact["current_phase"]
+        rec_out["milestones"] = ms_compact
+    return rec_out
 
 
 def load_history(history_path: Union[Path, str]) -> List[Dict[str, Any]]:
@@ -193,14 +218,32 @@ def find_archived_session(
     conversation_id: str,
     window_start_step: Optional[int],
 ) -> Optional[Dict[str, Any]]:
-    """Retourne l'enregistrement archivé correspondant à `(conversation_id, window_start_step)` s'il existe."""
+    """Retourne l'enregistrement archivé correspondant à `(conversation_id, window_start_step)` ou couvert par `--full`."""
+    exact_match: Optional[Dict[str, Any]] = None
+    full_match: Optional[Dict[str, Any]] = None
+    any_match: Optional[Dict[str, Any]] = None
+
     for rec in records:
         if (
-            rec.get("conversation_id") == conversation_id
-            and rec.get("window_start_step") == window_start_step
-            and str(rec.get("status") or "archived").lower() == "archived"
+            rec.get("conversation_id") != conversation_id
+            or str(rec.get("status") or "archived").lower() != "archived"
         ):
-            return dict(rec)
+            continue
+        rec_wstep = rec.get("window_start_step")
+        if rec_wstep == window_start_step:
+            exact_match = dict(rec)
+            break
+        if rec_wstep is None and full_match is None:
+            full_match = dict(rec)
+        if any_match is None:
+            any_match = dict(rec)
+
+    if exact_match is not None:
+        return exact_match
+    if full_match is not None:
+        return full_match
+    if window_start_step is None and any_match is not None:
+        return any_match
     return None
 
 

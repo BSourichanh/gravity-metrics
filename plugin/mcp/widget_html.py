@@ -18,7 +18,7 @@ def render_mcp_widget_html() -> str:
     )
     return (
         "<!DOCTYPE html>\n"
-        '<html lang="fr" data-theme="dark">\n'
+        '<html lang="fr">\n'
         "<head>\n"
         '<meta charset="utf-8" />\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1" />\n'

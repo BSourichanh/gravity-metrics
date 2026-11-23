@@ -106,7 +106,7 @@ class TestMcpServer(unittest.TestCase):
             expected_version = json.loads(
                 (PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8")
             )["version"]
-            self.assertEqual(expected_version, "0.4.3")
+            self.assertEqual(expected_version, "0.5.0")
             self.assertEqual(by_id[1]["serverInfo"]["name"], "gravity-metrics")
             self.assertEqual(by_id[1]["serverInfo"]["version"], expected_version)
             self.assertEqual(by_id[2], {})
@@ -119,11 +119,14 @@ class TestMcpServer(unittest.TestCase):
             eps = open_meta["com.google.antigravity/ui"]["entrypoints"]
             self.assertEqual({e["type"] for e in eps}, {"aux_pane", "global"})
             view_enum = tools["open_metrics_dashboard"]["inputSchema"]["properties"]["view"]["enum"]
-            self.assertEqual(view_enum, ["overview", "reports", "pending", "audits", "history", "detail"])
+            self.assertEqual(view_enum, ["overview", "sessions", "reports", "pending", "compare", "audits", "history", "detail"])
             for helper_name in (
                 "metrics_get_state",
                 "metrics_get_session",
                 "metrics_archive_session",
+                "metrics_update_session_meta",
+                "metrics_ignore_session",
+                "metrics_unignore_session",
                 "metrics_remove_session",
                 "metrics_list_audits",
                 "metrics_read_audit",
@@ -150,12 +153,13 @@ class TestMcpServer(unittest.TestCase):
                 "com.google.antigravity/toggle-aux-pane",
                 "ui/update-model-context",
                 "ui/message",
-                "Vue d'ensemble",
-                "Rapports",
+                "Synthèse",
+                "Sessions",
                 "À archiver",
                 "Audits Agents",
                 "audits/agents/",
-                "Comparer A vs B",
+                "Comparer",
+                "Index &amp; Matrice",
                 "renderSafeMarkdown",
                 "renderProjectShareBars",
                 "renderWorkspaceSharePanel",
@@ -191,14 +195,14 @@ class TestMcpServer(unittest.TestCase):
             sc_global = by_id[1]["structuredContent"]
             self.assertEqual(sc_global["initial_scope"], "global")
             self.assertEqual(sc_global["initial_project"], "")
-            self.assertEqual(sc_global["initial_view"], "history")
+            self.assertEqual(sc_global["initial_view"], "overview")
             self.assertEqual(len(sc_global["records"]), 2)
             self.assertEqual(sc_global["projects"], ["ProjA", "ProjB"])
 
             sc_proj = by_id[2]["structuredContent"]
             self.assertEqual(sc_proj["initial_scope"], "project")
             self.assertEqual(sc_proj["initial_project"], "ProjA")
-            self.assertEqual(sc_proj["initial_view"], "history")
+            self.assertEqual(sc_proj["initial_view"], "overview")
 
             sc_det = by_id[3]["structuredContent"]
             self.assertEqual(sc_det["initial_scope"], "project")
@@ -435,7 +439,8 @@ class TestMcpServer(unittest.TestCase):
 
             sc_open = by_id[1]["structuredContent"]
             self.assertEqual(sc_open["initial_view"], "audits")
-            self.assertEqual(sc_open["audits_count"], 2)
+            self.assertEqual(sc_open["audits_count"], 1)
+            self.assertEqual(sc_open["index_audit"]["filename"], "README.md")
             by_proj = sc_open["by_project"]
             self.assertEqual({p["project"] for p in by_proj}, {"ProjA", "ProjB"})
             self.assertAlmostEqual(sum(p["share_pct"] for p in by_proj), 100.0, delta=0.2)
@@ -443,15 +448,15 @@ class TestMcpServer(unittest.TestCase):
             self.assertNotIn("22222222-aaaa-bbbb-cccc-000000000002", sc_open["audit_links_by_session"])
 
             sc_state = by_id[2]["structuredContent"]
-            self.assertEqual(sc_state["audits_count"], 2)
+            self.assertEqual(sc_state["audits_count"], 1)
             self.assertEqual(len(sc_state["by_project"]), 2)
 
             sc_list = by_id[3]["structuredContent"]
-            self.assertEqual(sc_list["count"], 2)
-            self.assertTrue(sc_list["audits"][0]["is_index"])
+            self.assertEqual(sc_list["count"], 1)
+            self.assertEqual(sc_list["index_audit"]["filename"], "README.md")
             self.assertEqual(
                 {a["filename"] for a in sc_list["audits"]},
-                {"README.md", "2026-11-22-audit-alpha.md"},
+                {"2026-11-22-audit-alpha.md"},
             )
 
             self.assertFalse(by_id[4]["isError"])

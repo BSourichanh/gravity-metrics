@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 ACTIVE_BRIDGE_JOB_STATUSES = ("queued", "claimed", "dispatched")
 _THREAD_ID_RE = re.compile(r'"thread_id"\s*:\s*"(thr-[A-Za-z0-9_-]+)"')
 _TARGET_CID_RE = re.compile(r'"target_conversation_id"\s*:\s*"([A-Za-z0-9_-]+)"')
+_BRIDGE_TX_CACHE: Dict[str, Tuple[Tuple[int, int], List[Dict[str, Any]]]] = {}
+_BRIDGE_TX_CACHE_MAX = 512
 
 
 def default_bridge_db_path() -> Path:
@@ -225,9 +227,20 @@ def _extract_response_payloads(generic_contents: List[str]) -> List[Dict[str, An
 
 
 def _parse_transcript_bridge_calls(transcript_path: Path) -> List[Dict[str, Any]]:
-    """Extrait les appels `send_message`/`dispatch_thread` depuis le transcript parent (repli v0.1.0)."""
+    """Extrait les appels `send_message`/`dispatch_thread` depuis le transcript parent (cache mtime_ns+size)."""
     if not transcript_path.is_file():
         return []
+    try:
+        st = transcript_path.stat()
+        cache_key = str(transcript_path.resolve())
+        sig = (int(st.st_mtime_ns), int(st.st_size))
+        cached = _BRIDGE_TX_CACHE.get(cache_key)
+        if cached is not None and cached[0] == sig:
+            return [dict(item) for item in cached[1]]
+    except OSError:
+        cache_key = ""
+        sig = (0, 0)
+
     entries: List[Dict[str, Any]] = []
     for raw_line in transcript_path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw_line.strip()
@@ -309,6 +322,10 @@ def _parse_transcript_bridge_calls(transcript_path: Path) -> List[Dict[str, Any]
                     "from_transcript": True,
                 }
             )
+    if cache_key:
+        if len(_BRIDGE_TX_CACHE) >= _BRIDGE_TX_CACHE_MAX:
+            _BRIDGE_TX_CACHE.pop(next(iter(_BRIDGE_TX_CACHE)))
+        _BRIDGE_TX_CACHE[cache_key] = (sig, [dict(item) for item in discovered])
     return discovered
 
 
@@ -489,3 +506,70 @@ def discover_bridge_links(
             }
         )
     return links
+
+
+def resolve_project_from_bridge_or_transcript(
+    conversation_id: str,
+    transcript_path: Optional[Union[Path, str]] = None,
+    bridge_db: Optional[Union[Path, str]] = None,
+) -> str:
+    """Résout le projet depuis `bridge.db` RO (`from_workspace` ou `canonical_path` dans le transcript)."""
+    cid = str(conversation_id or "").strip()
+    db_path = resolve_bridge_db_path(bridge_db)
+    conn = _connect_ro(db_path)
+    if conn is None:
+        return ""
+
+    workspaces: List[Tuple[str, str]] = []
+    try:
+        with closing(conn):
+            tcols = _table_columns(conn, "threads")
+            if cid and "from_workspace" in tcols and "caller_conversation_id" in tcols:
+                row = conn.execute(
+                    "SELECT from_workspace FROM threads "
+                    "WHERE caller_conversation_id = ? AND from_workspace IS NOT NULL AND TRIM(from_workspace) != '' "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (cid,),
+                ).fetchone()
+                if row is not None and row[0]:
+                    return str(row[0]).strip()
+
+            wcols = _table_columns(conn, "workspaces")
+            if "canonical_path" in wcols:
+                name_col = "slug" if "slug" in wcols else ("display_name" if "display_name" in wcols else "")
+                sel = f"canonical_path{', ' + name_col if name_col else ''}"
+                for row in conn.execute(
+                    f"SELECT {sel} FROM workspaces WHERE canonical_path IS NOT NULL AND TRIM(canonical_path) != ''"
+                ):
+                    cpath = str(row[0] or "").strip()
+                    if not cpath:
+                        continue
+                    wname = str(row[1] or "").strip() if name_col and len(row) > 1 else ""
+                    if not wname:
+                        wname = Path(cpath).name
+                    norm_cp = os.path.normcase(os.path.abspath(cpath)).replace("\\", "/").rstrip("/")
+                    if norm_cp and wname:
+                        workspaces.append((norm_cp, wname))
+    except sqlite3.Error:
+        return ""
+
+    if not workspaces or not transcript_path:
+        return ""
+    tpath = Path(transcript_path)
+    if not tpath.is_file():
+        return ""
+
+    workspaces.sort(key=lambda item: -len(item[0]))
+    try:
+        with tpath.open("r", encoding="utf-8", errors="replace") as fh:
+            for idx, raw_line in enumerate(fh):
+                if idx >= 120:
+                    break
+                line_norm = raw_line.replace("\\\\", "/").replace("\\", "/")
+                line_cf = line_norm.lower()
+                for norm_cp, wname in workspaces:
+                    if norm_cp.lower() in line_cf:
+                        return wname
+    except OSError:
+        return ""
+    return ""

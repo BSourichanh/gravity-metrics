@@ -124,13 +124,27 @@ class TestPreInvocationHook(unittest.TestCase):
                 [{"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T15:01:12Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 50_000, "cache_read_tokens": 50_000, "output_tokens": 2_000, "tool_calls": []}],
             )
 
-            # Cas (a) : /gravity-metrics pas encore flushé sur disque
+            # Cas (a0) : /gravity-metrics nu reste en lecture seule (aucune écriture)
             tpath = _write_transcript(brain / cid, base_lines)
-            payload_a = {
+            payload_ro = {
                 "conversationId": cid,
                 "transcriptPath": str(tpath),
                 "cwd": str(ws),
                 "lastUserInput": "/gravity-metrics",
+            }
+            out_ro = _run_hook(json.dumps(payload_ro), store, brain)
+            self.assertNotIn("terminationBehavior", out_ro)
+            sys_ro = out_ro["injectSteps"][0]["systemMessage"]
+            self.assertIn("lecture seule", sys_ro["metadata"]["user_markdown"])
+            self.assertIn("open_metrics_dashboard", sys_ro["systemMessage"])
+            self.assertFalse((store / "data" / "history.jsonl").exists())
+
+            # Cas (a) : /gravity-metrics stop capture même sans flush disque du prompt courant
+            payload_a = {
+                "conversationId": cid,
+                "transcriptPath": str(tpath),
+                "cwd": str(ws),
+                "lastUserInput": "/gravity-metrics stop",
             }
             out_a = _run_hook(json.dumps(payload_a), store, brain)
             self.assertNotIn("terminationBehavior", out_a)
@@ -263,13 +277,13 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertEqual(out_mid_no_marker, {})
             self.assertFalse((store / "data" / "history.jsonl").exists())
 
-            # 2) Double /gravity-metrics après fin du tour précédent -> aucune entrée enregistrée, mais ouvre le widget
+            # 2) Double /gravity-metrics stop après fin du tour précédent -> aucune entrée enregistrée, mais ouvre le widget
             t_finished = _write_transcript(
                 brain / cid1,
                 [
                     {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T16:00:00Z", "content": "/gravity run 1"},
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
-                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T16:01:00Z", "content": "/gravity-metrics"},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T16:01:00Z", "content": "/gravity-metrics stop"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T16:01:01Z", "content": METRICS_MARKER},
                     {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 500, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_metrics_dashboard"}]},
                     {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:03Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 400, "cache_read_tokens": 0, "output_tokens": 20, "tool_calls": []},
@@ -281,7 +295,7 @@ class TestPreInvocationHook(unittest.TestCase):
                         "conversationId": cid1,
                         "transcriptPath": str(t_finished),
                         "cwd": str(ws),
-                        "lastUserInput": "/gravity-metrics",
+                        "lastUserInput": "/gravity-metrics stop",
                     }
                 ),
                 store,
@@ -380,7 +394,7 @@ class TestPreInvocationHook(unittest.TestCase):
                         "conversationId": cid,
                         "transcriptPath": str(tpath),
                         "cwd": str(ws),
-                        "lastUserInput": "/gravity-metrics",
+                        "lastUserInput": "/gravity-metrics stop",
                     }
                 ),
                 None,

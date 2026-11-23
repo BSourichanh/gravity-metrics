@@ -18,24 +18,32 @@ APP_JS = r"""
     hostCtx: {},
     records: [],
     pendingSessions: [],
+    ignoredSessions: [],
+    activeCaptures: {},
     projects: [],
     byProject: [],
     audits: [],
     auditsRoots: [],
     auditsCount: 0,
+    indexAudit: null,
     auditLinksBySession: {},
     auditsLoaded: false,
     auditsLoading: false,
     signature: "",
+    histSig: "",
+    pendingSig: "",
+    auditsSig: "",
     metricsMdUri: "",
     scope: "global",
     activeProject: "",
     selectedProject: "",
     tariff: "2026",
     tab: "overview",
-    reportSubtab: "summary",
+    sessionsSub: "archived",
+    detailSubtab: "summary",
     reportsShowListMobile: true,
     auditsShowListMobile: true,
+    showIgnoredPending: false,
     search: "",
     modelFilter: "",
     alertsOnly: false,
@@ -52,6 +60,10 @@ APP_JS = r"""
     compareTargetA: "",
     compareTargetB: "",
     compareLoading: false,
+    archiveDrawerCid: "",
+    archiveForm: { label: "", project: "", note: "", full: false },
+    editMetaTarget: "",
+    editForm: { label: "", project: "", note: "" },
     auditSearch: "",
     auditWorkspaceFilter: "",
     auditVerdictFilter: "",
@@ -72,6 +84,7 @@ APP_JS = r"""
   const pendingRpc = new Map();
   let fallbackTimer = null;
   let pollTimer = null;
+  let toastTimer = null;
 
   function esc(val) {
     return String(val == null ? "" : val)
@@ -115,20 +128,52 @@ APP_JS = r"""
     return raw ? raw.slice(0, 16).replace("T", " ") : "—";
   }
 
+  function normProj(p) {
+    return String(p || "").trim().toLowerCase();
+  }
+
+  function scopedRecords() {
+    let list = state.records.slice();
+    if (state.scope === "project" && state.selectedProject) {
+      const selCf = normProj(state.selectedProject);
+      list = list.filter((r) => normProj(r.project) === selCf);
+    }
+    return list;
+  }
+
+  function hasTariffDiff() {
+    const list = scopedRecords();
+    return list.some((r) => {
+      const c26 = Number(r.cost_usd || 0);
+      const c27 = r.cost_2027_usd != null ? Number(r.cost_2027_usd) : c26;
+      return Math.abs(c26 - c27) > 1e-6;
+    });
+  }
+
+  function effectiveTariff() {
+    return hasTariffDiff() ? state.tariff : "2026";
+  }
+
   function recCost(rec) {
-    if (state.tariff === "2027") {
+    if (effectiveTariff() === "2027") {
       const p27 = rec.cost_2027_usd;
       if (p27 != null) return Number(p27) || 0;
     }
     return Number(rec.cost_usd) || 0;
   }
 
-  function recKey(rec) {
-    return String((rec && (rec.label || rec.conversation_id)) || "");
+  function recCacheSavings(rec) {
+    const c26 = Number(rec.cost_usd || 0);
+    const sav26 = Number(rec.cache_savings_usd || 0);
+    if (effectiveTariff() === "2027" && c26 > 0 && rec.cost_2027_usd != null) {
+      const ratio = (Number(rec.cost_2027_usd) || 0) / c26;
+      return sav26 * ratio;
+    }
+    return sav26;
   }
 
-  function normProj(p) {
-    return String(p || "").trim().toLowerCase();
+  function recKey(rec) {
+    return String((rec && (rec.label || rec.conversation_id)) || "");
   }
 
   function hasConversation() {
@@ -145,8 +190,20 @@ APP_JS = r"""
   }
 
   function showToast(msg, isError) {
+    if (toastTimer) {
+      clearTimeout(toastTimer);
+      toastTimer = null;
+    }
     state.toast = { msg: String(msg || ""), isError: Boolean(isError) };
     render();
+    if (!isError) {
+      toastTimer = setTimeout(() => {
+        state.toast = null;
+        toastTimer = null;
+        const tEl = document.querySelector(".toast");
+        if (tEl && tEl.parentNode) tEl.parentNode.removeChild(tEl);
+      }, 4000);
+    }
   }
 
   function postToHost(payload) {
@@ -226,24 +283,71 @@ APP_JS = r"""
     });
   }
 
-  function mapInitialTab(rawView) {
+  function mapInitialRoute(rawView) {
     const v = String(rawView || "").toLowerCase();
-    if (v === "detail" || v === "reports") return "reports";
-    if (v === "pending") return "pending";
-    if (v === "audits") return "audits";
-    return "overview";
+    if (v === "pending") return { tab: "sessions", sub: "pending" };
+    if (v === "compare") return { tab: "sessions", sub: "compare" };
+    if (v === "detail" || v === "reports" || v === "history" || v === "sessions") {
+      return { tab: "sessions", sub: "archived" };
+    }
+    if (v === "audits") return { tab: "audits", sub: "archived" };
+    return { tab: "overview", sub: "archived" };
+  }
+
+  function updateBadgesInPlace() {
+    const subEl = document.querySelector(".brand-sub");
+    if (subEl) {
+      const projLabel = state.scope === "project" && state.selectedProject
+        ? " · " + state.selectedProject
+        : " · tous projets";
+      subEl.textContent = state.records.length + " archivée(s) · " + state.pendingSessions.length + " en attente" + projLabel;
+    }
+    const sessBadge = document.querySelector('[data-badge="sessions"]');
+    if (sessBadge) {
+      const pend = state.pendingSessions.length;
+      sessBadge.textContent = pend > 0 ? String(scopedRecords().length) + " · • " + pend : String(scopedRecords().length);
+      sessBadge.className = "tab-badge" + (pend > 0 ? " warn" : "");
+    }
+    const pendBadge = document.querySelector('[data-badge="pending"]');
+    if (pendBadge) {
+      const pend = state.pendingSessions.length;
+      pendBadge.textContent = String(pend);
+      pendBadge.className = "tab-badge" + (pend > 0 ? " warn" : "");
+    }
+    const audBadge = document.querySelector('[data-badge="audits"]');
+    if (audBadge) {
+      const audCount = state.auditsLoaded ? state.audits.length : state.auditsCount;
+      audBadge.textContent = String(audCount);
+    }
   }
 
   function hydrateFromStatePayload(sc, isInitialToolResult) {
     if (!sc || typeof sc !== "object") return;
+    const prevHistSig = state.histSig;
+    const prevPendingSig = state.pendingSig;
+    const prevAuditsSig = state.auditsSig;
+
+    const newHistSig = typeof sc.hist_sig === "string" ? sc.hist_sig : state.histSig;
+    const newPendingSig = typeof sc.pending_sig === "string" ? sc.pending_sig : state.pendingSig;
+    const newAuditsSig = typeof sc.audits_sig === "string" ? sc.audits_sig : state.auditsSig;
+
+    const histChanged = isInitialToolResult || !prevHistSig || newHistSig !== prevHistSig;
+    const pendingChanged = isInitialToolResult || newPendingSig !== prevPendingSig;
+    const auditsChanged = isInitialToolResult || newAuditsSig !== prevAuditsSig;
+
     if (Array.isArray(sc.records)) {
       state.records = sc.records;
-      state.detailCache = {};
+      if (histChanged) {
+        state.detailCache = {};
+      }
     }
     if (Array.isArray(sc.pending_sessions)) state.pendingSessions = sc.pending_sessions;
+    if (Array.isArray(sc.ignored_sessions)) state.ignoredSessions = sc.ignored_sessions;
+    if (sc.active_captures && typeof sc.active_captures === "object") state.activeCaptures = sc.active_captures;
     if (Array.isArray(sc.projects)) state.projects = sc.projects;
     if (Array.isArray(sc.by_project)) state.byProject = sc.by_project;
     if (typeof sc.audits_count === "number") state.auditsCount = sc.audits_count;
+    if ("index_audit" in sc) state.indexAudit = sc.index_audit || null;
     if (sc.audit_links_by_session && typeof sc.audit_links_by_session === "object") {
       state.auditLinksBySession = sc.audit_links_by_session;
     }
@@ -253,6 +357,9 @@ APP_JS = r"""
       state.auditsLoaded = true;
     }
     if (typeof sc.signature === "string") state.signature = sc.signature;
+    state.histSig = newHistSig;
+    state.pendingSig = newPendingSig;
+    state.auditsSig = newAuditsSig;
     if (typeof sc.metrics_md_uri === "string") state.metricsMdUri = sc.metrics_md_uri;
     state.loading = false;
 
@@ -272,9 +379,11 @@ APP_JS = r"""
 
       const initTarget = typeof sc.initial_target === "string" ? sc.initial_target.trim() : "";
       state.confirmDeleteTarget = "";
-      state.tab = mapInitialTab(sc.initial_view);
+      const route = mapInitialRoute(sc.initial_view);
+      state.tab = route.tab;
+      state.sessionsSub = route.sub;
 
-      if (state.tab === "reports" && initTarget) {
+      if (state.tab === "sessions" && state.sessionsSub === "archived" && initTarget) {
         state.detailTarget = initTarget;
         state.reportsShowListMobile = false;
         if (sc.initial_detail && typeof sc.initial_detail === "object") {
@@ -291,19 +400,25 @@ APP_JS = r"""
           openSessionDetail(initTarget, true);
           return;
         }
-      } else if (state.tab === "reports") {
+      } else if (state.tab === "sessions" && state.sessionsSub === "archived") {
         const list = filteredSortedRecords();
         if (list.length) {
           openSessionDetail(recKey(list[0]), false);
           return;
         }
+      } else if (state.tab === "sessions" && state.sessionsSub === "compare") {
+        ensureCompareLoaded();
       } else if (state.tab === "audits") {
         loadAudits(false);
       } else {
         state.detail = null;
         state.detailTarget = "";
       }
-    } else if (state.detailTarget) {
+      render();
+      return;
+    }
+
+    if (state.detailTarget) {
       const stillExists = state.records.some(
         (r) => r.label === state.detailTarget || r.conversation_id === state.detailTarget
       );
@@ -311,6 +426,22 @@ APP_JS = r"""
         state.detail = null;
         state.detailTarget = "";
       }
+    }
+
+    // Rendu incrémental : éviter d'écraser le DOM lors d'un poll si la vue active n'est pas impactée
+    const viewingPending = state.tab === "sessions" && state.sessionsSub === "pending";
+    const viewingAudits = state.tab === "audits";
+    if (!histChanged && !viewingPending && !viewingAudits && (pendingChanged || auditsChanged)) {
+      updateBadgesInPlace();
+      return;
+    }
+    if (!histChanged && viewingAudits && !auditsChanged && pendingChanged) {
+      updateBadgesInPlace();
+      return;
+    }
+    if (viewingPending && state.archiveDrawerCid && !histChanged) {
+      updateBadgesInPlace();
+      return;
     }
     render();
   }
@@ -324,8 +455,9 @@ APP_JS = r"""
       });
       const sc = extractStructured(res);
       if (sc && sc.changed !== false) {
+        const prevHist = state.histSig;
         hydrateFromStatePayload(sc, false);
-        if (state.tab === "reports" && state.detailTarget) {
+        if (sc.hist_sig !== prevHist && state.tab === "sessions" && state.sessionsSub === "archived" && state.detailTarget) {
           try {
             const detRes = await callServerTool("metrics_get_session", { target: state.detailTarget });
             const detSc = extractStructured(detRes);
@@ -338,7 +470,7 @@ APP_JS = r"""
             }
           } catch (_) {}
         }
-        if (state.tab === "audits") {
+        if (state.tab === "audits" && sc.audits_sig !== state.auditsSig) {
           loadAudits(true);
         }
       } else if (!silent) {
@@ -368,9 +500,11 @@ APP_JS = r"""
 
   async function openSessionDetail(target, hideMobileList) {
     if (!target) return;
-    state.tab = "reports";
+    state.tab = "sessions";
+    state.sessionsSub = "archived";
     state.detailTarget = target;
     state.confirmDeleteTarget = "";
+    state.editMetaTarget = "";
     if (hideMobileList !== false) state.reportsShowListMobile = false;
 
     const cached = state.detailCache[target];
@@ -379,7 +513,6 @@ APP_JS = r"""
       state.detailSlug = cached.slug;
       state.detailMdUri = cached.reportMdUri;
       state.detailLoading = false;
-      if (state.reportSubtab === "compare") ensureCompareLoaded();
       render();
       return;
     }
@@ -396,7 +529,6 @@ APP_JS = r"""
       state.detail = loaded.detail;
       state.detailSlug = loaded.slug;
       state.detailMdUri = loaded.reportMdUri;
-      if (state.reportSubtab === "compare") ensureCompareLoaded();
     } catch (err) {
       showToast(err.message, true);
     } finally {
@@ -406,12 +538,16 @@ APP_JS = r"""
   }
 
   async function ensureCompareLoaded() {
-    const list = scopedRecords();
+    const pool = scopedRecords();
+    const list = pool.length >= 2 ? pool : state.records.slice();
     if (!list.length) return;
-    if (!state.compareTargetA) {
-      state.compareTargetA = state.detailTarget || recKey(list[list.length - 1]);
+    const validKey = (k) => k && state.records.some((r) => recKey(r) === k || r.conversation_id === k);
+    if (!validKey(state.compareTargetA)) {
+      state.compareTargetA = state.detailTarget && validKey(state.detailTarget)
+        ? state.detailTarget
+        : recKey(list[list.length - 1]);
     }
-    if (!state.compareTargetB) {
+    if (!validKey(state.compareTargetB)) {
       const idxA = list.findIndex((r) => recKey(r) === state.compareTargetA || r.conversation_id === state.compareTargetA);
       const fallbackIdx = idxA > 0 ? idxA - 1 : (list.length > 1 ? list.length - 2 : 0);
       state.compareTargetB = recKey(list[fallbackIdx] || list[0]);
@@ -450,15 +586,16 @@ APP_JS = r"""
         state.audits = Array.isArray(sc.audits) ? sc.audits : [];
         state.auditsRoots = Array.isArray(sc.roots) ? sc.roots : [];
         state.auditsCount = state.audits.length;
+        if ("index_audit" in sc) state.indexAudit = sc.index_audit || null;
         if (sc.audit_links_by_session) state.auditLinksBySession = sc.audit_links_by_session;
         state.auditsLoaded = true;
-        if (state.selectedAuditId && !state.audits.some((a) => a.audit_id === state.selectedAuditId)) {
+        const isIdx = state.indexAudit && state.selectedAuditId === state.indexAudit.audit_id;
+        if (state.selectedAuditId && !isIdx && !state.audits.some((a) => a.audit_id === state.selectedAuditId)) {
           state.selectedAuditId = "";
           state.selectedAudit = null;
         }
         if (!state.selectedAuditId && state.audits.length) {
-          const pinned = state.audits.find((a) => a.is_index) || state.audits[0];
-          openAudit(pinned.audit_id, false);
+          openAudit(state.audits[0].audit_id, false);
           return;
         }
       }
@@ -503,11 +640,12 @@ APP_JS = r"""
     if (!refPath) return;
     const clean = String(refPath).replace(/^\.\//, "").toLowerCase();
     const curWs = state.selectedAudit ? state.selectedAudit.workspace : "";
+    const allCand = state.indexAudit ? state.audits.concat([state.indexAudit]) : state.audits;
     const match =
-      state.audits.find((a) => a.workspace === curWs && String(a.rel_path || "").toLowerCase() === clean) ||
-      state.audits.find((a) => a.workspace === curWs && String(a.filename || "").toLowerCase() === clean) ||
-      state.audits.find((a) => String(a.rel_path || "").toLowerCase() === clean) ||
-      state.audits.find((a) => String(a.filename || "").toLowerCase() === clean);
+      allCand.find((a) => a.workspace === curWs && String(a.rel_path || "").toLowerCase() === clean) ||
+      allCand.find((a) => a.workspace === curWs && String(a.filename || "").toLowerCase() === clean) ||
+      allCand.find((a) => String(a.rel_path || "").toLowerCase() === clean) ||
+      allCand.find((a) => String(a.filename || "").toLowerCase() === clean);
     if (match) {
       openAudit(match.audit_id, true);
     } else {
@@ -541,14 +679,32 @@ APP_JS = r"""
     }
   }
 
-  async function archivePendingSession(cid, force) {
+  function openArchiveDrawer(cid) {
+    const p = state.pendingSessions.find((x) => x.conversation_id === cid) || {};
+    const cap = p.active_capture || {};
+    state.archiveDrawerCid = cid;
+    state.archiveForm = {
+      label: String(cap.label || "").trim(),
+      project: String(p.project || state.selectedProject || state.activeProject || "").trim(),
+      note: "",
+      full: false
+    };
+    render();
+  }
+
+  async function submitArchiveDrawer(cid, force) {
     if (!cid || !state.hostCaps.serverTools || state.archivingCid) return;
     state.archivingCid = cid;
     if (force) state.confirmForceArchiveCid = "";
+    const form = state.archiveForm || {};
     render();
     try {
       const res = await callServerTool("metrics_archive_session", {
         conversation_id: cid,
+        label: String(form.label || "").trim(),
+        project: String(form.project || "").trim(),
+        note: String(form.note || "").trim(),
+        full: Boolean(form.full),
         force: Boolean(force)
       });
       if (res && res.isError) {
@@ -560,6 +716,7 @@ APP_JS = r"""
       }
       const sc = extractStructured(res);
       state.confirmForceArchiveCid = "";
+      state.archiveDrawerCid = "";
       if (sc) {
         hydrateFromStatePayload(sc, false);
         const lbl = (sc.archived && sc.archived.label) || cid.slice(0, 8);
@@ -575,6 +732,67 @@ APP_JS = r"""
     } finally {
       state.archivingCid = "";
       render();
+    }
+  }
+
+  async function ignorePendingSession(cid) {
+    if (!cid || !state.hostCaps.serverTools) return;
+    try {
+      const res = await callServerTool("metrics_ignore_session", { conversation_id: cid });
+      if (res && res.isError) {
+        throw new Error((res.content && res.content[0] && res.content[0].text) || "Erreur masquage");
+      }
+      const sc = extractStructured(res);
+      if (state.archiveDrawerCid === cid) state.archiveDrawerCid = "";
+      if (sc) hydrateFromStatePayload(sc, false);
+      showToast("Session masquée (réversible via Masquées).", false);
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  }
+
+  async function unignorePendingSession(cid) {
+    if (!cid || !state.hostCaps.serverTools) return;
+    try {
+      const res = await callServerTool("metrics_unignore_session", { conversation_id: cid });
+      if (res && res.isError) {
+        throw new Error((res.content && res.content[0] && res.content[0].text) || "Erreur restauration");
+      }
+      const sc = extractStructured(res);
+      if (sc) hydrateFromStatePayload(sc, false);
+      showToast("Session restaurée dans À archiver.", false);
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  }
+
+  async function saveEditSessionMeta(target) {
+    if (!target || !state.hostCaps.serverTools) return;
+    const f = state.editForm || {};
+    try {
+      const res = await callServerTool("metrics_update_session_meta", {
+        target,
+        label: String(f.label || "").trim(),
+        project: String(f.project || "").trim(),
+        note: String(f.note || "").trim()
+      });
+      if (res && res.isError) {
+        throw new Error((res.content && res.content[0] && res.content[0].text) || "Mise à jour échouée");
+      }
+      const sc = extractStructured(res);
+      state.editMetaTarget = "";
+      if (sc) {
+        if (sc.updated && sc.updated.label) {
+          state.detailTarget = sc.updated.label;
+        }
+        hydrateFromStatePayload(sc, false);
+        if (state.detailTarget) {
+          openSessionDetail(state.detailTarget, false);
+        }
+        showToast("Métadonnées mises à jour.", false);
+      }
+    } catch (err) {
+      showToast(err.message, true);
     }
   }
 
@@ -652,15 +870,6 @@ APP_JS = r"""
     }
   }
 
-  function scopedRecords() {
-    let list = state.records.slice();
-    if (state.scope === "project" && state.selectedProject) {
-      const selCf = normProj(state.selectedProject);
-      list = list.filter((r) => normProj(r.project) === selCf);
-    }
-    return list;
-  }
-
   function filteredSortedRecords() {
     let list = scopedRecords();
     const q = state.search.trim().toLowerCase();
@@ -712,57 +921,15 @@ APP_JS = r"""
   }
 
   function computeByProject() {
+    const tariff = effectiveTariff();
     if (Array.isArray(state.byProject) && state.byProject.length) {
       return state.byProject.slice().sort((a, b) => {
-        const ca = state.tariff === "2027" ? Number(a.cost_2027_usd || 0) : Number(a.cost_usd || 0);
-        const cb = state.tariff === "2027" ? Number(b.cost_2027_usd || 0) : Number(b.cost_usd || 0);
+        const ca = tariff === "2027" ? Number(a.cost_2027_usd || 0) : Number(a.cost_usd || 0);
+        const cb = tariff === "2027" ? Number(b.cost_2027_usd || 0) : Number(b.cost_usd || 0);
         return cb - ca;
       });
     }
-    const groups = new Map();
-    let total26 = 0;
-    let total27 = 0;
-    state.records.forEach((r) => {
-      const pName = String(r.project || "").trim() || "(sans projet)";
-      const key = pName.toLowerCase();
-      if (!groups.has(key)) {
-        groups.set(key, {
-          project: pName,
-          sessions: 0,
-          cost_usd: 0,
-          cost_2027_usd: 0,
-          cacheSum: 0,
-          llm_calls: 0,
-          bridge_sessions: 0
-        });
-      }
-      const g = groups.get(key);
-      const c26 = Number(r.cost_usd || 0);
-      const c27 = r.cost_2027_usd != null ? Number(r.cost_2027_usd) : c26;
-      g.sessions += 1;
-      g.cost_usd += c26;
-      g.cost_2027_usd += c27;
-      g.cacheSum += Number(r.cache_hit_rate_pct || 0);
-      g.llm_calls += Number(r.llm_calls || 0);
-      if ((Number(r.bridge_children_count) || 0) > 0) g.bridge_sessions += 1;
-      total26 += c26;
-      total27 += c27;
-    });
-    return Array.from(groups.values()).map((g) => ({
-      project: g.project,
-      sessions: g.sessions,
-      cost_usd: g.cost_usd,
-      cost_2027_usd: g.cost_2027_usd,
-      share_pct: total26 > 0 ? (g.cost_usd / total26) * 100 : 0,
-      share_2027_pct: total27 > 0 ? (g.cost_2027_usd / total27) * 100 : 0,
-      avg_cache_hit_rate_pct: g.sessions > 0 ? g.cacheSum / g.sessions : 0,
-      llm_calls: g.llm_calls,
-      bridge_sessions: g.bridge_sessions
-    })).sort((a, b) => {
-      const ca = state.tariff === "2027" ? a.cost_2027_usd : a.cost_usd;
-      const cb = state.tariff === "2027" ? b.cost_2027_usd : b.cost_usd;
-      return cb - ca;
-    });
+    return [];
   }
 
   function navigateReport(delta) {
@@ -773,6 +940,24 @@ APP_JS = r"""
     const nextIdx = idx + delta;
     if (nextIdx < 0 || nextIdx >= list.length) return;
     openSessionDetail(recKey(list[nextIdx]), true);
+  }
+
+  function renderMilestonesStrip(ms, use2027, showCosts) {
+    if (!ms || !Array.isArray(ms.phases) || !ms.phases.length) return "";
+    let html = '<div class="milestones">';
+    ms.phases.forEach((ph, idx) => {
+      const st = ph.status === "done" ? "ms-done" : (ph.status === "active" ? "ms-active" : "ms-pending");
+      const costVal = use2027 ? Number(ph.cost_2027_usd || 0) : Number(ph.cost_usd || 0);
+      const meta = showCosts
+        ? '<div class="subline">' + fmtInt(ph.llm_calls || 0) + ' app. · $' + costVal.toFixed(4) + '</div>'
+        : '<div class="subline">' + (ph.status === "done" ? "terminé" : (ph.status === "active" ? "en cours" : "à venir")) + '</div>';
+      html += '<div class="ms-step ' + st + '">' +
+        '<div class="ms-step-head"><span>' + (idx + 1) + '. ' + esc(ph.label) + '</span><span class="ms-dot"></span></div>' +
+        meta +
+        '</div>';
+    });
+    html += '</div>';
+    return html;
   }
 
   function renderShellHeader() {
@@ -791,66 +976,58 @@ APP_JS = r"""
       a.localeCompare(b, "fr", { sensitivity: "base" })
     );
 
-    let scopeHtml = '<div class="seg" role="group" aria-label="Portée">';
-    const projBtnLabel = state.activeProject
-      ? "Projet : " + state.activeProject
-      : (state.selectedProject ? "Projet : " + state.selectedProject : "Par projet");
-    scopeHtml += '<button type="button" data-action="set-scope" data-scope="project" class="' + (state.scope === "project" ? "active" : "") + '"' + (projectOptions.length ? "" : " disabled") + '>' + esc(projBtnLabel) + '</button>';
-    scopeHtml += '<button type="button" data-action="set-scope" data-scope="global" class="' + (state.scope === "global" ? "active" : "") + '">Global (tous)</button>';
-    scopeHtml += '</div>';
-
     let projSelect = "";
-    if (projectOptions.length > 0 && state.scope === "project") {
-      projSelect = '<select id="gm-proj-select" aria-label="Projet">';
+    if (state.tab !== "audits" && projectOptions.length > 0) {
+      projSelect = '<select id="gm-proj-select" aria-label="Projet">' +
+        '<option value=""' + (state.scope === "global" || !state.selectedProject ? " selected" : "") + '>Tous les projets</option>';
       projectOptions.forEach((p) => {
-        projSelect += '<option value="' + esc(p) + '"' + (normProj(p) === normProj(state.selectedProject) ? " selected" : "") + '>' + esc(p) + '</option>';
+        const sel = state.scope === "project" && normProj(p) === normProj(state.selectedProject) ? " selected" : "";
+        projSelect += '<option value="' + esc(p) + '"' + sel + '>' + esc(p) + '</option>';
       });
       projSelect += '</select>';
     }
 
-    const tariffHtml = '<div class="seg" role="group" aria-label="Tarif">' +
-      '<button type="button" data-action="set-tariff" data-tariff="2026" class="' + (state.tariff === "2026" ? "active" : "") + '">2026</button>' +
-      '<button type="button" data-action="set-tariff" data-tariff="2027" class="' + (state.tariff === "2027" ? "active" : "") + '">Proj. 2027</button>' +
-      '</div>';
+    const showTariff = hasTariffDiff();
+    const effTariff = effectiveTariff();
+    const tariffHtml = showTariff
+      ? '<div class="seg" role="group" aria-label="Tarif">' +
+        '<button type="button" data-action="set-tariff" data-tariff="2026" class="' + (effTariff === "2026" ? "active" : "") + '">2026</button>' +
+        '<button type="button" data-action="set-tariff" data-tariff="2027" class="' + (effTariff === "2027" ? "active" : "") + '">2027</button>' +
+        '</div>'
+      : "";
 
     const openGlobalMdBtn = (canUseAuxPane() && state.metricsMdUri)
-      ? '<button type="button" class="btn" data-action="open-file" data-uri="' + esc(state.metricsMdUri) + '">METRICS.md</button>'
+      ? '<button type="button" class="btn sm" data-action="open-file" data-uri="' + esc(state.metricsMdUri) + '">METRICS.md</button>'
       : "";
 
     const refreshBtn = state.hostCaps.serverTools
-      ? '<button type="button" class="btn" data-action="refresh">Rafraîchir</button>'
+      ? '<button type="button" class="btn sm" data-action="refresh">Rafraîchir</button>'
       : "";
 
     const scopedCount = scopedRecords().length;
     const pendCount = state.pendingSessions.length;
     const audCount = state.auditsLoaded ? state.audits.length : state.auditsCount;
+    const projNote = state.scope === "project" && state.selectedProject ? " · " + state.selectedProject : " · tous projets";
 
-    const tabs = [
-      { id: "overview", label: "Vue d'ensemble", badge: "" },
-      { id: "reports", label: "Rapports", badge: String(scopedCount) },
-      { id: "pending", label: "À archiver", badge: String(pendCount), warn: pendCount > 0 },
-      { id: "audits", label: "Audits Agents", badge: String(audCount) }
-    ];
-    let tabsHtml = '<nav class="nav-tabs" aria-label="Navigation principale">';
-    tabs.forEach((t) => {
-      const isAct = state.tab === t.id;
-      const badgeHtml = t.badge !== ""
-        ? '<span class="tab-badge' + (t.warn ? ' warn' : '') + '">' + esc(t.badge) + '</span>'
-        : '';
-      tabsHtml += '<button type="button" data-action="switch-tab" data-tab="' + t.id + '" class="tab-btn' + (isAct ? ' active' : '') + '">' +
-        esc(t.label) + badgeHtml + '</button>';
-    });
-    tabsHtml += '</nav>';
+    const sessBadgeTxt = pendCount > 0 ? String(scopedCount) + " · • " + pendCount : String(scopedCount);
+
+    const tabsHtml = '<nav class="nav-tabs" aria-label="Navigation principale">' +
+      '<button type="button" data-action="switch-tab" data-tab="overview" class="tab-btn' + (state.tab === "overview" ? " active" : "") + '">Synthèse</button>' +
+      '<button type="button" data-action="switch-tab" data-tab="sessions" class="tab-btn' + (state.tab === "sessions" ? " active" : "") + '">Sessions' +
+      '<span class="tab-badge' + (pendCount > 0 ? " warn" : "") + '" data-badge="sessions">' + esc(sessBadgeTxt) + '</span></button>' +
+      '<span class="nav-divider" aria-hidden="true"></span>' +
+      '<button type="button" data-action="switch-tab" data-tab="audits" class="tab-btn' + (state.tab === "audits" ? " active" : "") + '">Audits Agents' +
+      '<span class="tab-badge" data-badge="audits">' + esc(String(audCount)) + '</span></button>' +
+      '</nav>';
 
     return '<div class="shell-head">' +
       '<div class="topbar">' +
       '<div class="brand">' +
-      '<span class="brand-dot" title="Synchronisation 0 token active"></span>' +
+      '<span class="brand-dot" title="Synchronisation 0 token"></span>' +
       '<div><div class="brand-title">Gravity Metrics</div>' +
-      '<div class="brand-sub">' + esc(state.records.length) + ' session(s) archivée(s) · ' + esc(pendCount) + ' en attente' +
-      (state.scope === "project" && state.selectedProject ? ' · filtre : ' + esc(state.selectedProject) : ' · vue globale') +
-      '</div></div></div>' +
-      '<div class="controls">' + scopeHtml + projSelect + tariffHtml + openGlobalMdBtn + refreshBtn + '</div>' +
+      '<div class="brand-sub">' + esc(state.records.length) + ' archivée(s) · ' + esc(pendCount) + ' en attente' + esc(projNote) + '</div>' +
+      '</div></div>' +
+      '<div class="controls">' + projSelect + tariffHtml + openGlobalMdBtn + refreshBtn + '</div>' +
       '</div>' +
       tabsHtml +
       '</div>';
@@ -862,20 +1039,20 @@ APP_JS = r"""
       html += '<div class="confirm-bar">' +
         '<div><strong>Supprimer la session « ' + esc(state.confirmDeleteTarget) + ' » ?</strong> ' +
         '<label style="margin-left:8px;font-size:12px;cursor:pointer;">' +
-        '<input id="gm-purge-cb" type="checkbox"' + (state.confirmPurge ? " checked" : "") + ' /> Purger aussi <code>reports/</code>' +
+        '<input id="gm-purge-cb" type="checkbox"' + (state.confirmPurge ? " checked" : "") + ' /> Purger <code>reports/</code>' +
         '</label></div>' +
         '<div class="confirm-actions">' +
-        '<button type="button" class="btn danger" data-action="confirm-delete">Confirmer</button>' +
-        '<button type="button" class="btn" data-action="cancel-delete">Annuler</button>' +
+        '<button type="button" class="btn sm danger" data-action="confirm-delete">Confirmer</button>' +
+        '<button type="button" class="btn sm" data-action="cancel-delete">Annuler</button>' +
         '</div></div>';
     }
     if (state.confirmForceArchiveCid) {
       html += '<div class="confirm-bar">' +
-        '<div><strong>Jobs Bridge encore actifs pour <code>' + esc(state.confirmForceArchiveCid.slice(0, 8)) + '</code>.</strong> ' +
+        '<div><strong>Jobs Bridge encore actifs pour <span class="mono">' + esc(state.confirmForceArchiveCid.slice(0, 8)) + '</span>.</strong> ' +
         'Forcer l’archivage immuable maintenant ?</div>' +
         '<div class="confirm-actions">' +
-        '<button type="button" class="btn danger" data-action="confirm-force-archive" data-cid="' + esc(state.confirmForceArchiveCid) + '">Forcer l’archivage</button>' +
-        '<button type="button" class="btn" data-action="cancel-force-archive">Annuler</button>' +
+        '<button type="button" class="btn sm danger" data-action="confirm-force-archive" data-cid="' + esc(state.confirmForceArchiveCid) + '">Forcer l’archivage</button>' +
+        '<button type="button" class="btn sm" data-action="cancel-force-archive">Annuler</button>' +
         '</div></div>';
     }
     return html;
@@ -886,7 +1063,7 @@ APP_JS = r"""
     const links = state.auditLinksBySession[cid] || [];
     const bCnt = Number(rec.bridge_children_count) || 0;
     let out = "";
-    if (bCnt > 0) out += '<span class="pill bridge">bridge:' + bCnt + '</span>';
+    if (bCnt > 0) out += '<span class="pill bridge">bridge:' + bCnt + '</span> ';
     if (links.length) {
       out += '<button type="button" class="pill-btn" data-action="open-audit" data-audit-id="' + esc(links[0].audit_id) + '" title="Ouvrir l’audit associé">Audit' + (links.length > 1 ? ':' + links.length : '') + '</button>';
     }
@@ -895,182 +1072,200 @@ APP_JS = r"""
 
   function renderOverviewTab() {
     const scoped = scopedRecords();
-    const list = filteredSortedRecords();
+    const use2027 = effectiveTariff() === "2027";
     const totalCost = scoped.reduce((acc, r) => acc + recCost(r), 0);
     const avgCost = scoped.length ? totalCost / scoped.length : 0;
+    const totalSavings = scoped.reduce((acc, r) => acc + recCacheSavings(r), 0);
     const avgCache = scoped.length
       ? scoped.reduce((acc, r) => acc + (Number(r.cache_hit_rate_pct) || 0), 0) / scoped.length
       : 0;
+    const totalAgents = scoped.reduce((acc, r) => acc + (Number(r.agents) || 0), 0);
+    const totalCalls = scoped.reduce((acc, r) => acc + (Number(r.llm_calls) || 0), 0);
     const totalDur = scoped.reduce((acc, r) => acc + (Number(r.wall_clock_s) || 0), 0);
-    const latest = scoped.length ? scoped[scoped.length - 1] : null;
-    const best = scoped.length
-      ? scoped.reduce((m, r) => (recCost(r) < recCost(m) ? r : m), scoped[0])
-      : null;
+    const sumDup = scoped.reduce((acc, r) => acc + (Number(r.duplicate_spawns) || 0), 0);
+    const sumRw = scoped.reduce((acc, r) => acc + (Number(r.rewind_calls) || 0), 0);
+    const sumInt = scoped.reduce((acc, r) => acc + (Number(r.interrupted_agents) || 0), 0);
+    const totalAlerts = sumDup + sumRw + sumInt;
 
     let pendBanner = "";
     if (state.pendingSessions.length) {
       pendBanner = '<div class="banner-info">' +
-        '<span><strong>' + state.pendingSessions.length + ' session(s) Gravity</strong> en attente d’archivage immuable.</span>' +
-        '<button type="button" class="btn sm primary" data-action="switch-tab" data-tab="pending">Voir À archiver →</button>' +
+        '<span><strong>' + state.pendingSessions.length + ' session(s)</strong> en attente d’archivage.</span>' +
+        '<button type="button" class="btn sm primary" data-action="open-pending">Voir À archiver →</button>' +
         '</div>';
     }
 
     const kpis = '<div class="kpis">' +
-      '<div class="card"><div class="k">Dernière session</div><div class="v">$' + (latest ? recCost(latest).toFixed(4) : "0.0000") + '</div><div class="sub">' + esc(latest ? latest.label : "—") + '</div></div>' +
-      '<div class="card"><div class="k">Coût cumulé</div><div class="v">$' + totalCost.toFixed(4) + '</div><div class="sub">' + scoped.length + ' session(s) · ' + esc(fmtDur(totalDur)) + '</div></div>' +
-      '<div class="card"><div class="k">Coût moyen</div><div class="v">$' + avgCost.toFixed(4) + '</div><div class="sub">Cache moyen : ' + avgCache.toFixed(1) + '%</div></div>' +
-      '<div class="card"><div class="k">Meilleur coût</div><div class="v">$' + (best ? recCost(best).toFixed(4) : "0.0000") + '</div><div class="sub">' + esc(best ? best.label : "—") + '</div></div>' +
+      '<div class="card"><div class="k">Coût cumulé' + (use2027 ? ' (2027)' : '') + '</div><div class="v">$' + totalCost.toFixed(4) + '</div><div class="sub">moy. $' + avgCost.toFixed(4) + ' · ' + scoped.length + ' session(s)</div></div>' +
+      '<div class="card"><div class="k">Cache moyen</div><div class="v">' + avgCache.toFixed(1) + '%</div><div class="sub">$' + totalSavings.toFixed(4) + ' économisés</div></div>' +
+      '<div class="card"><div class="k">Sessions &amp; Agents</div><div class="v">' + scoped.length + ' · ' + fmtInt(totalAgents) + ' ag.</div><div class="sub">' + fmtInt(totalCalls) + ' appels · ' + esc(fmtDur(totalDur)) + '</div></div>' +
+      '<div class="card"><div class="k">Santé / Alertes</div><div class="v">' + (totalAlerts === 0 ? 'Clean' : fmtInt(totalAlerts) + ' alerte(s)') + '</div><div class="sub">Dup:' + sumDup + ' · Rw:' + sumRw + ' · Int:' + sumInt + '</div></div>' +
       '</div>';
 
     const byProject = computeByProject();
-    const projectPanel = '<div class="panel"><div class="panel-head">' +
-      '<span class="panel-title">Répartition par Projet (% Coût ' + (state.tariff === "2027" ? "Proj. 2027" : "2026") + ')</span>' +
-      (state.scope === "project" ? '<button type="button" class="btn sm" data-action="set-scope" data-scope="global">Tout afficher</button>' : '<span class="subline">' + byProject.length + ' projet(s)</span>') +
-      '</div>' + renderProjectShareBars(byProject, state.tariff === "2027") + '</div>';
+    const projectPanel = byProject.length >= 2
+      ? '<div class="panel"><div class="panel-head">' +
+        '<span class="panel-title">Répartition par Projet (' + (use2027 ? '2027' : '2026') + ')</span>' +
+        (state.scope === "project" ? '<button type="button" class="btn sm" data-action="clear-project">Tous les projets</button>' : '<span class="subline">' + byProject.length + ' projets</span>') +
+        '</div>' + renderProjectShareBars(byProject, use2027) + '</div>'
+      : "";
 
     const charts = '<div class="panels two">' +
-      '<div class="panel"><div class="panel-head"><span class="panel-title">Évolution du Coût (' + esc(state.tariff === "2027" ? "Proj. 2027" : "2026") + ')</span></div>' +
+      '<div class="panel"><div class="panel-head"><span class="panel-title">Évolution du Coût (' + (use2027 ? '2027' : '2026') + ')</span><span class="subline">tri chronologique</span></div>' +
       '<div class="svg-box">' + renderCostEvolutionSvg(scoped, state.detailTarget) + '</div></div>' +
-      '<div class="panel"><div class="panel-head"><span class="panel-title">Répartition par Catégorie (% Coût)</span></div>' +
-      '<div class="svg-box">' + renderCategoryStackedSvg(scoped) + '</div></div>' +
+      '<div class="panel"><div class="panel-head"><span class="panel-title">Répartition par Catégorie</span></div>' +
+      renderCategoryHtmlBars(scoped) + '</div>' +
       '</div>';
 
-    const modelSet = new Set();
-    scoped.forEach((r) => {
-      if (r.primary_model) modelSet.add(r.primary_model);
-      Object.keys(r.models || {}).forEach((m) => modelSet.add(m));
-    });
-    const modelsList = Array.from(modelSet).sort();
-    let modelSel = '<select id="gm-model-filter" aria-label="Filtrer par modèle"><option value="">Tous les modèles</option>';
-    modelsList.forEach((m) => {
-      modelSel += '<option value="' + esc(m) + '"' + (m === state.modelFilter ? " selected" : "") + '>' + esc(m) + '</option>';
-    });
-    modelSel += '</select>';
-
-    const sortArrow = (col) => state.sortBy === col ? (state.sortDir === "asc" ? " ▲" : " ▼") : "";
-    let rowsHtml = "";
-    list.forEach((r) => {
+    const recentList = sortRecordsChrono(scoped).reverse().slice(0, 5);
+    let recentRows = "";
+    recentList.forEach((r) => {
       const rowKey = recKey(r);
-      const dups = Number(r.duplicate_spawns) || 0;
-      const rws = Number(r.rewind_calls) || 0;
-      const ints = Number(r.interrupted_agents) || 0;
-      let alerts = "";
-      if (dups) alerts += '<span class="pill flag">Dup:' + dups + '</span>';
-      if (rws) alerts += '<span class="pill flag">Rw:' + rws + '</span>';
-      if (ints) alerts += '<span class="pill flag">Int:' + ints + '</span>';
-      if (!alerts) alerts = '<span class="pill ok">Clean</span>';
-
-      const tokTxt = fmtShortTok(r.input_tokens) + " / " + fmtShortTok(r.cache_read_tokens) + " / " + fmtShortTok(r.output_tokens);
-      const mEntries = Object.entries(r.models || {}).sort((a, b) => (Number(b[1].calls) || 0) - (Number(a[1].calls) || 0));
-      const mCell = mEntries.length
-        ? '<code>' + esc(mEntries[0][0]) + '</code> (' + (Number(mEntries[0][1].calls) || 0) + ')' +
-          (mEntries.length > 1 ? '<div class="subline">+' + (mEntries.length - 1) + ' autre(s)</div>' : '')
-        : '<code>' + esc(r.primary_model || "—") + '</code>';
-
-      const mode = String(r.execution_mode || "single");
-      const gp = String(r.gravity_profile || "");
-      const stBadge = '<span class="pill ok">' + esc(r.status === "archived" || !r.status ? "archivé" : r.status) + '</span>';
-      const modeCell = '<code>' + esc(mode) + '</code> ' + renderSessionBadges(r) + ' ' + stBadge + (gp ? '<div class="subline">' + esc(gp) + '</div>' : '');
-
-      const delBtn = state.hostCaps.serverTools
-        ? '<button type="button" class="btn row-del" data-action="ask-delete" data-target="' + esc(rowKey) + '" title="Supprimer">✕</button>'
-        : "";
-
-      rowsHtml += '<tr class="clickable" data-action="open-detail" data-target="' + esc(rowKey) + '">' +
-        '<td><code>' + esc(fmtDate(r)) + '</code></td>' +
-        '<td><strong>' + esc(r.label || rowKey) + '</strong><div class="subline">' + esc(String(r.conversation_id || "").slice(0, 8)) + (r.note ? ' · ' + esc(r.note) : '') + '</div></td>' +
-        '<td><code>' + esc(r.project || "—") + '</code></td>' +
-        '<td>' + modeCell + '</td>' +
-        '<td>' + mCell + '</td>' +
+      const alertsCount = (Number(r.duplicate_spawns) || 0) + (Number(r.rewind_calls) || 0) + (Number(r.interrupted_agents) || 0);
+      const healthPill = alertsCount > 0
+        ? '<span class="pill warn">' + alertsCount + ' alerte(s)</span>'
+        : '<span class="pill ok">Clean</span>';
+      recentRows += '<tr class="clickable" data-action="open-detail" data-target="' + esc(rowKey) + '">' +
+        '<td class="mono">' + esc(fmtDate(r)) + '</td>' +
+        '<td><strong>' + esc(r.label || rowKey) + '</strong>' + (r.project ? '<div class="subline">' + esc(r.project) + '</div>' : '') + '</td>' +
+        '<td>' + esc(r.execution_mode || "single") + ' ' + renderSessionBadges(r) + '</td>' +
         '<td class="num"><strong>$' + recCost(r).toFixed(4) + '</strong></td>' +
-        '<td class="num">' + esc(tokTxt) + '</td>' +
         '<td class="num">' + (Number(r.cache_hit_rate_pct) || 0).toFixed(1) + '%</td>' +
-        '<td class="num">' + (Number(r.agents) || 0) + '</td>' +
         '<td class="num">' + fmtInt(r.llm_calls) + '</td>' +
-        '<td class="num">' + esc(fmtDur(r.wall_clock_s)) + '</td>' +
-        '<td>' + alerts + '</td>' +
-        '<td>' + delBtn + '</td>' +
+        '<td>' + healthPill + '</td>' +
         '</tr>';
     });
 
-    const tableContent = list.length
-      ? '<div class="table-wrap"><table><thead><tr>' +
-        '<th class="sortable" data-action="sort" data-col="date">Date (UTC)' + sortArrow("date") + '</th>' +
-        '<th class="sortable" data-action="sort" data-col="label">Label' + sortArrow("label") + '</th>' +
-        '<th class="sortable" data-action="sort" data-col="project">Projet' + sortArrow("project") + '</th>' +
-        '<th>Mode</th><th>Modèles</th>' +
-        '<th class="num sortable" data-action="sort" data-col="cost">Coût' + sortArrow("cost") + '</th>' +
-        '<th class="num">In / Cache / Out</th>' +
-        '<th class="num sortable" data-action="sort" data-col="cache">Cache %' + sortArrow("cache") + '</th>' +
-        '<th class="num sortable" data-action="sort" data-col="agents">Ag.' + sortArrow("agents") + '</th>' +
-        '<th class="num sortable" data-action="sort" data-col="calls">Appels' + sortArrow("calls") + '</th>' +
-        '<th class="num sortable" data-action="sort" data-col="dur">Durée' + sortArrow("dur") + '</th>' +
-        '<th>Alertes</th><th></th>' +
-        '</tr></thead><tbody>' + rowsHtml + '</tbody></table></div>'
-      : '<div class="empty">Aucune session trouvée' +
-        (state.scope === "project" && state.selectedProject ? ' pour le projet <code>' + esc(state.selectedProject) + '</code>' : '') +
-        '. Lancez <code>/gravity-metrics</code> à la fin d’une session.</div>';
-
-    const listPanel = '<div class="panel">' +
+    const recentPanel = '<div class="panel">' +
       '<div class="panel-head">' +
-      '<span class="panel-title">Historique des sessions (' + list.length + '/' + scoped.length + ')</span>' +
-      (list.length >= 2 ? '<button type="button" class="btn sm" data-action="open-compare">Comparer A vs B</button>' : '') +
+      '<span class="panel-title">Dernières sessions (' + recentList.length + '/' + scoped.length + ')</span>' +
+      (scoped.length > 0 ? '<button type="button" class="btn sm" data-action="switch-tab" data-tab="sessions">Toutes les sessions →</button>' : '') +
       '</div>' +
-      '<div class="filters">' +
-      '<input id="gm-search" type="search" placeholder="Rechercher label, projet, modèle, note..." value="' + esc(state.search) + '" />' +
-      modelSel +
-      '<label style="font-size:12px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;">' +
-      '<input id="gm-alerts-only" type="checkbox"' + (state.alertsOnly ? " checked" : "") + ' /> Alertes uniquement' +
-      '</label>' +
-      '</div>' +
-      tableContent +
+      (recentList.length
+        ? '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Date</th><th>Session</th><th>Mode</th><th class="num">Coût</th><th class="num">Cache %</th><th class="num">Appels</th><th>Santé</th>' +
+          '</tr></thead><tbody>' + recentRows + '</tbody></table></div>'
+        : '<div class="empty">Aucune session archivée. Lancez <code>/gravity-metrics stop</code> ou archivez depuis <strong>Sessions → À archiver</strong>.</div>') +
       '</div>';
 
-    return pendBanner + kpis + projectPanel + charts + listPanel;
+    return pendBanner + kpis + projectPanel + charts + recentPanel;
   }
 
-  function renderPendingTab() {
-    const pend = state.pendingSessions || [];
-    if (!pend.length) {
-      return '<div class="panel"><div class="empty">Aucune session Gravity en attente d’archivage. Toutes vos sessions racines sont archivées.</div></div>';
+  function renderPendingSubtab() {
+    const activeList = state.pendingSessions || [];
+    const ignoredList = state.ignoredSessions || [];
+    const useList = state.showIgnoredPending ? ignoredList : activeList;
+
+    const topBar = '<div class="panel">' +
+      '<div class="panel-head">' +
+      '<span class="panel-title">' + (state.showIgnoredPending ? 'Sessions masquées (' + ignoredList.length + ')' : 'Sessions en attente d’archivage (' + activeList.length + ')') + '</span>' +
+      '<div class="controls">' +
+      '<button type="button" class="btn sm' + (state.showIgnoredPending ? ' primary' : '') + '" data-action="toggle-ignored-pending">' +
+      (state.showIgnoredPending ? 'Voir actives (' + activeList.length + ')' : 'Masquées (' + ignoredList.length + ')') +
+      '</button>' +
+      '</div></div>' +
+      (!useList.length
+        ? '<div class="empty">' + (state.showIgnoredPending ? 'Aucune session masquée.' : 'Aucune session Gravity en attente d’archivage.') + '</div>'
+        : '') +
+      '</div>';
+
+    if (!useList.length) return topBar;
+
+    if (state.showIgnoredPending) {
+      let rows = "";
+      ignoredList.forEach((p) => {
+        const cid = String(p.conversation_id || "");
+        rows += '<div class="share-row">' +
+          '<div class="share-top">' +
+          '<div><strong>' + esc(p.title || "(sans titre)") + '</strong> <span class="mono">(' + esc(cid.slice(0, 8)) + ')</span></div>' +
+          '<button type="button" class="btn sm primary" data-action="unignore-pending" data-cid="' + esc(cid) + '">Restaurer</button>' +
+          '</div>' +
+          '<div class="share-meta">' +
+          (p.project ? '<span>Projet : ' + esc(p.project) + '</span>' : '') +
+          '<span>' + fmtInt(p.llm_calls) + ' appels</span>' +
+          '<span>MAJ : ' + esc(String(p.updated_at || "").slice(0, 16).replace("T", " ")) + '</span>' +
+          '</div></div>';
+      });
+      return topBar + '<div class="panel"><div class="share-list">' + rows + '</div></div>';
     }
-    let rows = "";
-    pend.forEach((p) => {
-      const cid = String(p.conversation_id || "");
-      const bCnt = Number(p.bridge_children_count) || 0;
-      const pJobs = Number(p.bridge_pending_jobs_count) || 0;
-      const wss = (p.bridge_workspaces || []).join(", ");
-      let bridgeHtml = "—";
-      if (pJobs > 0) {
-        bridgeHtml = '<span class="pill warn">Bridge:' + bCnt + ' · actif(' + pJobs + ')</span>';
-      } else if (bCnt > 0) {
-        bridgeHtml = '<span class="pill bridge">Bridge:' + bCnt + (wss ? ' · ' + esc(wss) : '') + '</span>';
-      }
-      const isBusy = state.archivingCid === cid;
-      const archBtn = state.hostCaps.serverTools
-        ? '<button type="button" class="btn primary row-del" data-action="archive-pending" data-cid="' + esc(cid) + '"' + (isBusy ? ' disabled' : '') + '>' + (isBusy ? '...' : 'Archiver') + '</button>'
-        : "";
-      rows += '<tr>' +
-        '<td><code>' + esc(cid.slice(0, 8)) + '</code></td>' +
-        '<td><strong>' + esc(p.title || "(sans titre)") + '</strong><div class="subline">' + esc(p.window_mode || "") + '</div></td>' +
-        '<td><code>' + esc(String(p.updated_at || "").slice(0, 16).replace("T", " ")) + '</code></td>' +
-        '<td class="num">' + fmtInt(p.llm_calls) + '</td>' +
-        '<td>' + bridgeHtml + '</td>' +
-        '<td>' + archBtn + '</td>' +
-        '</tr>';
-    });
-    return '<div class="panel"><div class="panel-head"><span class="panel-title">Sessions en attente d’archivage (' + pend.length + ')</span><span class="subline">Enfants Bridge exclus automatiquement</span></div>' +
-      '<div class="table-wrap"><table><thead><tr>' +
-      '<th>ID</th><th>Session</th><th>MAJ (UTC)</th><th class="num">Appels</th><th>Bridge</th><th></th>' +
-      '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+
+    const inProgress = activeList.filter((p) => p.is_active || p.has_pending_bridge_jobs);
+    const finished = activeList.filter((p) => !p.is_active && !p.has_pending_bridge_jobs);
+
+    const renderGroup = (title, items, badgeTone) => {
+      if (!items.length) return "";
+      let cards = "";
+      items.forEach((p) => {
+        const cid = String(p.conversation_id || "");
+        const bCnt = Number(p.bridge_children_count) || 0;
+        const pJobs = Number(p.bridge_pending_jobs_count) || 0;
+        const isBusy = state.archivingCid === cid;
+        const isDrawerOpen = state.archiveDrawerCid === cid;
+        const phasePill = p.current_phase ? '<span class="pill ' + badgeTone + '">' + esc(p.current_phase) + '</span>' : '';
+        const capPill = p.active_capture ? '<span class="pill info">capture active</span>' : '';
+        const bridgePill = pJobs > 0
+          ? '<span class="pill warn">Bridge:' + bCnt + ' · actif(' + pJobs + ')</span>'
+          : (bCnt > 0 ? '<span class="pill bridge">Bridge:' + bCnt + '</span>' : '');
+
+        const actions = state.hostCaps.serverTools
+          ? '<div class="controls">' +
+            '<button type="button" class="btn sm primary" data-action="toggle-archive-drawer" data-cid="' + esc(cid) + '"' + (isBusy ? ' disabled' : '') + '>' +
+            (isDrawerOpen ? 'Fermer' : 'Archiver…') + '</button>' +
+            '<button type="button" class="btn sm" data-action="ignore-pending" data-cid="' + esc(cid) + '">Ignorer</button>' +
+            '</div>'
+          : '';
+
+        let drawerHtml = "";
+        if (isDrawerOpen) {
+          const f = state.archiveForm || {};
+          drawerHtml = '<div class="drawer">' +
+            '<div class="form-grid">' +
+            '<label class="field">Label<input id="gm-arch-label" type="text" placeholder="auto si vide" value="' + esc(f.label || "") + '" /></label>' +
+            '<label class="field">Projet<input id="gm-arch-project" type="text" placeholder="nom du projet" value="' + esc(f.project || "") + '" /></label>' +
+            '<label class="field">Note<input id="gm-arch-note" type="text" placeholder="note optionnelle" value="' + esc(f.note || "") + '" /></label>' +
+            '<label class="field">Portée<select id="gm-arch-scope">' +
+            '<option value="window"' + (!f.full ? ' selected' : '') + '>Fenêtre Gravity</option>' +
+            '<option value="full"' + (f.full ? ' selected' : '') + '>Conversation complète</option>' +
+            '</select></label>' +
+            '</div>' +
+            '<div class="controls">' +
+            '<button type="button" class="btn sm primary" data-action="submit-archive-drawer" data-cid="' + esc(cid) + '"' + (isBusy ? ' disabled' : '') + '>' + (isBusy ? 'Archivage...' : 'Archiver') + '</button>' +
+            '<button type="button" class="btn sm" data-action="cancel-archive-drawer">Annuler</button>' +
+            '</div></div>';
+        }
+
+        cards += '<div class="share-row">' +
+          '<div class="share-top">' +
+          '<div><strong>' + esc(p.title || "(sans titre)") + '</strong> <span class="mono">(' + esc(cid.slice(0, 8)) + ')</span> ' +
+          capPill + ' ' + phasePill + ' ' + bridgePill + '</div>' +
+          actions +
+          '</div>' +
+          '<div class="share-meta">' +
+          (p.project ? '<span>Projet : ' + esc(p.project) + '</span>' : '') +
+          '<span>' + fmtInt(p.llm_calls) + ' appels</span>' +
+          '<span>' + esc(p.window_mode || "") + '</span>' +
+          '<span>MAJ : ' + esc(String(p.updated_at || "").slice(0, 16).replace("T", " ")) + '</span>' +
+          '</div>' +
+          (p.milestones ? renderMilestonesStrip(p.milestones, false, false) : '') +
+          drawerHtml +
+          '</div>';
+      });
+      return '<div class="panel"><div class="panel-head"><span class="panel-title">' + esc(title) + ' (' + items.length + ')</span></div>' +
+        '<div class="share-list">' + cards + '</div></div>';
+    };
+
+    return topBar +
+      renderGroup("En cours", inProgress, "info") +
+      renderGroup("Terminée — prête à archiver", finished, "ok");
   }
 
   function renderCompareSubtab() {
-    const allRecs = state.records.slice().reverse();
+    const pool = scopedRecords();
+    const allRecs = (pool.length >= 2 ? pool : state.records).slice().reverse();
     if (allRecs.length < 2) {
       return '<div class="panel"><div class="empty">Au moins 2 sessions archivées sont nécessaires pour comparer A vs B.</div></div>';
     }
-    const use2027 = state.tariff === "2027";
+    const use2027 = effectiveTariff() === "2027";
     const keyA = state.compareTargetA || recKey(allRecs[0]);
     const keyB = state.compareTargetB || recKey(allRecs[1]);
 
@@ -1080,7 +1275,9 @@ APP_JS = r"""
       return '<option value="' + esc(k) + '"' + sel + '>' + esc((r.label || k) + " (" + (r.project || "—") + " · $" + recCost(r).toFixed(3) + ")") + '</option>';
     }).join("");
 
-    const selectorBar = '<div class="panel"><div class="panel-head"><span class="panel-title">Comparateur A vs B</span></div>' +
+    const selectorBar = '<div class="panel"><div class="panel-head"><span class="panel-title">Comparateur A vs B</span>' +
+      (pool.length < 2 && state.scope === "project" ? '<span class="subline">portée élargie à tous les projets</span>' : '') +
+      '</div>' +
       '<div class="compare-bar">' +
       '<div><div class="subline" style="margin-bottom:4px;">Session A (référence)</div><select id="gm-cmp-a" style="width:100%;">' + optionsFor(keyA) + '</select></div>' +
       '<button type="button" class="btn sm" data-action="swap-compare" title="Permuter A et B">⇄</button>' +
@@ -1173,7 +1370,7 @@ APP_JS = r"""
     }
     const d = state.detail;
     if (!d) {
-      return '<div class="panel"><div class="empty">Sélectionnez un rapport dans la liste pour afficher le détail.</div></div>';
+      return '<div class="panel"><div class="empty">Sélectionnez une session archivée dans la liste pour afficher le détail.</div></div>';
     }
     const s = d.summary || {};
     const c = s.cost_usd || {};
@@ -1186,16 +1383,21 @@ APP_JS = r"""
     const tu = d.tool_usage || {};
     const dq = d.data_quality || {};
     const win = d.window || {};
-    const use2027 = state.tariff === "2027";
-    const shownTotal = use2027 ? Number(p.total_usd || 0) : Number(c.total_usd || 0);
+    const use2027 = effectiveTariff() === "2027";
+    const actCost = use2027 ? p : c;
+    const shownTotal = Number(actCost.total_usd || 0);
     const otherTotal = use2027 ? Number(c.total_usd || 0) : Number(p.total_usd || 0);
+    const histRec = state.records.find((r) => r.label === d.label || r.conversation_id === d.root_conversation_id) || {};
 
     let actionBtns = "";
+    if (state.hostCaps.serverTools) {
+      actionBtns += '<button type="button" class="btn sm" data-action="toggle-edit-meta" data-target="' + esc(d.label) + '">Éditer</button>';
+    }
     if (canUseAuxPane() && state.detailMdUri) {
       actionBtns += '<button type="button" class="btn sm" data-action="open-file" data-uri="' + esc(state.detailMdUri) + '">Ouvrir .md</button>';
     }
     if (state.hostCaps.updateModelContext && !isGlobalSurface()) {
-      actionBtns += '<button type="button" class="btn sm" data-action="attach-context">Joindre au prompt</button>';
+      actionBtns += '<button type="button" class="btn sm" data-action="attach-context">Joindre</button>';
     }
     if (state.hostCaps.message && !isGlobalSurface()) {
       actionBtns += '<button type="button" class="btn sm primary" data-action="analyze-session">Analyser</button>';
@@ -1207,14 +1409,13 @@ APP_JS = r"""
     const bridgeMeta = d.bridge || {};
     const bridgeCount = Number(bridgeMeta.children_count) || 0;
     const subtabs = [
-      { id: "summary", label: "Synthèse & Dossiers (%)" },
+      { id: "summary", label: "Synthèse" },
       { id: "agents", label: "Agents & Bridge (" + ((d.agents || []).length) + ")" },
-      { id: "diag", label: "Diagnostic & Outils" },
-      { id: "compare", label: "Comparer A vs B" }
+      { id: "diag", label: "Diagnostic" }
     ];
     let subHtml = '<div class="subtabs">';
     subtabs.forEach((st) => {
-      subHtml += '<button type="button" class="subtab-btn' + (state.reportSubtab === st.id ? ' active' : '') + '" data-action="set-report-subtab" data-subtab="' + st.id + '">' + esc(st.label) + '</button>';
+      subHtml += '<button type="button" class="subtab-btn' + (state.detailSubtab === st.id ? ' active' : '') + '" data-action="set-detail-subtab" data-subtab="' + st.id + '">' + esc(st.label) + '</button>';
     });
     subHtml += '</div>';
 
@@ -1222,6 +1423,21 @@ APP_JS = r"""
     const auditChips = linkedAudits.map((a) =>
       '<button type="button" class="pill-btn" data-action="open-audit" data-audit-id="' + esc(a.audit_id) + '">Audit : ' + esc(a.title) + (a.verdict ? ' (' + esc(a.verdict) + ')' : '') + '</button>'
     ).join(" ");
+
+    let editFormHtml = "";
+    if (state.editMetaTarget === d.label) {
+      const ef = state.editForm || {};
+      editFormHtml = '<div class="inline-form">' +
+        '<div class="form-grid">' +
+        '<label class="field">Label<input id="gm-edit-label" type="text" value="' + esc(ef.label || "") + '" /></label>' +
+        '<label class="field">Projet<input id="gm-edit-project" type="text" value="' + esc(ef.project || "") + '" /></label>' +
+        '<label class="field">Note<input id="gm-edit-note" type="text" value="' + esc(ef.note || "") + '" /></label>' +
+        '</div>' +
+        '<div class="controls">' +
+        '<button type="button" class="btn sm primary" data-action="save-edit-meta" data-target="' + esc(d.label) + '">Enregistrer</button>' +
+        '<button type="button" class="btn sm" data-action="cancel-edit-meta">Annuler</button>' +
+        '</div></div>';
+    }
 
     const headPanel = '<div class="panel detail-head">' +
       '<div class="detail-row">' +
@@ -1233,22 +1449,27 @@ APP_JS = r"""
       '<div class="controls">' + actionBtns + '</div>' +
       '</div>' +
       '<div class="detail-meta">' +
-      '<span>Racine : <code>' + esc(String(d.root_conversation_id || "").slice(0, 12)) + '</code></span>' +
-      (d.project ? '<span>· Projet : <code>' + esc(d.project) + '</code></span>' : '') +
-      (d.gravity_profile ? '<span>· Profil : <code>' + esc(d.gravity_profile) + '</code></span>' : '') +
-      (win.mode ? '<span>· Fenêtre : <code>' + esc(win.mode) + '</code></span>' : '') +
-      '<span>· Durée : <code>' + esc(fmtDur(s.wall_clock_s)) + '</code></span>' +
+      '<span class="mono">' + esc(String(d.root_conversation_id || "").slice(0, 12)) + '</span>' +
+      (d.project ? '<span>· ' + esc(d.project) + '</span>' : '') +
+      (d.gravity_profile ? '<span>· ' + esc(d.gravity_profile) + '</span>' : '') +
+      (win.mode ? '<span>· ' + esc(win.mode) + '</span>' : '') +
+      '<span>· ' + esc(fmtDur(s.wall_clock_s)) + '</span>' +
+      (histRec.note ? '<span>· ' + esc(histRec.note) + '</span>' : '') +
       '</div>' +
       (auditChips ? '<div class="detail-meta"><span>Audits liés :</span>' + auditChips + '</div>' : '') +
+      editFormHtml +
       subHtml +
       '</div>';
 
-    if (state.reportSubtab === "compare") {
-      return headPanel + renderCompareSubtab();
-    }
-
-    if (state.reportSubtab === "agents") {
+    if (state.detailSubtab === "agents") {
       const catMap = Object.fromEntries(CAT_DEFS.map((x) => [x.key, x]));
+      const ms = d.milestones || histRec.milestones || null;
+      const msPanel = ms
+        ? '<div class="panel"><div class="panel-head"><span class="panel-title">Jalons de cycle (' + esc(ms.mode === "4_phases" ? "4 phases" : "2 phases") + ')</span>' +
+          '<span class="subline">' + esc(ms.current_phase || "") + '</span></div>' +
+          renderMilestonesStrip(ms, use2027, true) + '</div>'
+        : "";
+
       const bridgeAgents = (d.agents || []).filter((ag) => ag.source === "bridge");
       let bridgePanel = "";
       if (bridgeAgents.length) {
@@ -1257,13 +1478,13 @@ APP_JS = r"""
           const costObj = use2027 ? (ag.cost_usd_projection || ag.cost_usd) : ag.cost_usd;
           const ws = ag.bridge_workspace || ag.workspace || "unknown";
           bRows += '<tr>' +
-            '<td><code>' + esc(ws) + '</code></td>' +
-            '<td><code>' + esc(ag.bridge_thread_id || "—") + '</code> <span class="subline">' + esc(String(ag.conversation_id || "").slice(0, 8)) + '</span></td>' +
-            '<td><code>' + esc(ag.type_name || "bridge") + '</code></td>' +
+            '<td class="mono">' + esc(ws) + '</td>' +
+            '<td class="mono">' + esc(ag.bridge_thread_id || "—") + ' (' + esc(String(ag.conversation_id || "").slice(0, 8)) + ')</td>' +
+            '<td>' + esc(ag.type_name || "bridge") + '</td>' +
             '<td class="num">' + (ag.depth || 1) + '</td>' +
             '<td class="num">' + fmtInt(ag.llm_calls) + '</td>' +
             '<td class="num"><strong>$' + Number((costObj || {}).total_usd || 0).toFixed(4) + '</strong></td>' +
-            '<td><code>' + esc(ag.bridge_job_status || ag.subagent_state || "—") + '</code></td>' +
+            '<td>' + esc(ag.bridge_job_status || ag.subagent_state || "—") + '</td>' +
             '</tr>';
         });
         bridgePanel = '<div class="panel"><div class="panel-head"><span class="panel-title">Arbre Bridge Inter-Workspaces (' + bridgeAgents.length + ')</span></div>' +
@@ -1272,20 +1493,20 @@ APP_JS = r"""
 
       let modelRows = "";
       Object.entries(d.by_model || {}).forEach(([mName, mData]) => {
-        const c26 = Number((mData.cost_usd || {}).total_usd || 0);
-        const c27 = Number((mData.cost_usd_projection || {}).total_usd || 0);
+        const cVal = use2027
+          ? Number(((mData.cost_usd_projection || mData.cost_usd) || {}).total_usd || 0)
+          : Number((mData.cost_usd || {}).total_usd || 0);
         modelRows += '<tr>' +
-          '<td><code>' + esc(mName) + '</code>' + (mData.is_fallback ? ' <span class="subline">(fallback)</span>' : '') + '</td>' +
+          '<td class="mono">' + esc(mName) + (mData.is_fallback ? ' (fallback)' : '') + '</td>' +
           '<td class="num">' + (mData.agents_using || 0) + '</td>' +
           '<td class="num">' + fmtInt(mData.calls) + '</td>' +
           '<td class="num">' + fmtShortTok(mData.input_tokens) + ' / ' + fmtShortTok(mData.cache_read_tokens) + ' / ' + fmtShortTok(mData.output_tokens) + '</td>' +
-          '<td class="num">$' + c26.toFixed(4) + '</td>' +
-          '<td class="num">$' + c27.toFixed(4) + '</td>' +
+          '<td class="num"><strong>$' + cVal.toFixed(4) + '</strong></td>' +
           '<td class="num">' + Number(mData.cost_share_pct || 0).toFixed(1) + '%</td>' +
           '</tr>';
       });
       const modelsPanel = '<div class="panel"><div class="panel-head"><span class="panel-title">Modèles</span></div>' +
-        '<div class="table-wrap"><table><thead><tr><th>Modèle</th><th class="num">Ag.</th><th class="num">Appels</th><th class="num">In / Cache / Out</th><th class="num">Coût 2026</th><th class="num">Proj 2027</th><th class="num">Part</th></tr></thead>' +
+        '<div class="table-wrap"><table><thead><tr><th>Modèle</th><th class="num">Ag.</th><th class="num">Appels</th><th class="num">In / Cache / Out</th><th class="num">Coût</th><th class="num">Part</th></tr></thead>' +
         '<tbody>' + modelRows + '</tbody></table></div></div>';
 
       const agents = (d.agents || []).slice();
@@ -1309,13 +1530,13 @@ APP_JS = r"""
         if ((ag.rewind_calls || 0) > 0) flags.push("Rw:" + ag.rewind_calls);
         if ((ag.max_context_tokens || 0) > 128000) flags.push(">128k");
         const statusHtml = flags.length
-          ? flags.map((f) => '<span class="pill flag">' + esc(f) + '</span>').join("")
+          ? flags.map((f) => '<span class="pill flag">' + esc(f) + '</span>').join(" ")
           : '<span class="pill ok">OK</span>';
         const srcBadge = ag.source === "bridge"
           ? ' <span class="pill bridge">' + esc(ag.bridge_workspace || ag.workspace || "bridge") + '</span>'
           : '';
         agRows += '<tr>' +
-          '<td><code>' + esc(String(ag.conversation_id || "").slice(0, 8)) + '</code></td>' +
+          '<td class="mono">' + esc(String(ag.conversation_id || "").slice(0, 8)) + '</td>' +
           '<td>' + esc(ag.role) + srcBadge + '</td>' +
           '<td><span class="pill" style="border-color:' + def.color + ';color:' + def.color + '">' + esc(ag.category) + '</span></td>' +
           '<td class="num">' + (ag.depth || 0) + '</td>' +
@@ -1337,14 +1558,14 @@ APP_JS = r"""
         '<th class="num sortable" data-action="asort" data-col="cost">Coût' + aArrow("cost") + '</th>' +
         '<th>Statut</th></tr></thead><tbody>' + agRows + '</tbody></table></div></div>';
 
-      return headPanel + bridgePanel + modelsPanel + agentsPanel;
+      return headPanel + msPanel + bridgePanel + modelsPanel + agentsPanel;
     }
 
-    if (state.reportSubtab === "diag") {
+    if (state.detailSubtab === "diag") {
       const toolsList = Object.entries(tu.by_tool || {}).slice(0, 12)
-        .map(([k, v]) => '<li><code>' + esc(k) + '</code> : <strong>' + fmtInt(v) + '</strong></li>').join("");
+        .map(([k, v]) => '<li><span class="mono">' + esc(k) + '</span> : <strong>' + fmtInt(v) + '</strong></li>').join("");
       const errList = (tu.top_errors || []).slice(0, 8)
-        .map((e) => '<li>(' + esc(e.count) + '×) <code>' + esc(e.reason) + '</code></li>').join("");
+        .map((e) => '<li>(' + esc(e.count) + '×) <span class="mono">' + esc(e.reason) + '</span></li>').join("");
 
       const diagPanel = '<div class="panel"><div class="panel-head"><span class="panel-title">Diagnostic, Outillage &amp; Qualité</span></div>' +
         '<div class="diag-grid">' +
@@ -1358,19 +1579,20 @@ APP_JS = r"""
         '<div><strong>Top Outils (' + fmtInt(tu.total_calls || 0) + ')</strong><ul class="clean">' + (toolsList || '<li>Aucun appel outil</li>') + '</ul></div>' +
         '<div><strong>Erreurs &amp; Qualité données</strong><ul class="clean">' +
         (errList || '<li>Aucune erreur enregistrée</li>') +
-        '<li>Fallback : <code>' + esc((dq.unmatched_models || []).join(", ") || "aucun") + '</code></li>' +
-        '<li>JSON malformés : <code>' + (dq.malformed_lines || 0) + '</code></li>' +
+        '<li>Fallback : <span class="mono">' + esc((dq.unmatched_models || []).join(", ") || "aucun") + '</span></li>' +
+        '<li>JSON malformés : <span class="mono">' + (dq.malformed_lines || 0) + '</span></li>' +
         '</ul></div></div></div>';
 
       return headPanel + diagPanel;
     }
 
-    // Sous-onglet Synthèse & Dossiers (%)
+    // Sous-onglet Synthèse
     const kpis = '<div class="kpis">' +
-      '<div class="card"><div class="k">Coût Total (' + (use2027 ? "2027" : "2026") + ')</div><div class="v">$' + shownTotal.toFixed(4) + '</div><div class="sub">' + (use2027 ? "2026" : "Proj. 2027") + ' : $' + otherTotal.toFixed(4) + '</div></div>' +
-      '<div class="card"><div class="k">Économie Cache</div><div class="v">$' + Number(c.cache_savings_usd || 0).toFixed(4) + '</div><div class="sub">Cache Hit : ' + Number(s.cache_hit_rate_pct || 0).toFixed(2) + '%</div></div>' +
+      '<div class="card"><div class="k">Coût Total (' + (use2027 ? "2027" : "2026") + ')</div><div class="v">$' + shownTotal.toFixed(4) + '</div>' +
+      '<div class="sub">' + (hasTariffDiff() ? ((use2027 ? "2026" : "2027") + " : $" + otherTotal.toFixed(4)) : esc(fmtDur(s.wall_clock_s))) + '</div></div>' +
+      '<div class="card"><div class="k">Économie Cache</div><div class="v">$' + Number(actCost.cache_savings_usd || 0).toFixed(4) + '</div><div class="sub">Cache Hit : ' + Number(s.cache_hit_rate_pct || 0).toFixed(2) + '%</div></div>' +
       '<div class="card"><div class="k">Agents / Appels LLM</div><div class="v">' + (s.total_agents || 0) + ' / ' + fmtInt(s.total_llm_calls) + '</div><div class="sub">Parall. : ' + Number(s.parallelism_factor || 1).toFixed(2) + 'x · Err : ' + Number(s.error_rate_pct || 0).toFixed(2) + '%</div></div>' +
-      '<div class="card"><div class="k">Gaspillages &amp; Ctx</div><div class="v">' + (dup.duplicate_agent_count || 0) + ' dup · ' + (rw.rewind_calls || 0) + ' rw</div><div class="sub">Int : ' + (intr.count || 0) + ' ($' + Number(intr.total_cost_usd || 0).toFixed(3) + ') · Max : ' + fmtInt(cb.max_context_tokens_overall) + '</div></div>' +
+      '<div class="card"><div class="k">Gaspillages &amp; Ctx</div><div class="v">' + (dup.duplicate_agent_count || 0) + ' dup · ' + (rw.rewind_calls || 0) + ' rw</div><div class="sub">Int : ' + (intr.count || 0) + ' · Max : ' + fmtInt(cb.max_context_tokens_overall) + '</div></div>' +
       '</div>';
 
     const wsPanel = renderWorkspaceSharePanel(d, use2027);
@@ -1384,9 +1606,9 @@ APP_JS = r"""
         return { label: def.label, val: Number((costObj || {}).total_usd || 0), color: def.color };
       });
     const splitItems = [
-      { label: "Cache Read (contexte)", val: Number(c.cache_read_usd || 0), color: "var(--gm-c6)" },
-      { label: "Input (tokens frais)", val: Number(c.input_usd || 0), color: "var(--gm-c2)" },
-      { label: "Output (réponse + thinking)", val: Number(c.output_usd || 0), color: "var(--gm-c7)" }
+      { label: "Cache Read (contexte)", val: Number(actCost.cache_read_usd || 0), color: "var(--gm-c6)" },
+      { label: "Input (tokens frais)", val: Number(actCost.input_usd || 0), color: "var(--gm-c2)" },
+      { label: "Output (réponse + thinking)", val: Number(actCost.output_usd || 0), color: "var(--gm-c7)" }
     ];
     const phaseItems = Object.entries(d.by_phase || {}).map(([pname, pdata]) => {
       const costObj = use2027 ? (pdata.cost_usd_projection || pdata.cost_usd) : pdata.cost_usd;
@@ -1398,19 +1620,38 @@ APP_JS = r"""
     });
 
     const charts = '<div class="panels two">' +
-      '<div class="panel"><div class="panel-head"><span class="panel-title">Coût par Catégorie</span></div><div class="svg-box">' + renderHorizontalBarsSvg(catItems) + '</div></div>' +
-      '<div class="panel"><div class="panel-head"><span class="panel-title">Ventilation (Cache / Input / Output)</span></div><div class="svg-box">' + renderHorizontalBarsSvg(splitItems) + '</div></div>' +
+      '<div class="panel"><div class="panel-head"><span class="panel-title">Coût par Catégorie</span></div>' + renderHtmlBarList(catItems) + '</div>' +
+      '<div class="panel"><div class="panel-head"><span class="panel-title">Ventilation (Cache / Input / Output)</span></div>' + renderHtmlBarList(splitItems) + '</div>' +
       '</div>' +
-      '<div class="panel"><div class="panel-head"><span class="panel-title">Coût par Phase d’Exécution</span></div><div class="svg-box">' + renderHorizontalBarsSvg(phaseItems) + '</div></div>';
+      '<div class="panel"><div class="panel-head"><span class="panel-title">Coût par Phase d’Exécution</span></div>' + renderHtmlBarList(phaseItems) + '</div>';
 
     return headPanel + kpis + wsPanel + charts;
   }
 
-  function renderReportsTab() {
+  function renderArchivedSubtab() {
+    const scoped = scopedRecords();
     const list = filteredSortedRecords();
     const curIdx = list.findIndex((r) => recKey(r) === state.detailTarget || r.conversation_id === state.detailTarget);
     const hasPrev = curIdx > 0;
     const hasNext = curIdx >= 0 && curIdx < list.length - 1;
+
+    const modelSet = new Set();
+    scoped.forEach((r) => {
+      if (r.primary_model) modelSet.add(r.primary_model);
+      Object.keys(r.models || {}).forEach((m) => modelSet.add(m));
+    });
+    let modelOpts = '<option value="">Tous modèles</option>';
+    Array.from(modelSet).sort().forEach((m) => {
+      modelOpts += '<option value="' + esc(m) + '"' + (m === state.modelFilter ? " selected" : "") + '>' + esc(m) + '</option>';
+    });
+
+    const sortOpts = [
+      { v: "date", l: "Date" },
+      { v: "cost", l: "Coût" },
+      { v: "cache", l: "Cache %" },
+      { v: "calls", l: "Appels" },
+      { v: "label", l: "Label" }
+    ].map((o) => '<option value="' + o.v + '"' + (state.sortBy === o.v ? " selected" : "") + '>Tri : ' + o.l + '</option>').join("");
 
     const quickSelectOpts = list.map((r) => {
       const k = recKey(r);
@@ -1418,16 +1659,12 @@ APP_JS = r"""
       return '<option value="' + esc(k) + '"' + sel + '>' + esc((r.label || k) + " · $" + recCost(r).toFixed(3)) + '</option>';
     }).join("");
 
-    const stickyNav = '<div class="sticky-nav">' +
+    const stickyNav = '<div class="sticky-nav only-narrow">' +
       '<div class="sticky-nav-group">' +
-      '<button type="button" class="btn sm only-narrow" data-action="toggle-reports-list">' + (state.reportsShowListMobile ? 'Masquer liste' : 'Liste (' + list.length + ')') + '</button>' +
-      '<button type="button" class="btn sm" data-action="nav-prev"' + (hasPrev ? '' : ' disabled') + ' title="Rapport précédent (Alt+←)">← Préc.</button>' +
-      '<select id="gm-quick-report" aria-label="Sélecteur rapide de rapport">' + (quickSelectOpts || '<option value="">Aucun rapport</option>') + '</select>' +
-      '<button type="button" class="btn sm" data-action="nav-next"' + (hasNext ? '' : ' disabled') + ' title="Rapport suivant (Alt+→)">Suiv. →</button>' +
-      '</div>' +
-      '<div class="controls">' +
-      '<span class="subline">' + (curIdx >= 0 ? (curIdx + 1) + '/' + list.length : '0/' + list.length) + '</span>' +
-      (list.length >= 2 ? '<button type="button" class="btn sm" data-action="open-compare">A vs B</button>' : '') +
+      '<button type="button" class="btn sm" data-action="toggle-reports-list">' + (state.reportsShowListMobile ? 'Masquer' : 'Liste (' + list.length + ')') + '</button>' +
+      '<button type="button" class="btn sm" data-action="nav-prev"' + (hasPrev ? '' : ' disabled') + ' title="Précédent (Alt+←)">←</button>' +
+      '<select id="gm-quick-report" aria-label="Sélecteur rapide">' + (quickSelectOpts || '<option value="">Aucun rapport</option>') + '</select>' +
+      '<button type="button" class="btn sm" data-action="nav-next"' + (hasNext ? '' : ' disabled') + ' title="Suivant (Alt+→)">→</button>' +
       '</div></div>';
 
     let masterItems = "";
@@ -1436,29 +1673,54 @@ APP_JS = r"""
       const isAct = k === state.detailTarget || r.conversation_id === state.detailTarget;
       const bCnt = Number(r.bridge_children_count) || 0;
       const audLinks = state.auditLinksBySession[String(r.conversation_id || "")] || [];
+      const tag = bCnt > 0 ? " · bridge:" + bCnt : (audLinks.length ? " · audit" : "");
       masterItems += '<button type="button" class="master-item' + (isAct ? ' active' : '') + '" data-action="open-detail" data-target="' + esc(k) + '">' +
-        '<div class="master-item-top"><strong>' + esc(r.label || k) + '</strong><span><strong>$' + recCost(r).toFixed(4) + '</strong></span></div>' +
+        '<div class="master-item-top"><strong>' + esc(r.label || k) + '</strong><span>$' + recCost(r).toFixed(4) + '</span></div>' +
         '<div class="master-item-sub">' +
-        '<span>' + esc(fmtDate(r)) + ' · ' + esc(r.project || "—") + '</span>' +
-        '<span>' + (Number(r.cache_hit_rate_pct) || 0).toFixed(0) + '% cache' +
-        (bCnt > 0 ? ' · bridge:' + bCnt : '') +
-        (audLinks.length ? ' · audit' : '') +
-        '</span></div></button>';
+        '<span>' + esc(fmtDate(r)) + (r.project ? ' · ' + esc(r.project) : '') + '</span>' +
+        '<span>' + (Number(r.cache_hit_rate_pct) || 0).toFixed(0) + '% cache' + esc(tag) + '</span>' +
+        '</div></button>';
     });
 
     const masterPane = '<aside class="master-pane' + (state.reportsShowListMobile ? '' : ' hide-mobile') + '">' +
-      '<input id="gm-search" type="search" placeholder="Filtrer rapports..." value="' + esc(state.search) + '" />' +
-      '<div class="master-list">' + (masterItems || '<div class="empty">Aucun rapport.</div>') + '</div>' +
+      '<input id="gm-search" type="search" placeholder="Filtrer sessions..." value="' + esc(state.search) + '" />' +
+      '<div class="filters" style="margin-bottom:0;">' +
+      '<select id="gm-model-filter" style="flex:1 1 110px;">' + modelOpts + '</select>' +
+      '<select id="gm-sort-by" style="flex:1 1 95px;">' + sortOpts + '</select>' +
+      '</div>' +
+      '<label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;color:var(--gm-fg-muted);">' +
+      '<input id="gm-alerts-only" type="checkbox"' + (state.alertsOnly ? " checked" : "") + ' /> Alertes uniquement' +
+      '</label>' +
+      '<div class="master-list">' + (masterItems || '<div class="empty">Aucune session trouvée.</div>') + '</div>' +
       '</aside>';
 
     const detailPane = '<div class="detail-pane">' + stickyNav + renderReportDetailContent() + '</div>';
     return '<div class="master-detail">' + masterPane + detailPane + '</div>';
   }
 
+  function renderSessionsTab() {
+    const archCount = scopedRecords().length;
+    const pendCount = state.pendingSessions.length;
+    const subNav = '<div class="subtabs" style="border-top:none;padding-top:0;">' +
+      '<button type="button" class="subtab-btn' + (state.sessionsSub === "archived" ? " active" : "") + '" data-action="set-sessions-sub" data-sub="archived">Archivées <span class="tab-badge">' + archCount + '</span></button>' +
+      '<button type="button" class="subtab-btn' + (state.sessionsSub === "pending" ? " active" : "") + '" data-action="set-sessions-sub" data-sub="pending">À archiver <span class="tab-badge' + (pendCount > 0 ? " warn" : "") + '" data-badge="pending">' + pendCount + '</span></button>' +
+      '<button type="button" class="subtab-btn' + (state.sessionsSub === "compare" ? " active" : "") + '" data-action="set-sessions-sub" data-sub="compare">Comparer</button>' +
+      '</div>';
+
+    if (state.sessionsSub === "pending") {
+      return subNav + renderPendingSubtab();
+    }
+    if (state.sessionsSub === "compare") {
+      return subNav + renderCompareSubtab();
+    }
+    return subNav + renderArchivedSubtab();
+  }
+
   function renderAuditsTab() {
     const q = state.auditSearch.trim().toLowerCase();
     const wsFilter = state.auditWorkspaceFilter;
     const vFilter = state.auditVerdictFilter;
+    const use2027 = effectiveTariff() === "2027";
 
     const workspaces = Array.from(new Set(state.audits.map((a) => String(a.workspace || "")).filter(Boolean))).sort();
     const verdicts = Array.from(new Set(state.audits.map((a) => String(a.verdict || "")).filter(Boolean))).sort();
@@ -1473,28 +1735,23 @@ APP_JS = r"""
       return true;
     });
 
-    const pinned = filtered.filter((a) => a.is_index);
-    const regular = filtered.filter((a) => !a.is_index);
-    const ordered = pinned.concat(regular);
-
-    let wsOpts = '<option value="">Tous les dossiers</option>';
+    let wsOpts = '<option value="">Tous dossiers</option>';
     workspaces.forEach((w) => {
       wsOpts += '<option value="' + esc(w) + '"' + (w === wsFilter ? " selected" : "") + '>' + esc(w) + '</option>';
     });
-    let vOpts = '<option value="">Tous les verdicts</option>';
+    let vOpts = '<option value="">Tous verdicts</option>';
     verdicts.forEach((v) => {
       vOpts += '<option value="' + esc(v) + '"' + (v === vFilter ? " selected" : "") + '>' + esc(v) + '</option>';
     });
 
     let itemsHtml = "";
-    ordered.forEach((a) => {
+    filtered.forEach((a) => {
       const isAct = a.audit_id === state.selectedAuditId;
       const tone = a.verdict_tone || "neutral";
-      const cls = "master-item" + (a.is_index ? " pinned" : "") + (isAct ? " active" : "");
       const linkedCnt = (a.linked_sessions || []).length;
-      itemsHtml += '<button type="button" class="' + cls + '" data-action="open-audit" data-audit-id="' + esc(a.audit_id) + '">' +
+      itemsHtml += '<button type="button" class="master-item' + (isAct ? ' active' : '') + '" data-action="open-audit" data-audit-id="' + esc(a.audit_id) + '">' +
         '<div class="master-item-top">' +
-        '<strong>' + (a.is_index ? '📌 ' : '') + esc(a.title || a.filename) + '</strong>' +
+        '<strong>' + esc(a.title || a.filename) + '</strong>' +
         (a.verdict ? '<span class="pill ' + esc(tone) + '">' + esc(a.verdict) + '</span>' : '') +
         '</div>' +
         '<div class="master-item-sub">' +
@@ -1513,17 +1770,21 @@ APP_JS = r"""
       (state.auditsLoading && !state.audits.length ? '<div class="empty">Découverte des audits...</div>' : (itemsHtml || '<div class="empty">Aucun audit agent Markdown trouvé.</div>')) +
       '</div></aside>';
 
-    const quickOpts = ordered.map((a) =>
+    const quickOpts = filtered.map((a) =>
       '<option value="' + esc(a.audit_id) + '"' + (a.audit_id === state.selectedAuditId ? " selected" : "") + '>' +
-      esc((a.is_index ? "[Index] " : "") + (a.title || a.filename) + " (" + a.workspace + ")") + '</option>'
+      esc((a.title || a.filename) + " (" + a.workspace + ")") + '</option>'
     ).join("");
+
+    const indexBtn = state.indexAudit
+      ? '<button type="button" class="btn sm' + (state.selectedAuditId === state.indexAudit.audit_id ? ' primary' : '') + '" data-action="open-index-audit">Index &amp; Matrice</button>'
+      : '';
 
     const navBar = '<div class="sticky-nav">' +
       '<div class="sticky-nav-group">' +
-      '<button type="button" class="btn sm only-narrow" data-action="toggle-audits-list">' + (state.auditsShowListMobile ? 'Masquer liste' : 'Audits Agents (' + ordered.length + ')') + '</button>' +
-      '<select id="gm-quick-audit" aria-label="Sélecteur rapide d’audit agent">' + (quickOpts || '<option value="">Aucun audit agent</option>') + '</select>' +
+      '<button type="button" class="btn sm only-narrow" data-action="toggle-audits-list">' + (state.auditsShowListMobile ? 'Masquer' : 'Audits (' + filtered.length + ')') + '</button>' +
+      '<select id="gm-quick-audit" class="only-narrow" aria-label="Sélecteur rapide d’audit">' + (quickOpts || '<option value="">Aucun audit</option>') + '</select>' +
       '</div>' +
-      '<button type="button" class="btn sm" data-action="reload-audits">Actualiser audits</button>' +
+      '<div class="controls">' + indexBtn + '<button type="button" class="btn sm" data-action="reload-audits">Actualiser</button></div>' +
       '</div>';
 
     let readerHtml = "";
@@ -1531,7 +1792,7 @@ APP_JS = r"""
       readerHtml = '<div class="panel"><div class="empty">Lecture de l’audit...</div></div>';
     } else if (!state.selectedAudit) {
       readerHtml = '<div class="panel"><div class="empty">' +
-        (ordered.length ? 'Sélectionnez un fichier Markdown dans la liste.' : 'Aucun dossier <code>audits/agents/</code> détecté (configurez <code>$GRAVITY_AUDITS_DIR</code> ou un workspace Bridge).') +
+        (filtered.length ? 'Sélectionnez un audit dans la liste.' : 'Aucun dossier <code>audits/agents/</code> détecté.') +
         '</div></div>';
     } else {
       const a = state.selectedAudit;
@@ -1539,10 +1800,11 @@ APP_JS = r"""
       const openBtn = (canUseAuxPane() && a.uri)
         ? '<button type="button" class="btn sm" data-action="open-file" data-uri="' + esc(a.uri) + '">Ouvrir .md</button>'
         : "";
-      const sessChips = (a.linked_sessions || []).map((ls) =>
-        '<button type="button" class="pill-btn" data-action="open-detail" data-target="' + esc(ls.label || ls.conversation_id) + '">' +
-        esc(ls.label) + ' ($' + Number(ls.cost_usd || 0).toFixed(3) + ')</button>'
-      ).join(" ");
+      const sessChips = (a.linked_sessions || []).map((ls) => {
+        const scost = use2027 && ls.cost_2027_usd != null ? Number(ls.cost_2027_usd) : Number(ls.cost_usd || 0);
+        return '<button type="button" class="pill-btn" data-action="open-detail" data-target="' + esc(ls.label || ls.conversation_id) + '">' +
+          esc(ls.label) + ' ($' + scost.toFixed(3) + ')</button>';
+      }).join(" ");
 
       readerHtml = '<div class="panel detail-head">' +
         '<div class="detail-row">' +
@@ -1555,12 +1817,12 @@ APP_JS = r"""
         '<div class="controls">' + openBtn + '</div>' +
         '</div>' +
         '<div class="detail-meta">' +
-        '<span>Workspace : <code>' + esc(a.workspace) + '</code></span>' +
-        '<span>· Fichier : <code>' + esc(a.rel_path) + '</code></span>' +
-        '<span>· Date : <code>' + esc(a.date || "—") + '</code></span>' +
-        '<span>· Taille : <code>' + esc(fmtBytes(a.size_bytes)) + '</code></span>' +
+        '<span>' + esc(a.workspace) + '</span>' +
+        '<span class="mono">· ' + esc(a.rel_path) + '</span>' +
+        '<span>· ' + esc(a.date || "—") + '</span>' +
+        '<span>· ' + esc(fmtBytes(a.size_bytes)) + '</span>' +
         '</div>' +
-        (sessChips ? '<div class="detail-meta"><span>Rapports liés :</span>' + sessChips + '</div>' : '') +
+        (sessChips ? '<div class="detail-meta"><span>Sessions liées :</span>' + sessChips + '</div>' : '') +
         '</div>' +
         '<div class="panel">' + renderSafeMarkdown(a.content || "") + '</div>';
     }
@@ -1573,25 +1835,26 @@ APP_JS = r"""
     if (!root) return;
 
     const activeEl = document.activeElement;
-    const focusId = activeEl && (activeEl.id === "gm-search" || activeEl.id === "gm-audit-search") ? activeEl.id : "";
-    const selStart = focusId ? activeEl.selectionStart : null;
-    const selEnd = focusId ? activeEl.selectionEnd : null;
+    const focusId = activeEl && activeEl.id ? activeEl.id : "";
+    const selStart = (focusId && typeof activeEl.selectionStart === "number") ? activeEl.selectionStart : null;
+    const selEnd = (focusId && typeof activeEl.selectionEnd === "number") ? activeEl.selectionEnd : null;
+    const masterListEl = root.querySelector(".master-list");
+    const masterScroll = masterListEl ? masterListEl.scrollTop : 0;
+    const winScroll = window.scrollY || 0;
 
     let htmlStr = renderShellHeader();
     if (state.toast) {
       htmlStr += '<div class="toast' + (state.toast.isError ? ' err' : '') + '">' +
         '<span>' + esc(state.toast.msg) + '</span>' +
-        '<button type="button" class="btn" data-action="close-toast" style="padding:2px 7px;">✕</button>' +
+        '<button type="button" class="btn sm" data-action="close-toast">✕</button>' +
         '</div>';
     }
     htmlStr += renderConfirmBars();
 
     if (state.loading && !state.records.length && !state.pendingSessions.length) {
       htmlStr += '<div class="panel"><div class="empty">Chargement des métriques...</div></div>';
-    } else if (state.tab === "reports") {
-      htmlStr += renderReportsTab();
-    } else if (state.tab === "pending") {
-      htmlStr += renderPendingTab();
+    } else if (state.tab === "sessions") {
+      htmlStr += renderSessionsTab();
     } else if (state.tab === "audits") {
       htmlStr += renderAuditsTab();
     } else {
@@ -1600,19 +1863,23 @@ APP_JS = r"""
 
     root.innerHTML = htmlStr;
 
+    const newMaster = root.querySelector(".master-list");
+    if (newMaster && masterScroll > 0) newMaster.scrollTop = masterScroll;
+    if (winScroll > 0) window.scrollTo(0, winScroll);
+
     if (focusId) {
       const inp = document.getElementById(focusId);
       if (inp) {
         inp.focus();
-        if (selStart !== null && selEnd !== null) {
-          inp.setSelectionRange(selStart, selEnd);
+        if (selStart !== null && selEnd !== null && typeof inp.setSelectionRange === "function") {
+          try { inp.setSelectionRange(selStart, selEnd); } catch (_) {}
         }
       }
     }
   }
 
   document.addEventListener("keydown", (ev) => {
-    if (state.tab === "reports" && ev.altKey && !ev.ctrlKey && !ev.metaKey) {
+    if (state.tab === "sessions" && state.sessionsSub === "archived" && ev.altKey && !ev.ctrlKey && !ev.metaKey) {
       if (ev.key === "ArrowLeft") {
         ev.preventDefault();
         navigateReport(-1);
@@ -1632,12 +1899,15 @@ APP_JS = r"""
     if (action === "switch-tab") {
       const nextTab = target.getAttribute("data-tab") || "overview";
       state.tab = nextTab;
-      if (nextTab === "reports" && !state.detailTarget) {
+      if (nextTab === "sessions" && state.sessionsSub === "archived" && !state.detailTarget) {
         const list = filteredSortedRecords();
         if (list.length) {
           openSessionDetail(recKey(list[0]), false);
           return;
         }
+      }
+      if (nextTab === "sessions" && state.sessionsSub === "compare") {
+        ensureCompareLoaded();
       }
       if (nextTab === "audits" && !state.auditsLoaded) {
         loadAudits(false);
@@ -1646,17 +1916,28 @@ APP_JS = r"""
       render();
       return;
     }
-    if (action === "set-report-subtab") {
-      state.reportSubtab = target.getAttribute("data-subtab") || "summary";
-      if (state.reportSubtab === "compare") ensureCompareLoaded();
+    if (action === "set-sessions-sub") {
+      state.sessionsSub = target.getAttribute("data-sub") || "archived";
+      if (state.sessionsSub === "archived" && !state.detailTarget) {
+        const list = filteredSortedRecords();
+        if (list.length) {
+          openSessionDetail(recKey(list[0]), false);
+          return;
+        }
+      } else if (state.sessionsSub === "compare") {
+        ensureCompareLoaded();
+      }
       render();
       return;
     }
-    if (action === "open-compare") {
-      state.tab = "reports";
-      state.reportSubtab = "compare";
-      state.reportsShowListMobile = false;
-      ensureCompareLoaded();
+    if (action === "open-pending") {
+      state.tab = "sessions";
+      state.sessionsSub = "pending";
+      render();
+      return;
+    }
+    if (action === "set-detail-subtab") {
+      state.detailSubtab = target.getAttribute("data-subtab") || "summary";
       render();
       return;
     }
@@ -1668,14 +1949,8 @@ APP_JS = r"""
       render();
       return;
     }
-    if (action === "nav-prev") {
-      navigateReport(-1);
-      return;
-    }
-    if (action === "nav-next") {
-      navigateReport(1);
-      return;
-    }
+    if (action === "nav-prev") { navigateReport(-1); return; }
+    if (action === "nav-next") { navigateReport(1); return; }
     if (action === "toggle-reports-list") {
       state.reportsShowListMobile = !state.reportsShowListMobile;
       render();
@@ -1695,6 +1970,12 @@ APP_JS = r"""
       }
       return;
     }
+    if (action === "clear-project") {
+      state.scope = "global";
+      state.selectedProject = "";
+      render();
+      return;
+    }
     if (action === "open-audit") {
       ev.stopPropagation();
       const aid = target.getAttribute("data-audit-id") || "";
@@ -1702,108 +1983,100 @@ APP_JS = r"""
       if (aid) openAudit(aid, true);
       return;
     }
+    if (action === "open-index-audit") {
+      if (state.indexAudit && state.indexAudit.audit_id) {
+        openAudit(state.indexAudit.audit_id, true);
+      }
+      return;
+    }
     if (action === "open-audit-ref") {
       const ref = target.getAttribute("data-ref") || "";
       resolveAuditRefAndOpen(ref);
       return;
     }
-    if (action === "reload-audits") {
-      loadAudits(true);
-      return;
-    }
+    if (action === "reload-audits") { loadAudits(true); return; }
     if (action === "ask-delete") {
       ev.stopPropagation();
       state.confirmDeleteTarget = target.getAttribute("data-target") || "";
       render();
       return;
     }
-    if (action === "cancel-delete") {
-      state.confirmDeleteTarget = "";
-      render();
-      return;
-    }
-    if (action === "confirm-delete") {
-      confirmDeleteSession();
-      return;
-    }
-    if (action === "archive-pending") {
-      ev.stopPropagation();
+    if (action === "cancel-delete") { state.confirmDeleteTarget = ""; render(); return; }
+    if (action === "confirm-delete") { confirmDeleteSession(); return; }
+    if (action === "toggle-archive-drawer") {
       const cid = target.getAttribute("data-cid") || "";
-      if (cid) archivePendingSession(cid, false);
+      if (state.archiveDrawerCid === cid) {
+        state.archiveDrawerCid = "";
+        render();
+      } else {
+        openArchiveDrawer(cid);
+      }
+      return;
+    }
+    if (action === "cancel-archive-drawer") { state.archiveDrawerCid = ""; render(); return; }
+    if (action === "submit-archive-drawer") {
+      const cid = target.getAttribute("data-cid") || "";
+      if (cid) submitArchiveDrawer(cid, false);
       return;
     }
     if (action === "confirm-force-archive") {
       const cid = target.getAttribute("data-cid") || "";
-      if (cid) archivePendingSession(cid, true);
+      if (cid) submitArchiveDrawer(cid, true);
       return;
     }
-    if (action === "cancel-force-archive") {
-      state.confirmForceArchiveCid = "";
+    if (action === "cancel-force-archive") { state.confirmForceArchiveCid = ""; render(); return; }
+    if (action === "ignore-pending") {
+      const cid = target.getAttribute("data-cid") || "";
+      if (cid) ignorePendingSession(cid);
+      return;
+    }
+    if (action === "unignore-pending") {
+      const cid = target.getAttribute("data-cid") || "";
+      if (cid) unignorePendingSession(cid);
+      return;
+    }
+    if (action === "toggle-ignored-pending") {
+      state.showIgnoredPending = !state.showIgnoredPending;
       render();
       return;
     }
-    if (action === "close-toast") {
-      state.toast = null;
-      render();
-      return;
-    }
-    if (action === "set-scope") {
-      state.scope = target.getAttribute("data-scope") || "global";
-      if (state.scope === "project" && !state.selectedProject) {
-        state.selectedProject = state.activeProject || state.projects[0] || "";
+    if (action === "toggle-edit-meta") {
+      const tgt = target.getAttribute("data-target") || "";
+      if (state.editMetaTarget === tgt) {
+        state.editMetaTarget = "";
+      } else {
+        const rec = state.records.find((r) => r.label === tgt || r.conversation_id === tgt) || {};
+        state.editMetaTarget = tgt;
+        state.editForm = {
+          label: String(rec.label || tgt),
+          project: String(rec.project || ""),
+          note: String(rec.note || "")
+        };
       }
-      if (state.tab === "reports") {
-        const list = filteredSortedRecords();
-        const stillInScope = list.some((r) => recKey(r) === state.detailTarget || r.conversation_id === state.detailTarget);
-        if (!stillInScope) {
-          if (list.length) {
-            openSessionDetail(recKey(list[0]), false);
-            return;
-          }
-          state.detailTarget = "";
-          state.detail = null;
-        }
-      }
       render();
       return;
     }
+    if (action === "cancel-edit-meta") { state.editMetaTarget = ""; render(); return; }
+    if (action === "save-edit-meta") {
+      const tgt = target.getAttribute("data-target") || "";
+      if (tgt) saveEditSessionMeta(tgt);
+      return;
+    }
+    if (action === "close-toast") { state.toast = null; render(); return; }
     if (action === "set-tariff") {
       state.tariff = target.getAttribute("data-tariff") || "2026";
       render();
       return;
     }
-    if (action === "refresh") {
-      refreshState(false);
-      return;
-    }
-    if (action === "open-file") {
-      openMarkdownFile(target.getAttribute("data-uri") || "");
-      return;
-    }
+    if (action === "refresh") { refreshState(false); return; }
+    if (action === "open-file") { openMarkdownFile(target.getAttribute("data-uri") || ""); return; }
     if (action === "open-detail") {
       const t = target.getAttribute("data-target") || "";
       if (t) openSessionDetail(t, true);
       return;
     }
-    if (action === "attach-context") {
-      attachSessionToPrompt();
-      return;
-    }
-    if (action === "analyze-session") {
-      analyzeSessionWithAgent();
-      return;
-    }
-    if (action === "sort") {
-      const col = target.getAttribute("data-col") || "date";
-      if (state.sortBy === col) {
-        state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
-      } else {
-        state.sortBy = col;
-        state.sortDir = (col === "label" || col === "project") ? "asc" : "desc";
-      }
-      render();
-      return;
-    }
+    if (action === "attach-context") { attachSessionToPrompt(); return; }
+    if (action === "analyze-session") { analyzeSessionWithAgent(); return; }
     if (action === "asort") {
       const col = target.getAttribute("data-col") || "cost";
       if (state.agentSortBy === col) {
@@ -1825,6 +2098,18 @@ APP_JS = r"""
     } else if (el.id === "gm-audit-search") {
       state.auditSearch = el.value || "";
       render();
+    } else if (el.id === "gm-arch-label") {
+      state.archiveForm.label = el.value || "";
+    } else if (el.id === "gm-arch-project") {
+      state.archiveForm.project = el.value || "";
+    } else if (el.id === "gm-arch-note") {
+      state.archiveForm.note = el.value || "";
+    } else if (el.id === "gm-edit-label") {
+      state.editForm.label = el.value || "";
+    } else if (el.id === "gm-edit-project") {
+      state.editForm.project = el.value || "";
+    } else if (el.id === "gm-edit-note") {
+      state.editForm.note = el.value || "";
     }
   });
 
@@ -1832,8 +2117,15 @@ APP_JS = r"""
     const el = ev.target;
     if (!el || !el.id) return;
     if (el.id === "gm-proj-select") {
-      state.selectedProject = el.value || "";
-      if (state.tab === "reports") {
+      const val = el.value || "";
+      if (!val) {
+        state.scope = "global";
+        state.selectedProject = "";
+      } else {
+        state.scope = "project";
+        state.selectedProject = val;
+      }
+      if (state.tab === "sessions" && state.sessionsSub === "archived") {
         const list = filteredSortedRecords();
         const stillInScope = list.some((r) => recKey(r) === state.detailTarget || r.conversation_id === state.detailTarget);
         if (!stillInScope) {
@@ -1844,16 +2136,24 @@ APP_JS = r"""
           state.detailTarget = "";
           state.detail = null;
         }
+      } else if (state.tab === "sessions" && state.sessionsSub === "compare") {
+        ensureCompareLoaded();
       }
       render();
     } else if (el.id === "gm-model-filter") {
       state.modelFilter = el.value || "";
+      render();
+    } else if (el.id === "gm-sort-by") {
+      state.sortBy = el.value || "date";
+      state.sortDir = state.sortBy === "label" ? "asc" : "desc";
       render();
     } else if (el.id === "gm-alerts-only") {
       state.alertsOnly = Boolean(el.checked);
       render();
     } else if (el.id === "gm-purge-cb") {
       state.confirmPurge = Boolean(el.checked);
+    } else if (el.id === "gm-arch-scope") {
+      state.archiveForm.full = el.value === "full";
     } else if (el.id === "gm-quick-report") {
       if (el.value) openSessionDetail(el.value, true);
     } else if (el.id === "gm-cmp-a") {
@@ -1913,7 +2213,9 @@ APP_JS = r"""
         state.scope = "project";
       }
       if (typeof args.view === "string" && args.view.trim()) {
-        state.tab = mapInitialTab(args.view);
+        const route = mapInitialRoute(args.view);
+        state.tab = route.tab;
+        state.sessionsSub = route.sub;
       }
       return;
     }
@@ -1942,7 +2244,7 @@ APP_JS = r"""
   async function initBridge() {
     try {
       const initRes = await sendRequest("ui/initialize", {
-        appInfo: { name: "gravity-metrics", version: "0.4.3" },
+        appInfo: { name: "gravity-metrics", version: "0.5.0" },
         appCapabilities: {},
         protocolVersion: PROTOCOL_VERSION
       });

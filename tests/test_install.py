@@ -66,6 +66,7 @@ class TestInstaller(unittest.TestCase):
             self.assertTrue((target / "plugin.json").is_file())
             self.assertTrue((target / "config" / "module.json").is_file())
             self.assertTrue((target / "hooks" / "pre_invocation_metrics.py").is_file())
+            self.assertTrue((target / "hooks" / "session_start_metrics.py").is_file())
             self.assertTrue((target / "mcp_config.json").is_file())
             self.assertTrue((target / "mcp" / "server.py").is_file())
             self.assertTrue((target / "skills" / "gravity-metrics" / "SKILL.md").is_file())

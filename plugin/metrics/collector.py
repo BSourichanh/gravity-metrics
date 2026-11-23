@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shlex
@@ -15,6 +16,12 @@ from .bridge_links import (
     discover_bridge_links,
     load_bridge_caller_conversation_ids,
     load_bridge_target_conversation_ids,
+    resolve_project_from_bridge_or_transcript,
+)
+from .lifecycle import (
+    load_active_captures,
+    load_ignored_sessions,
+    load_session_meta,
 )
 from .pricing import (
     CATEGORY_ORDER,
@@ -29,6 +36,16 @@ from .pricing import (
 )
 
 METRICS_MARKER = "<!-- gravity-metrics:recorded -->"
+METRICS_OPEN_MARKER = "<!-- gravity-metrics:opened -->"
+
+_ARCHITECT_ARCHIVE_RE = re.compile(
+    r"^/gravity-architect(?::gravity-architect)?\s+archive\s+([^\s]+)",
+    re.IGNORECASE,
+)
+_CACHE_MAX_ENTRIES = 512
+_TRANSCRIPT_INDEX_CACHE: Dict[str, Tuple[Tuple[int, int], Dict[str, Any]]] = {}
+_WORKFLOW_CHILDREN_CACHE: Dict[str, Tuple[Tuple[Any, ...], List[Dict[str, Any]]]] = {}
+_SUBAGENTS_CACHE: Dict[str, Tuple[Tuple[Any, ...], List[Dict[str, Any]]]] = {}
 
 _GRAVITY_METRICS_CMD_RE = re.compile(
     r"^/gravity-metrics(?::gravity-metrics)?(?:\s|$)", re.IGNORECASE
@@ -159,14 +176,16 @@ def _split_metrics_tokens(raw_args: str) -> List[str]:
         return text.split()
 
 
-def _parse_metrics_flags(tokens: List[str]) -> Tuple[Dict[str, Any], List[str], bool]:
+def _parse_metrics_flags(tokens: List[str]) -> Tuple[Dict[str, Any], List[str], bool, bool]:
     """Parse les options communes de `/gravity-metrics` sans lever d'exception sur texte long."""
     label = ""
     note = ""
     profile = "2026_nov_standard"
+    project = ""
     full = False
     force = False
     has_explicit_label = False
+    has_capture_flags = False
     positionals: List[str] = []
 
     i = 0
@@ -177,22 +196,32 @@ def _parse_metrics_flags(tokens: List[str]) -> Tuple[Dict[str, Any], List[str], 
                 raise ValueError(f"Option {tok} sans valeur.")
             label = tokens[i + 1]
             has_explicit_label = True
+            has_capture_flags = True
             i += 2
         elif tok in ("-n", "--note"):
             if i + 1 >= len(tokens):
                 raise ValueError(f"Option {tok} sans valeur.")
             note = tokens[i + 1]
+            has_capture_flags = True
             i += 2
         elif tok == "--profile":
             if i + 1 >= len(tokens):
                 raise ValueError("Option --profile sans valeur.")
             profile = tokens[i + 1]
+            has_capture_flags = True
+            i += 2
+        elif tok == "--project":
+            if i + 1 >= len(tokens):
+                raise ValueError("Option --project sans valeur.")
+            project = tokens[i + 1]
             i += 2
         elif tok == "--full":
             full = True
+            has_capture_flags = True
             i += 1
         elif tok == "--force":
             force = True
+            has_capture_flags = True
             i += 1
         elif tok.startswith("-"):
             raise ValueError(f"Option inconnue : `{tok}`.")
@@ -205,16 +234,28 @@ def _parse_metrics_flags(tokens: List[str]) -> Tuple[Dict[str, Any], List[str], 
             "label": label.strip(),
             "note": note.strip(),
             "profile": profile.strip(),
+            "project": project.strip(),
             "full": full,
             "force": force,
         },
         positionals,
         has_explicit_label,
+        has_capture_flags,
     )
 
 
+def parse_architect_archive_prompt(raw: str) -> Optional[str]:
+    """Extrait `<slug>` si le prompt est `/gravity-architect archive <slug>`, sinon None."""
+    txt = extract_user_request_text(raw)
+    m = _ARCHITECT_ARCHIVE_RE.match(txt)
+    if not m:
+        return None
+    slug = m.group(1).strip("`'\",.;:()[]<>")
+    return slug or None
+
+
 def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
-    """Analyse un prompt `/gravity-metrics` et décide : passthrough, capture, archive, pending ou error."""
+    """Analyse un prompt `/gravity-metrics` : passthrough, open, start, stop, capture, archive, pending ou error."""
     txt = extract_user_request_text(raw)
     if not _GRAVITY_METRICS_CMD_RE.match(txt):
         return {"action": "passthrough"}
@@ -224,13 +265,8 @@ def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
     rest = (match.group(1) or "").strip()
     if not rest:
         return {
-            "action": "capture",
-            "label": "",
-            "note": "",
-            "profile": "2026_nov_standard",
-            "full": False,
-            "force": False,
-            "has_explicit_label": False,
+            "action": "open",
+            "project": "",
         }
     if rest.startswith("/"):
         return {"action": "passthrough"}
@@ -238,25 +274,60 @@ def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
     tokens = _split_metrics_tokens(rest)
     if not tokens:
         return {
-            "action": "capture",
-            "label": "",
-            "note": "",
-            "profile": "2026_nov_standard",
-            "full": False,
-            "force": False,
-            "has_explicit_label": False,
+            "action": "open",
+            "project": "",
         }
 
     head = tokens[0].lower()
     if head == "pending":
-        for tok in tokens[1:]:
-            if tok.startswith("-"):
+        proj_arg = ""
+        i = 1
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--project":
+                if i + 1 >= len(tokens):
+                    return {"action": "error", "error": "Option --project sans valeur."}
+                proj_arg = tokens[i + 1].strip()
+                i += 2
+            elif tok.startswith("-"):
                 return {"action": "error", "error": f"Option inconnue pour `pending` : `{tok}`."}
-        return {"action": "pending"}
+            else:
+                i += 1
+        return {"action": "pending", "project": proj_arg}
+
+    if head == "start":
+        try:
+            opts, positionals, has_explicit_label, _ = _parse_metrics_flags(tokens[1:])
+        except ValueError as exc:
+            return {"action": "error", "error": str(exc)}
+        resolved_label = opts["label"] or " ".join(positionals).strip()
+        return {
+            "action": "start",
+            "label": resolved_label,
+            "project": opts["project"],
+            "has_explicit_label": has_explicit_label,
+        }
+
+    if head in ("stop", "finish"):
+        try:
+            opts, positionals, has_explicit_label, _ = _parse_metrics_flags(tokens[1:])
+        except ValueError as exc:
+            return {"action": "error", "error": str(exc)}
+        resolved_label = opts["label"] or " ".join(positionals).strip()
+        return {
+            "action": "stop",
+            "label": resolved_label,
+            "note": opts["note"],
+            "profile": opts["profile"],
+            "project": opts["project"],
+            "full": opts["full"],
+            "force": opts["force"],
+            "has_explicit_label": has_explicit_label,
+        }
 
     if head == "archive":
         try:
-            opts, positionals, has_explicit_label = _parse_metrics_flags(tokens[1:])
+            opts, positionals, has_explicit_label, _ = _parse_metrics_flags(tokens[1:])
         except ValueError as exc:
             return {"action": "error", "error": str(exc)}
         if not positionals:
@@ -272,13 +343,14 @@ def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
             "label": label,
             "note": opts["note"],
             "profile": opts["profile"],
+            "project": opts["project"],
             "full": opts["full"],
             "force": opts["force"],
             "has_explicit_label": has_explicit_label,
         }
 
     try:
-        opts, positionals, has_explicit_label = _parse_metrics_flags(tokens)
+        opts, positionals, has_explicit_label, has_capture_flags = _parse_metrics_flags(tokens)
     except ValueError as exc:
         if len(rest) > 60 or len(tokens) > 6:
             return {"action": "passthrough"}
@@ -289,11 +361,17 @@ def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
         return {"action": "passthrough"}
 
     resolved_label = opts["label"] or positional_text
+    if not resolved_label and not has_capture_flags:
+        return {
+            "action": "open",
+            "project": opts["project"],
+        }
     return {
         "action": "capture",
         "label": resolved_label.strip(),
         "note": opts["note"],
         "profile": opts["profile"],
+        "project": opts["project"],
         "full": opts["full"],
         "force": opts["force"],
         "has_explicit_label": has_explicit_label,
@@ -301,8 +379,8 @@ def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
 
 
 def is_gravity_metrics_capture_prompt(raw: str) -> bool:
-    """Retourne True uniquement pour une commande valide de capture `/gravity-metrics` (hors passthrough/pending/archive)."""
-    return classify_metrics_prompt(raw).get("action") == "capture"
+    """Retourne True uniquement pour une commande de capture (`/gravity-metrics <label>`, `stop`/`finish`)."""
+    return classify_metrics_prompt(raw).get("action") in ("capture", "stop")
 
 
 def is_gravity_session_prompt(raw: str) -> bool:
@@ -311,15 +389,73 @@ def is_gravity_session_prompt(raw: str) -> bool:
     return bool(_GRAVITY_CMD_RE.match(txt)) and not is_gravity_metrics_prompt(txt)
 
 
+def _default_workflow_home() -> Path:
+    env_wf = os.environ.get("GRAVITY_WORKFLOW_HOME", "").strip()
+    if env_wf:
+        return Path(env_wf).expanduser()
+    env_g = os.environ.get("GRAVITY_HOME", "").strip()
+    if env_g:
+        return Path(env_g).expanduser() / "workflow"
+    return Path.home() / ".gemini" / "gravity" / "workflow"
+
+
+def _find_centralized_workflow_profile(workspace_root: Path) -> Optional[Path]:
+    wf_ws_dir = _default_workflow_home() / "workspaces"
+    if not wf_ws_dir.is_dir():
+        return None
+    try:
+        resolved = workspace_root.resolve()
+    except OSError:
+        resolved = workspace_root
+    candidates_str = {str(resolved), os.path.normcase(str(resolved))}
+    hashes: List[str] = []
+    for raw_s in candidates_str:
+        digest = hashlib.sha256(raw_s.encode("utf-8")).hexdigest()
+        hashes.extend([digest, digest[:16], digest[:12]])
+    for h in hashes:
+        p = wf_ws_dir / h / "profile.json"
+        if p.is_file():
+            return p
+    norm_target = os.path.normcase(str(resolved)).rstrip("\\/")
+    try:
+        for sub in sorted(wf_ws_dir.iterdir()):
+            if not sub.is_dir():
+                continue
+            p = sub / "profile.json"
+            if not p.is_file():
+                continue
+            try:
+                obj = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            for key in ("workspace", "workspace_path", "canonical_path", "cwd"):
+                val = str(obj.get(key) or "").strip()
+                if val and os.path.normcase(os.path.abspath(val)).rstrip("\\/") == norm_target:
+                    return p
+    except OSError:
+        return None
+    return None
+
+
 def read_gravity_profile_summary(
     workspace_root: Optional[Union[Path, str]],
 ) -> str:
-    """Lit en lecture seule `.agents/gravity/profile.json` s'il existe dans le projet cible."""
+    """Lit en lecture seule `$GRAVITY_HOME/workflow/workspaces/<hash>/profile.json` > `.agents/gravity-workflow/profile.json` > `.agents/gravity/profile.json`."""
     if not workspace_root:
         return ""
-    profile_path = Path(workspace_root) / ".agents" / "gravity" / "profile.json"
-    if not profile_path.is_file():
-        return ""
+    ws_path = Path(workspace_root)
+    profile_path = _find_centralized_workflow_profile(ws_path)
+    if profile_path is None:
+        wf_local = ws_path / ".agents" / "gravity-workflow" / "profile.json"
+        legacy_local = ws_path / ".agents" / "gravity" / "profile.json"
+        if wf_local.is_file():
+            profile_path = wf_local
+        elif legacy_local.is_file():
+            profile_path = legacy_local
+        else:
+            return ""
     try:
         data = json.loads(profile_path.read_text(encoding="utf-8"))
     except Exception:
@@ -470,11 +606,167 @@ def _extract_workflow_children_from_text(
             by_cid[key]["spawn_step_index"] = spawn_step_index
 
 
+def _cache_put(cache: Dict[str, Any], key: str, value: Any) -> None:
+    if len(cache) >= _CACHE_MAX_ENTRIES:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
+def _stat_sig(path: Path) -> Tuple[int, int]:
+    try:
+        st = path.stat()
+        return (int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        return (0, -1)
+
+
+def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
+    """Indexe en une passe (avec cache mtime_ns+size) un `transcript.jsonl` racine."""
+    tpath = Path(transcript_path)
+    if not tpath.is_file():
+        return {
+            "exists": False,
+            "mtime": 0.0,
+            "first_prompt_raw": None,
+            "has_gravity_cmd": False,
+            "last_ts": None,
+            "entries": [],
+        }
+
+    try:
+        st = tpath.stat()
+        sig = (int(st.st_mtime_ns), int(st.st_size))
+        mtime = float(st.st_mtime)
+        cache_key = str(tpath.resolve())
+    except OSError:
+        sig = (0, -1)
+        mtime = 0.0
+        cache_key = ""
+
+    if cache_key:
+        cached = _TRANSCRIPT_INDEX_CACHE.get(cache_key)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+
+    first_prompt_raw: Optional[str] = None
+    has_gravity_cmd = False
+    last_ts: Optional[str] = None
+    entries: List[Dict[str, Any]] = []
+
+    try:
+        with tpath.open("r", encoding="utf-8", errors="replace") as fh:
+            for line_idx, raw_line in enumerate(fh):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                step_type = str(obj.get("type") or "")
+                raw_step = obj.get("step_index")
+                step_idx = raw_step if isinstance(raw_step, int) else None
+                created_at = obj.get("created_at")
+                if created_at:
+                    last_ts = str(created_at)
+                content = str(obj.get("content") or "")
+                is_user = step_type == "USER_INPUT"
+                metrics_action = ""
+                is_metrics = False
+                is_gravity = False
+                is_architect = False
+                is_architect_archive = False
+                clean_prompt = ""
+                if is_user:
+                    if first_prompt_raw is None:
+                        first_prompt_raw = content
+                    clean_prompt = extract_user_request_text(content)[:160]
+                    is_metrics = is_gravity_metrics_prompt(content)
+                    if is_metrics:
+                        metrics_action = str(classify_metrics_prompt(content).get("action") or "")
+                    is_gravity = is_gravity_session_prompt(content)
+                    if has_gravity_cmd is False and is_gravity:
+                        has_gravity_cmd = True
+                    low_clean = clean_prompt.lower()
+                    if low_clean.startswith("/gravity-architect"):
+                        is_architect = True
+                    if parse_architect_archive_prompt(content) is not None:
+                        is_architect_archive = True
+
+                meta_obj = obj.get("metadata")
+                has_marker = step_type == "SYSTEM_MESSAGE" and (
+                    METRICS_MARKER in content
+                    or (
+                        isinstance(meta_obj, dict)
+                        and METRICS_MARKER in json.dumps(meta_obj, ensure_ascii=False)
+                    )
+                )
+                has_open_marker = step_type == "SYSTEM_MESSAGE" and (
+                    METRICS_OPEN_MARKER in content
+                    or (
+                        isinstance(meta_obj, dict)
+                        and METRICS_OPEN_MARKER in json.dumps(meta_obj, ensure_ascii=False)
+                    )
+                )
+                tool_names: List[str] = []
+                has_push_or_verif = False
+                if step_type == "PLANNER_RESPONSE":
+                    for tc in obj.get("tool_calls") or []:
+                        if not isinstance(tc, dict):
+                            continue
+                        tname = str(tc.get("name") or "").strip()
+                        if tname:
+                            tool_names.append(tname)
+                        if tname in ("run_command", "execute_command", "bash", "shell"):
+                            args_obj = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+                            cmd_str = str(args_obj.get("CommandLine") or args_obj.get("command") or "").lower()
+                            if any(tok in cmd_str for tok in ("git push", "validate.py", "unittest", "pytest")):
+                                has_push_or_verif = True
+
+                entries.append(
+                    {
+                        "line_idx": line_idx,
+                        "step_index": step_idx,
+                        "type": step_type,
+                        "status": str(obj.get("status") or ""),
+                        "created_at": created_at,
+                        "is_user": is_user,
+                        "is_metrics": is_metrics,
+                        "metrics_action": metrics_action,
+                        "is_gravity": is_gravity,
+                        "is_architect": is_architect,
+                        "is_architect_archive": is_architect_archive,
+                        "is_planner": step_type == "PLANNER_RESPONSE",
+                        "has_marker": has_marker,
+                        "has_open_marker": has_open_marker,
+                        "has_push_or_verif": has_push_or_verif,
+                        "tool_names": tool_names,
+                        "clean_prompt": clean_prompt,
+                    }
+                )
+    except OSError:
+        pass
+
+    result = {
+        "exists": True,
+        "mtime": mtime,
+        "first_prompt_raw": first_prompt_raw,
+        "has_gravity_cmd": has_gravity_cmd,
+        "last_ts": last_ts,
+        "entries": entries,
+    }
+    if cache_key:
+        _cache_put(_TRANSCRIPT_INDEX_CACHE, cache_key, (sig, result))
+    return result
+
+
 def discover_workflow_children(
     parent_cid: str,
     brain_dir: Union[Path, str],
 ) -> List[Dict[str, Any]]:
-    """Découvre en lecture seule les sous-agents `run_workflow` d'une conversation."""
+    """Découvre en lecture seule les sous-agents `run_workflow` d'une conversation (cache mtime_ns+size)."""
     clean_parent = str(parent_cid or "").strip()
     if not clean_parent:
         return []
@@ -483,69 +775,94 @@ def discover_workflow_children(
     if not cdir.is_dir():
         return []
 
+    tasks_dir = cdir / ".system_generated" / "tasks"
+    msgs_dir = cdir / ".system_generated" / "messages"
+    tpath = cdir / ".system_generated" / "logs" / "transcript.jsonl"
+
+    task_logs: List[Path] = []
+    if tasks_dir.is_dir():
+        try:
+            task_logs = sorted(
+                (
+                    p
+                    for p in tasks_dir.iterdir()
+                    if p.is_file()
+                    and p.name.lower().startswith("task-")
+                    and p.suffix.lower() == ".log"
+                ),
+                key=_task_log_sort_key,
+            )
+        except OSError:
+            task_logs = []
+
+    msg_files: List[Path] = []
+    if msgs_dir.is_dir():
+        try:
+            msg_files = [
+                p
+                for p in sorted(msgs_dir.iterdir(), key=lambda p: p.name)
+                if p.is_file() and p.suffix.lower() == ".json" and p.name.lower() != "read.json"
+            ]
+        except OSError:
+            msg_files = []
+
+    fp = (
+        tuple((p.name, _stat_sig(p)) for p in task_logs),
+        tuple((p.name, _stat_sig(p)) for p in msg_files),
+        _stat_sig(tpath) if tpath.is_file() else None,
+    )
+    try:
+        cache_key = str(cdir.resolve())
+    except OSError:
+        cache_key = ""
+
+    if cache_key:
+        cached = _WORKFLOW_CHILDREN_CACHE.get(cache_key)
+        if cached is not None and cached[0] == fp:
+            return [dict(item) for item in cached[1]]
+
     parent_cid_lower = clean_parent.lower()
     by_cid: Dict[str, Dict[str, Any]] = {}
     ordered_keys: List[str] = []
 
-    tasks_dir = cdir / ".system_generated" / "tasks"
-    if tasks_dir.is_dir():
-        task_logs = sorted(
-            (
-                p
-                for p in tasks_dir.iterdir()
-                if p.is_file()
-                and p.name.lower().startswith("task-")
-                and p.suffix.lower() == ".log"
-            ),
-            key=_task_log_sort_key,
+    for tlog in task_logs:
+        m_step = _TASK_STEP_RE.match(tlog.name)
+        step_idx = int(m_step.group(1)) if m_step else None
+        try:
+            content = tlog.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        _extract_workflow_children_from_text(
+            content, step_idx, parent_cid_lower, by_cid, ordered_keys
         )
-        for tlog in task_logs:
-            m_step = _TASK_STEP_RE.match(tlog.name)
-            step_idx = int(m_step.group(1)) if m_step else None
-            try:
-                content = tlog.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            _extract_workflow_children_from_text(
-                content, step_idx, parent_cid_lower, by_cid, ordered_keys
-            )
 
-    msgs_dir = cdir / ".system_generated" / "messages"
-    if msgs_dir.is_dir():
-        for mpath in sorted(msgs_dir.iterdir(), key=lambda p: p.name):
-            if (
-                not mpath.is_file()
-                or mpath.suffix.lower() != ".json"
-                or mpath.name.lower() == "read.json"
-            ):
-                continue
-            try:
-                obj = json.loads(mpath.read_text(encoding="utf-8", errors="replace"))
-            except Exception:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            sm = obj.get("sourceMetadata")
-            tool_meta = sm.get("tool") if isinstance(sm, dict) else None
-            tool_call = tool_meta.get("toolCall") if isinstance(tool_meta, dict) else None
-            tool_name = (
-                str(tool_call.get("name") or "").strip() if isinstance(tool_call, dict) else ""
-            )
-            content = obj.get("content")
-            content_str = content if isinstance(content, str) else ""
-            if tool_name != "run_workflow" or "[agent:" not in content_str:
-                continue
-            raw_step = tool_meta.get("stepIndex") if isinstance(tool_meta, dict) else None
-            step_idx = (
-                raw_step
-                if isinstance(raw_step, int) and not isinstance(raw_step, bool)
-                else None
-            )
-            _extract_workflow_children_from_text(
-                content_str, step_idx, parent_cid_lower, by_cid, ordered_keys
-            )
+    for mpath in msg_files:
+        try:
+            obj = json.loads(mpath.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        sm = obj.get("sourceMetadata")
+        tool_meta = sm.get("tool") if isinstance(sm, dict) else None
+        tool_call = tool_meta.get("toolCall") if isinstance(tool_meta, dict) else None
+        tool_name = (
+            str(tool_call.get("name") or "").strip() if isinstance(tool_call, dict) else ""
+        )
+        content = obj.get("content")
+        content_str = content if isinstance(content, str) else ""
+        if tool_name != "run_workflow" or "[agent:" not in content_str:
+            continue
+        raw_step = tool_meta.get("stepIndex") if isinstance(tool_meta, dict) else None
+        step_idx = (
+            raw_step
+            if isinstance(raw_step, int) and not isinstance(raw_step, bool)
+            else None
+        )
+        _extract_workflow_children_from_text(
+            content_str, step_idx, parent_cid_lower, by_cid, ordered_keys
+        )
 
-    tpath = cdir / ".system_generated" / "logs" / "transcript.jsonl"
     if tpath.is_file():
         try:
             raw_lines = tpath.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -618,7 +935,10 @@ def discover_workflow_children(
                 content, step_idx, parent_cid_lower, by_cid, ordered_keys
             )
 
-    return [by_cid[k] for k in ordered_keys]
+    result = [by_cid[k] for k in ordered_keys]
+    if cache_key:
+        _cache_put(_WORKFLOW_CHILDREN_CACHE, cache_key, (fp, [dict(item) for item in result]))
+    return result
 
 
 def load_known_child_conversation_ids(
@@ -637,27 +957,44 @@ def load_known_child_conversation_ids(
         cdir_lower = cdir.name.lower()
         sub_dir = cdir / ".system_generated" / "subagents"
         if sub_dir.is_dir():
-            for fn in sub_dir.iterdir():
-                if not fn.is_file() or fn.suffix.lower() != ".json":
-                    continue
-                try:
-                    sd = json.loads(fn.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                if not isinstance(sd, dict):
-                    continue
-                scid = str(sd.get("conversationId") or "").strip()
-                if not scid or scid == cdir.name or scid.lower() == cdir_lower:
-                    continue
-                desc = sd.get("subagentDescriptor")
-                raw_type = (
-                    desc.get("typeName")
-                    if isinstance(desc, dict) and desc.get("typeName") is not None
-                    else sd.get("type_name")
+            try:
+                sub_files = sorted(
+                    fn for fn in sub_dir.iterdir() if fn.is_file() and fn.suffix.lower() == ".json"
                 )
-                if str(raw_type or "").strip().lower() == "root":
-                    continue
-                child_ids.add(scid)
+            except OSError:
+                sub_files = []
+            sub_fp = tuple((fn.name, _stat_sig(fn)) for fn in sub_files)
+            try:
+                sub_key = str(sub_dir.resolve())
+            except OSError:
+                sub_key = ""
+            cached_sub = _SUBAGENTS_CACHE.get(sub_key) if sub_key else None
+            if cached_sub is not None and cached_sub[0] == sub_fp:
+                sub_cids = cached_sub[1]
+            else:
+                sub_cids = []
+                for fn in sub_files:
+                    try:
+                        sd = json.loads(fn.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    if not isinstance(sd, dict):
+                        continue
+                    scid = str(sd.get("conversationId") or "").strip()
+                    if not scid or scid == cdir.name or scid.lower() == cdir_lower:
+                        continue
+                    desc = sd.get("subagentDescriptor")
+                    raw_type = (
+                        desc.get("typeName")
+                        if isinstance(desc, dict) and desc.get("typeName") is not None
+                        else sd.get("type_name")
+                    )
+                    if str(raw_type or "").strip().lower() == "root":
+                        continue
+                    sub_cids.append(scid)
+                if sub_key:
+                    _cache_put(_SUBAGENTS_CACHE, sub_key, (sub_fp, list(sub_cids)))
+            child_ids.update(sub_cids)
 
         for w in discover_workflow_children(cdir.name, base):
             wcid = str(w.get("conversation_id") or "").strip()
@@ -759,34 +1096,13 @@ def list_gravity_conversations(
         if not cdir.is_dir():
             continue
         tpath = cdir / ".system_generated" / "logs" / "transcript.jsonl"
-        if not tpath.is_file():
+        tx = _get_transcript_index(tpath)
+        if not tx["exists"] or tx["first_prompt_raw"] is None:
             continue
 
-        first_prompt_raw: Optional[str] = None
-        has_gravity_cmd = False
-        last_ts: Optional[str] = None
-        with tpath.open("r", encoding="utf-8", errors="replace") as fh:
-            for raw_line in fh:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                if obj.get("created_at"):
-                    last_ts = str(obj["created_at"])
-                if obj.get("type") == "USER_INPUT":
-                    content = str(obj.get("content") or "")
-                    if first_prompt_raw is None:
-                        first_prompt_raw = content
-                    if is_gravity_session_prompt(content):
-                        has_gravity_cmd = True
-
-        if first_prompt_raw is None:
-            continue
+        first_prompt_raw = str(tx["first_prompt_raw"])
+        has_gravity_cmd = bool(tx["has_gravity_cmd"])
+        last_ts = tx["last_ts"]
 
         is_bridge_child = is_bridge_child_conversation(
             cdir.name,
@@ -806,7 +1122,7 @@ def list_gravity_conversations(
         if not include_all and not is_gravity:
             continue
 
-        mtime = tpath.stat().st_mtime
+        mtime = float(tx["mtime"] or 0.0)
         updated_at = last_ts or datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
@@ -838,47 +1154,8 @@ def resolve_gravity_window(
 ) -> Dict[str, Any]:
     """Résout la fenêtre de lignes [début /gravity → avant /gravity-metrics] sur le transcript racine."""
     tpath = Path(transcript_path)
-    entries: List[Dict[str, Any]] = []
-    if tpath.is_file():
-        with tpath.open("r", encoding="utf-8", errors="replace") as fh:
-            for line_idx, raw_line in enumerate(fh):
-                line = raw_line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                step_type = str(obj.get("type") or "")
-                raw_step = obj.get("step_index")
-                step_idx = raw_step if isinstance(raw_step, int) else None
-                content = str(obj.get("content") or "")
-                is_user = step_type == "USER_INPUT"
-                meta_obj = obj.get("metadata")
-                has_marker = step_type == "SYSTEM_MESSAGE" and (
-                    METRICS_MARKER in content
-                    or (
-                        isinstance(meta_obj, dict)
-                        and METRICS_MARKER in json.dumps(meta_obj, ensure_ascii=False)
-                    )
-                )
-                entries.append(
-                    {
-                        "line_idx": line_idx,
-                        "step_index": step_idx,
-                        "type": step_type,
-                        "created_at": obj.get("created_at"),
-                        "is_user": is_user,
-                        "is_metrics": is_user and is_gravity_metrics_prompt(content),
-                        "is_capture": is_user and is_gravity_metrics_capture_prompt(content),
-                        "is_gravity": is_user and is_gravity_session_prompt(content),
-                        "is_planner": step_type == "PLANNER_RESPONSE",
-                        "has_marker": has_marker,
-                        "clean_prompt": extract_user_request_text(content)[:160] if is_user else "",
-                    }
-                )
+    tx = _get_transcript_index(tpath)
+    entries: List[Dict[str, Any]] = tx["entries"]
 
     if not entries:
         return {
@@ -896,7 +1173,36 @@ def resolve_gravity_window(
             "has_gravity_anchor": False,
         }
 
-    capture_positions = [i for i, e in enumerate(entries) if e["is_capture"]]
+    def _has_user_after(idx_in_entries: int) -> bool:
+        return any(e["is_user"] for e in entries[idx_in_entries + 1 :])
+
+    def _turn_has_recorded_marker(idx_in_entries: int) -> bool:
+        for e in entries[idx_in_entries + 1 :]:
+            if e["is_user"]:
+                break
+            if e["has_marker"]:
+                return True
+        return False
+
+    def _is_capture_boundary_entry(idx_in_entries: int) -> bool:
+        e = entries[idx_in_entries]
+        act = e.get("metrics_action") or ""
+        if act in ("capture", "stop"):
+            return True
+        if act == "open":
+            # Bare /gravity-metrics: capture boundary if it recorded METRICS_MARKER (v0.4),
+            # or if it is the trailing prompt at the end of the transcript (not followed by another USER_INPUT
+            # and without METRICS_OPEN_MARKER).
+            if _turn_has_recorded_marker(idx_in_entries):
+                return True
+            if not _has_user_after(idx_in_entries) and not any(
+                x.get("has_open_marker")
+                for x in entries[idx_in_entries + 1 :]
+            ):
+                return True
+        return False
+
+    capture_positions = [i for i in range(len(entries)) if _is_capture_boundary_entry(i)]
     has_gravity_anchor = False
 
     def _is_metrics_entry_pending(idx_in_entries: int) -> bool:
@@ -904,6 +1210,7 @@ def resolve_gravity_window(
         if any(
             e["type"] in ("PLANNER_RESPONSE", "SYSTEM_MESSAGE", "ERROR_MESSAGE", "USER_INPUT")
             or e["has_marker"]
+            or e.get("has_open_marker")
             for e in tail
         ):
             return False
@@ -964,13 +1271,20 @@ def resolve_gravity_window(
                     prev_candidates = [j for j in capture_positions if _is_completed_capture_boundary(j)]
                     prev_m_pos = prev_candidates[-1] if prev_candidates else None
             else:
-                completed = [j for j in capture_positions if _is_completed_capture_boundary(j)]
-                if completed:
-                    current_m_pos = completed[-1]
-                    prev_m_pos = completed[-2] if len(completed) >= 2 else None
+                last_m = capture_positions[-1]
+                if _has_user_after(last_m):
+                    # Activité utilisateur postérieure à la dernière capture :
+                    # la capture précédente devient le point de départ, pas la fin.
+                    current_m_pos = None
+                    prev_m_pos = last_m
                 else:
-                    current_m_pos = capture_positions[-1]
-                    prev_m_pos = None
+                    completed = [j for j in capture_positions if _is_completed_capture_boundary(j)]
+                    if completed:
+                        current_m_pos = completed[-1]
+                        prev_m_pos = completed[-2] if len(completed) >= 2 else None
+                    else:
+                        current_m_pos = last_m
+                        prev_m_pos = None
 
         end_pos = current_m_pos if current_m_pos is not None else len(entries)
         if prev_m_pos is not None:
@@ -981,11 +1295,24 @@ def resolve_gravity_window(
         else:
             fallback_start_pos = 0
 
+        # Honorer un /gravity-metrics start non encore clôturé dans ce segment
+        start_cmd_pos = None
+        for i in range(fallback_start_pos, end_pos):
+            if entries[i].get("metrics_action") == "start":
+                start_cmd_pos = i
+
         g_pos = next(
             (i for i in range(fallback_start_pos, end_pos) if entries[i]["is_gravity"]),
             None,
         )
-        if g_pos is not None:
+        if start_cmd_pos is not None and (g_pos is None or start_cmd_pos > g_pos):
+            pos = start_cmd_pos + 1
+            while pos < end_pos and not entries[pos]["is_user"]:
+                pos += 1
+            start_pos = pos
+            mode = "custom"
+            has_gravity_anchor = g_pos is not None
+        elif g_pos is not None:
             start_pos = g_pos
             mode = "gravity_session"
             has_gravity_anchor = True
@@ -1338,6 +1665,7 @@ def parse_agent_transcript(
     prev_non_sys: Optional[Dict[str, Any]] = None
     last_non_sys: Optional[Dict[str, Any]] = None
     user_prompt_texts: List[str] = []
+    step_costs: List[Dict[str, Any]] = []
 
     if tpath.is_file():
         with tpath.open("r", encoding="utf-8", errors="replace") as fh:
@@ -1440,6 +1768,15 @@ def parse_agent_transcript(
                     _add_cost(m_entry["_raw_proj"], c2)
 
                     step_idx = obj.get("step_index")
+                    step_costs.append(
+                        {
+                            "line_idx": line_idx,
+                            "step_index": step_idx if isinstance(step_idx, int) else None,
+                            "tokens": in_t + cache_t + out_t,
+                            "cost_usd": float(call_cost["total_usd"]),
+                            "cost_2027_usd": float(c2["total_usd"]),
+                        }
+                    )
                     if isinstance(step_idx, int):
                         if step_idx in seen_planner_steps:
                             rewind_calls += 1
@@ -1549,6 +1886,7 @@ def parse_agent_transcript(
         "_raw_cost": cost_acc,
         "_raw_proj": proj_acc,
         "_user_prompts": user_prompt_texts,
+        "_step_costs": step_costs,
     }
 
 
@@ -1682,6 +2020,198 @@ def _aggregate_bucket(agents_subset: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _compute_session_milestones(
+    *,
+    root_id: str,
+    root_transcript_path: Union[Path, str],
+    window_info: Dict[str, Any],
+    enriched_agents: List[Dict[str, Any]],
+    bridge_pending_jobs: List[Dict[str, Any]],
+    total_cost_float: float,
+    is_archived: bool = False,
+) -> Dict[str, Any]:
+    """Déduit les 4 jalons automatiques (0 token) ou repli 2 jalons en mono-dépôt sans Bridge."""
+    tx = _get_transcript_index(root_transcript_path)
+    entries = tx.get("entries") or []
+    s_line = int(window_info.get("start_line_idx") or 0)
+    e_line = window_info.get("end_line_idx")
+    win_entries = [
+        e
+        for e in entries
+        if e["line_idx"] >= s_line and (e_line is None or e["line_idx"] < e_line)
+    ]
+
+    root_agent = next((a for a in enriched_agents if a["conversation_id"] == root_id), None)
+    bridge_agents = [a for a in enriched_agents if a.get("source") == "bridge"]
+    wf_agents = [a for a in enriched_agents if a.get("source") == "workflow"]
+    root_links = (root_agent.get("_bridge_links") or []) if root_agent else []
+    has_architect = any(e.get("is_architect") for e in win_entries)
+    has_bridge = bool(bridge_agents or root_links)
+
+    def _empty_phase(pid: str, plabel: str) -> Dict[str, Any]:
+        return {
+            "id": pid,
+            "label": plabel,
+            "status": "pending",
+            "agents": 0,
+            "llm_calls": 0,
+            "tokens": 0,
+            "cost_usd": 0.0,
+            "cost_2027_usd": 0.0,
+            "cost_share_pct": 0.0,
+        }
+
+    def _add_agent_to_phase(phase: Dict[str, Any], ag: Dict[str, Any]) -> None:
+        phase["agents"] += 1
+        phase["llm_calls"] += int(ag.get("llm_calls") or 0)
+        phase["tokens"] += int(ag.get("total_tokens") or 0)
+        phase["cost_usd"] += float((ag.get("_raw_cost") or {}).get("total_usd") or 0.0)
+        phase["cost_2027_usd"] += float((ag.get("_raw_proj") or {}).get("total_usd") or 0.0)
+
+    has_arch_archive = any(e.get("is_architect_archive") for e in win_entries)
+
+    if not has_bridge and not has_architect:
+        # Repli 2 jalons : Production -> Clôture / Archivé
+        p_prod = _empty_phase("production", "Production")
+        p_close = _empty_phase("cloture", "Clôture / Archivé")
+        for ag in enriched_agents:
+            _add_agent_to_phase(p_prod, ag)
+        p_prod["status"] = "done" if is_archived else "active"
+        p_close["status"] = "done" if is_archived else "pending"
+        phases = [p_prod, p_close]
+        current_phase = p_close["label"] if is_archived else p_prod["label"]
+        mode = "2_phases"
+    else:
+        p_conc = _empty_phase("conception", "Conception")
+        p_prod = _empty_phase("production", "Production")
+        p_verif = _empty_phase("verification", "Vérification & Push")
+        p_close = _empty_phase("cloture", "Clôture / Archivé")
+
+        link_steps = [
+            int(lnk["spawn_step_index"])
+            for lnk in root_links
+            if isinstance(lnk.get("spawn_step_index"), int)
+        ]
+        child_steps = [
+            int(a["spawn_step_index"])
+            for a in bridge_agents + wf_agents
+            if isinstance(a.get("spawn_step_index"), int)
+        ]
+        first_prod_step = min(link_steps + child_steps) if (link_steps or child_steps) else None
+
+        # Détecter début Vérification & Push : callback reçu, read_thread post-bridge, ou run_command git push / tests
+        verif_step: Optional[int] = None
+        archive_step: Optional[int] = None
+        for e in win_entries:
+            st_i = e.get("step_index")
+            if e.get("is_architect_archive") and archive_step is None and isinstance(st_i, int):
+                archive_step = st_i
+            if first_prod_step is not None and isinstance(st_i, int) and st_i > first_prod_step:
+                if e.get("has_push_or_verif") and verif_step is None:
+                    verif_step = st_i
+                elif not bridge_pending_jobs and e.get("is_user") and "[GRAVITY-BRIDGE" in str(e.get("clean_prompt") or ""):
+                    if verif_step is None:
+                        verif_step = st_i
+                elif not bridge_pending_jobs and e.get("is_planner") and verif_step is None:
+                    # Premier tour planner racine post-bridge sans jobs actifs restants
+                    if st_i > max(link_steps or [first_prod_step]):
+                        verif_step = st_i
+
+        # Statuts des 4 jalons
+        if is_archived or has_arch_archive:
+            p_conc["status"] = "done"
+            p_prod["status"] = "done" if (has_bridge or wf_agents or verif_step is not None) else "done"
+            p_verif["status"] = "done"
+            p_close["status"] = "done" if is_archived else "active"
+            current_phase = p_close["label"]
+        elif verif_step is not None:
+            p_conc["status"] = "done"
+            p_prod["status"] = "done"
+            p_verif["status"] = "active"
+            p_close["status"] = "pending"
+            current_phase = p_verif["label"]
+        elif first_prod_step is not None or bridge_agents or wf_agents or bridge_pending_jobs:
+            p_conc["status"] = "done"
+            p_prod["status"] = "active"
+            p_verif["status"] = "pending"
+            p_close["status"] = "pending"
+            current_phase = p_prod["label"]
+        else:
+            p_conc["status"] = "active"
+            p_prod["status"] = "pending"
+            p_verif["status"] = "pending"
+            p_close["status"] = "pending"
+            current_phase = p_conc["label"]
+
+        # Ventilation tokens & coûts sur les 4 phases (sans double-comptage)
+        if root_agent is not None:
+            step_costs = root_agent.get("_step_costs") or []
+            if not step_costs:
+                target_p = p_conc if first_prod_step is None else p_prod
+                _add_agent_to_phase(target_p, root_agent)
+            else:
+                phase_touched: Set[str] = set()
+                for sc in step_costs:
+                    si = sc.get("step_index")
+                    if archive_step is not None and isinstance(si, int) and si >= archive_step:
+                        tgt = p_close
+                    elif verif_step is not None and isinstance(si, int) and si >= verif_step:
+                        tgt = p_verif
+                    elif first_prod_step is not None and isinstance(si, int) and si >= first_prod_step:
+                        tgt = p_prod
+                    else:
+                        tgt = p_conc
+                    tgt["llm_calls"] += 1
+                    tgt["tokens"] += int(sc.get("tokens") or 0)
+                    tgt["cost_usd"] += float(sc.get("cost_usd") or 0.0)
+                    tgt["cost_2027_usd"] += float(sc.get("cost_2027_usd") or 0.0)
+                    if tgt["id"] not in phase_touched:
+                        tgt["agents"] += 1
+                        phase_touched.add(tgt["id"])
+
+        for ag in enriched_agents:
+            if ag["conversation_id"] == root_id:
+                continue
+            src = ag.get("source")
+            sp = ag.get("spawn_step_index")
+            if src in ("bridge", "workflow"):
+                _add_agent_to_phase(p_prod, ag)
+            elif archive_step is not None and isinstance(sp, int) and sp >= archive_step:
+                _add_agent_to_phase(p_close, ag)
+            elif verif_step is not None and isinstance(sp, int) and sp >= verif_step:
+                _add_agent_to_phase(p_verif, ag)
+            elif first_prod_step is not None and isinstance(sp, int) and sp >= first_prod_step:
+                _add_agent_to_phase(p_prod, ag)
+            else:
+                _add_agent_to_phase(p_conc, ag)
+
+        phases = [p_conc, p_prod, p_verif, p_close]
+        mode = "4_phases"
+
+    for ph in phases:
+        ph["cost_usd"] = round(ph["cost_usd"], 6)
+        ph["cost_2027_usd"] = round(ph["cost_2027_usd"], 6)
+        ph["cost_share_pct"] = (
+            round((ph["cost_usd"] / total_cost_float) * 100.0, 2)
+            if total_cost_float > 0
+            else 0.0
+        )
+
+    return {
+        "mode": mode,
+        "current_phase": current_phase,
+        "phases": phases,
+    }
+
+
+def _clean_pending_title(first_prompt: str, fallback_prompt: str) -> str:
+    txt = extract_user_request_text(first_prompt)
+    stripped = _GRAVITY_LEADING_AXES_RE.sub("", txt).strip()
+    if stripped:
+        return stripped if len(stripped) <= 90 else stripped[:87] + "..."
+    return _clean_user_prompt(fallback_prompt or first_prompt)
+
+
 def collect_run_metrics(
     root_id: str,
     brain_dir: Union[Path, str],
@@ -1699,6 +2229,7 @@ def collect_run_metrics(
     project: str = "",
     gravity_profile: str = "",
     bridge_db_path: Optional[Union[Path, str]] = None,
+    store_dir: Optional[Union[Path, str]] = None,
 ) -> Dict[str, Any]:
     """Collecte et agrège les métriques et coûts complets d'un arbre de conversation."""
     catalog = load_pricing_catalog(pricing_catalog_path)
@@ -1713,6 +2244,17 @@ def collect_run_metrics(
         or to_step is not None
     )
     root_node = nodes[0]
+    resolved_project = str(project or "").strip()
+    if not resolved_project:
+        meta_entry = load_session_meta(store_dir).get(root_id) or {}
+        resolved_project = str(meta_entry.get("project") or "").strip()
+    if not resolved_project:
+        resolved_project = resolve_project_from_bridge_or_transcript(
+            root_id,
+            root_node["transcript_path"],
+            bridge_db=bridge_db_path,
+        )
+
     if apply_window:
         window_info = resolve_gravity_window(
             root_node["transcript_path"],
@@ -1755,7 +2297,7 @@ def collect_run_metrics(
     unmatched_models: Set[str] = set()
     missing_transcripts: List[str] = []
     malformed_lines_total = 0
-    root_workspace = str(project or "").strip() or "root"
+    root_workspace = resolved_project or "root"
 
     bridge_pending_jobs: List[Dict[str, Any]] = []
     seen_pending_keys: Set[Tuple[str, str]] = set()
@@ -2049,12 +2591,21 @@ def collect_run_metrics(
             if str(ag.get("bridge_workspace") or ag.get("workspace") or "").strip()
         }
     )
+    milestones = _compute_session_milestones(
+        root_id=root_id,
+        root_transcript_path=root_node["transcript_path"],
+        window_info=window_info,
+        enriched_agents=enriched_agents,
+        bridge_pending_jobs=bridge_pending_jobs,
+        total_cost_float=total_cost_float,
+        is_archived=False,
+    )
 
     return {
         "schema_version": SCHEMA_VERSION,
         "label": label or f"run-{root_id[:8]}",
         "root_conversation_id": root_id,
-        "project": str(project or "").strip(),
+        "project": resolved_project,
         "gravity_profile": str(gravity_profile or "").strip(),
         "window": {
             "mode": window_info["mode"],
@@ -2102,6 +2653,7 @@ def collect_run_metrics(
         "by_model": by_model,
         "by_phase": by_phase,
         "by_workspace": by_workspace,
+        "milestones": milestones,
         "bridge_pending_jobs": bridge_pending_jobs,
         "bridge": {
             "children_count": len(bridge_agents),
@@ -2172,19 +2724,102 @@ def _load_archived_keys(history_path: Optional[Union[Path, str]]) -> Set[Tuple[s
     return keys
 
 
+def _resolve_store_dir_from_history(history_path: Optional[Union[Path, str]]) -> Optional[Path]:
+    if history_path is None:
+        return None
+    hp = Path(history_path).expanduser()
+    return hp.parent.parent if hp.parent.name == "data" else hp.parent
+
+
+def _compute_pending_milestones(
+    entries: List[Dict[str, Any]],
+    start_line_idx: int,
+    end_line_idx: Optional[int],
+    active_links: List[Dict[str, Any]],
+    pending_jobs: List[Dict[str, Any]],
+    has_workflow_children: bool,
+) -> Dict[str, Any]:
+    win_entries = [
+        e
+        for e in entries
+        if e["line_idx"] >= start_line_idx and (end_line_idx is None or e["line_idx"] < end_line_idx)
+    ]
+    has_architect = any(e.get("is_architect") for e in win_entries)
+    has_bridge = bool(active_links)
+    if not has_bridge and not has_architect:
+        return {
+            "mode": "2_phases",
+            "current_phase": "Production",
+            "phases": [
+                {"id": "production", "label": "Production", "status": "active"},
+                {"id": "cloture", "label": "Clôture / Archivé", "status": "pending"},
+            ],
+        }
+    link_steps = [int(lnk["spawn_step_index"]) for lnk in active_links if isinstance(lnk.get("spawn_step_index"), int)]
+    first_prod = min(link_steps) if link_steps else None
+    has_verif = any(
+        e.get("has_push_or_verif")
+        and (first_prod is None or (isinstance(e.get("step_index"), int) and e["step_index"] > first_prod))
+        for e in win_entries
+    )
+    if not has_verif and has_bridge and not pending_jobs and link_steps:
+        max_b = max(link_steps)
+        has_verif = any(
+            e.get("is_planner") and isinstance(e.get("step_index"), int) and e["step_index"] > max_b
+            for e in win_entries
+        )
+    has_arch_close = any(e.get("is_architect_archive") for e in win_entries)
+
+    if has_arch_close:
+        statuses = ("done", "done", "done", "active")
+        cur = "Clôture / Archivé"
+    elif has_verif:
+        statuses = ("done", "done", "active", "pending")
+        cur = "Vérification & Push"
+    elif first_prod is not None or has_bridge or has_workflow_children or pending_jobs:
+        statuses = ("done", "active", "pending", "pending")
+        cur = "Production"
+    else:
+        statuses = ("active", "pending", "pending", "pending")
+        cur = "Conception"
+
+    labels = (
+        ("conception", "Conception"),
+        ("production", "Production"),
+        ("verification", "Vérification & Push"),
+        ("cloture", "Clôture / Archivé"),
+    )
+    return {
+        "mode": "4_phases",
+        "current_phase": cur,
+        "phases": [
+            {"id": pid, "label": lbl, "status": st}
+            for (pid, lbl), st in zip(labels, statuses)
+        ],
+    }
+
+
 def list_pending_sessions(
     brain_dir: Union[Path, str],
     history_path: Optional[Union[Path, str]] = None,
     *,
     bridge_db_path: Optional[Union[Path, str]] = None,
     runs_jsonl_paths: Optional[List[Path]] = None,
+    store_dir: Optional[Union[Path, str]] = None,
+    include_ignored: bool = False,
 ) -> List[Dict[str, Any]]:
     """Liste les sessions Gravity racines ayant de l'activité LLM non encore archivée."""
     base = Path(brain_dir)
     if not base.is_dir():
         return []
 
+    eff_store = Path(store_dir).expanduser() if store_dir is not None else _resolve_store_dir_from_history(history_path)
     archived_keys = _load_archived_keys(history_path)
+    full_archived_cids = {cid for cid, wstep in archived_keys if wstep is None}
+    session_meta = load_session_meta(eff_store)
+    active_captures = load_active_captures(eff_store)
+    ignored_map = load_ignored_sessions(eff_store)
+
     known_session_ids = _collect_known_gravity_session_ids(runs_jsonl_paths)
     bridge_target_ids = load_bridge_target_conversation_ids(bridge_db_path)
     bridge_caller_ids = load_bridge_caller_conversation_ids(bridge_db_path)
@@ -2195,31 +2830,13 @@ def list_pending_sessions(
         if not cdir.is_dir():
             continue
         tpath = cdir / ".system_generated" / "logs" / "transcript.jsonl"
-        if not tpath.is_file():
+        tx = _get_transcript_index(tpath)
+        if not tx["exists"] or tx["first_prompt_raw"] is None:
             continue
 
-        first_prompt_raw: Optional[str] = None
-        has_gravity_cmd = False
-        raw_lines: List[str] = tpath.read_text(encoding="utf-8", errors="replace").splitlines()
-        for raw_line in raw_lines:
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            if obj.get("type") == "USER_INPUT":
-                content = str(obj.get("content") or "")
-                if first_prompt_raw is None:
-                    first_prompt_raw = content
-                if is_gravity_session_prompt(content):
-                    has_gravity_cmd = True
+        first_prompt_raw = str(tx["first_prompt_raw"])
+        has_gravity_cmd = bool(tx["has_gravity_cmd"])
 
-        if first_prompt_raw is None:
-            continue
         is_bridge_child = is_bridge_child_conversation(
             cdir.name,
             first_prompt_raw=first_prompt_raw,
@@ -2233,11 +2850,25 @@ def list_pending_sessions(
             has_gravity_cmd
             or (cdir.name in known_session_ids)
             or (cdir.name in bridge_caller_ids)
+            or (cdir.name in active_captures)
         )
         if not is_gravity:
             continue
 
-        win = resolve_gravity_window(tpath, current_prompt_is_metrics=False)
+        if cdir.name in full_archived_cids:
+            continue
+
+        ign_entry = ignored_map.get(cdir.name)
+        if ign_entry is not None and not include_ignored:
+            continue
+
+        cap_entry = active_captures.get(cdir.name)
+        cap_from_step = cap_entry.get("start_step") if isinstance(cap_entry, dict) else None
+        win = resolve_gravity_window(
+            tpath,
+            current_prompt_is_metrics=False,
+            from_step=cap_from_step if isinstance(cap_from_step, int) else None,
+        )
         if win.get("window_empty"):
             continue
         if (cdir.name, win.get("start_step_index")) in archived_keys:
@@ -2247,25 +2878,21 @@ def list_pending_sessions(
 
         start_idx = int(win.get("start_line_idx") or 0)
         end_idx = win.get("end_line_idx")
+        entries: List[Dict[str, Any]] = tx["entries"]
         llm_calls = 0
         last_ts: Optional[str] = None
-        for line_idx, raw_line in enumerate(raw_lines):
-            if line_idx < start_idx:
+        last_status = ""
+        for e in entries:
+            lidx = e["line_idx"]
+            if lidx < start_idx:
                 continue
-            if end_idx is not None and line_idx >= end_idx:
+            if end_idx is not None and lidx >= end_idx:
                 break
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            if obj.get("created_at"):
-                last_ts = str(obj["created_at"])
-            if obj.get("type") == "PLANNER_RESPONSE":
+            if e.get("created_at"):
+                last_ts = str(e["created_at"])
+            if e.get("status"):
+                last_status = str(e["status"])
+            if e.get("is_planner"):
                 llm_calls += 1
 
         if llm_calls == 0:
@@ -2284,37 +2911,63 @@ def list_pending_sessions(
         bridge_workspaces = sorted(
             {str(lnk.get("to_workspace") or "").strip() for lnk in active_links if lnk.get("to_workspace")}
         )
+        wf_children = discover_workflow_children(cdir.name, base)
+        milestones = _compute_pending_milestones(
+            entries,
+            start_idx,
+            end_idx,
+            active_links,
+            pending_jobs,
+            bool(wf_children),
+        )
 
-        mtime = tpath.stat().st_mtime
+        meta_entry = session_meta.get(cdir.name) or {}
+        resolved_proj = (
+            str((cap_entry or {}).get("project") or "").strip()
+            or str(meta_entry.get("project") or "").strip()
+            or resolve_project_from_bridge_or_transcript(cdir.name, tpath, bridge_db=bridge_db_path)
+        )
+
+        mtime = float(tx["mtime"] or 0.0)
         updated_at = last_ts or datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
-        title = _clean_user_prompt(win.get("first_prompt") or first_prompt_raw)
-        pending.append(
-            {
-                "conversation_id": cdir.name,
-                "title": title,
-                "window_mode": win["mode"],
-                "window_start_step": win["start_step_index"],
-                "started_at": win["start_ts"],
-                "updated_at": updated_at,
-                "llm_calls": llm_calls,
-                "bridge_children_count": len(bridge_children),
-                "bridge_pending_jobs_count": len(pending_jobs),
-                "has_pending_bridge_jobs": bool(pending_jobs),
-                "bridge_workspaces": bridge_workspaces,
-                "bridge_pending_jobs": [
-                    {
-                        "thread_id": j["thread_id"],
-                        "to_workspace": j["to_workspace"],
-                        "job_id": j["job_id"],
-                        "status": j["job_status"],
-                    }
-                    for j in pending_jobs
-                ],
-                "_mtime": mtime,
-            }
-        )
+        title = _clean_pending_title(win.get("first_prompt") or "", first_prompt_raw)
+        is_active = bool(cap_entry is not None or pending_jobs or last_status == "RUNNING")
+
+        item: Dict[str, Any] = {
+            "conversation_id": cdir.name,
+            "title": title,
+            "project": resolved_proj,
+            "window_mode": win["mode"],
+            "window_start_step": win["start_step_index"],
+            "started_at": win["start_ts"],
+            "updated_at": updated_at,
+            "llm_calls": llm_calls,
+            "is_active": is_active,
+            "active_capture": dict(cap_entry) if isinstance(cap_entry, dict) else None,
+            "current_phase": milestones["current_phase"],
+            "milestones": milestones,
+            "bridge_children_count": len(bridge_children),
+            "bridge_pending_jobs_count": len(pending_jobs),
+            "has_pending_bridge_jobs": bool(pending_jobs),
+            "bridge_workspaces": bridge_workspaces,
+            "bridge_pending_jobs": [
+                {
+                    "thread_id": j["thread_id"],
+                    "to_workspace": j["to_workspace"],
+                    "job_id": j["job_id"],
+                    "status": j["job_status"],
+                }
+                for j in pending_jobs
+            ],
+            "ignored": ign_entry is not None,
+            "_mtime": mtime,
+        }
+        if ign_entry is not None:
+            item["ignored_at"] = ign_entry.get("ignored_at") or ""
+            item["ignored_reason"] = ign_entry.get("reason") or ""
+        pending.append(item)
 
     pending.sort(key=lambda item: (-item["_mtime"], item["conversation_id"]))
     for item in pending:

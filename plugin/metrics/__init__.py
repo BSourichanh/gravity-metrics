@@ -6,6 +6,7 @@ from .audits_reader import (
     build_audit_links_by_session,
     discover_audit_roots,
     list_audits,
+    list_audits_bundle,
     read_audit,
 )
 from .bridge_links import (
@@ -15,9 +16,11 @@ from .bridge_links import (
     load_bridge_caller_conversation_ids,
     load_bridge_target_conversation_ids,
     resolve_bridge_db_path,
+    resolve_project_from_bridge_or_transcript,
 )
 from .collector import (
     METRICS_MARKER,
+    METRICS_OPEN_MARKER,
     classify_metrics_prompt,
     collect_run_metrics,
     discover_agent_tree,
@@ -31,11 +34,22 @@ from .collector import (
     list_pending_sessions,
     load_known_child_conversation_ids,
     parse_agent_transcript,
+    parse_architect_archive_prompt,
     read_gravity_profile_summary,
     resolve_conversation_id_in_brain,
     resolve_gravity_window,
     slugify_label,
     suggest_auto_label,
+)
+from .lifecycle import (
+    ignore_session,
+    load_active_captures,
+    load_ignored_sessions,
+    load_session_meta,
+    pop_active_capture,
+    record_session_meta,
+    start_active_capture,
+    unignore_session,
 )
 from .history import (
     find_archived_session,
@@ -79,12 +93,14 @@ from .store import (
     record_session_metrics,
     regenerate_views,
     resolve_store_paths,
+    update_session_metadata,
     write_session_details,
 )
 
 __all__ = [
     "SCHEMA_VERSION",
     "METRICS_MARKER",
+    "METRICS_OPEN_MARKER",
     "MAX_AUDIT_BYTES",
     "CATEGORY_ORDER",
     "CATEGORY_LABELS_FR",
@@ -92,6 +108,7 @@ __all__ = [
     "ACTIVE_BRIDGE_JOB_STATUSES",
     "discover_audit_roots",
     "list_audits",
+    "list_audits_bundle",
     "read_audit",
     "build_audit_links_by_session",
     "default_brain_dir",
@@ -100,6 +117,7 @@ __all__ = [
     "load_bridge_caller_conversation_ids",
     "load_bridge_target_conversation_ids",
     "discover_bridge_links",
+    "resolve_project_from_bridge_or_transcript",
     "default_store_dir",
     "default_history_path",
     "load_pricing_catalog",
@@ -108,6 +126,7 @@ __all__ = [
     "classify_agent",
     "extract_user_request_text",
     "classify_metrics_prompt",
+    "parse_architect_archive_prompt",
     "is_gravity_metrics_prompt",
     "is_gravity_metrics_capture_prompt",
     "is_gravity_session_prompt",
@@ -132,6 +151,14 @@ __all__ = [
     "resolve_session_index",
     "upsert_session",
     "remove_session",
+    "load_session_meta",
+    "record_session_meta",
+    "load_active_captures",
+    "start_active_capture",
+    "pop_active_capture",
+    "load_ignored_sessions",
+    "ignore_session",
+    "unignore_session",
     "render_metrics_markdown",
     "render_terminal_table",
     "render_pending_table",
@@ -148,4 +175,5 @@ __all__ = [
     "archive_conversation",
     "load_session_for_inspect",
     "apply_remove",
+    "update_session_metadata",
 ]

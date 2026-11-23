@@ -20,11 +20,15 @@ _HEX_PREFIX_RE = re.compile(r"\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){0,3}\b")
 _TITLE_RE = re.compile(r"^\s*#\s+(.+?)\s*$", re.MULTILINE)
 _DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\b")
 _VERDICT_LINE_RE = re.compile(
-    r"(?:^|\n)\s*(?:[-*]\s+)?(?:\*\*|__)?(?:Verdict|Statut|Status|Conclusion|Résultat|Result)(?:\*\*|__)?\s*[:：]\s*(.+)",
+    r"(?:^|\n)\s*(?:[-*]\s+)?(?:\*\*|__)?(?:Verdict(?:\s+global)?|Statut(?:\s+global)?|Status|Conclusion|Résultat|Result)(?:\*\*|__)?\s*[:：]\s*(?:\*\*|__)?\s*(.+)",
     re.IGNORECASE,
 )
 _VERDICT_HEADING_RE = re.compile(
-    r"(?:^|\n)\s*#{1,4}\s+(?:Verdict|Conclusion|Statut)\s*\n+([^\n#]+)",
+    r"(?:^|\n)\s*#{1,4}\s+(?:Verdict(?:\s+global)?|Conclusion|Statut(?:\s+global)?)\s*\n+([^\n#]+)",
+    re.IGNORECASE,
+)
+_CANONICAL_VERDICT_RE = re.compile(
+    r"\b(NON[\s-]+BLOQUANT|BLOQUANT|PASS|PARTIAL|PARTIEL|FAIL|UNTESTED|WARN(?:ING)?|OK|KO)\b",
     re.IGNORECASE,
 )
 _WIN_ABS_RE = re.compile(r"^[A-Za-z]:[/\\]")
@@ -210,13 +214,15 @@ def discover_audit_roots(
 
 def _classify_verdict_tone(verdict_text: str) -> str:
     up = verdict_text.upper()
+    if re.search(r"\bUNTESTED\b", up):
+        return "neutral"
     if re.search(r"(?<!NON[\s-])\bBLOQUANT\b", up):
         return "danger"
     if any(tok in up for tok in ("FAIL", "REJECT", "REFUS", "CRITIQUE", "ERROR")):
         return "danger"
     if re.search(r"\bKO\b", up):
         return "danger"
-    if any(tok in up for tok in ("WARN", "PARTIEL", "ATTENTION", "CORRIGER", "CONDITIONAL", "MITIG")):
+    if any(tok in up for tok in ("PARTIAL", "PARTIEL", "WARN", "ATTENTION", "CORRIGER", "CONDITIONAL", "MITIG")):
         return "warn"
     if "NON BLOQUANT" in up or "NON-BLOQUANT" in up:
         return "ok"
@@ -246,9 +252,20 @@ def _extract_verdict(text: str) -> Tuple[str, str]:
 
     if not raw_verdict:
         return "", "neutral"
-    val = _clean_md_inline(raw_verdict.split("|", 1)[0])
-    if len(val) > 40:
-        val = val[:37].rstrip() + "..."
+    cleaned_raw = _clean_md_inline(raw_verdict)
+    prefix = re.split(r"\s*(?:\||—|–|\s-\s)\s*", cleaned_raw, maxsplit=1)[0].strip()
+    if not prefix:
+        prefix = cleaned_raw
+    canon_m = _CANONICAL_VERDICT_RE.search(prefix)
+    if canon_m:
+        token = re.sub(r"\s+", " ", canon_m.group(1).upper())
+        if token == "WARNING":
+            token = "WARN"
+        val = token
+    else:
+        val = prefix
+        if len(val) > 40:
+            val = val[:37].rstrip() + "..."
     return val, _classify_verdict_tone(val) if val else "neutral"
 
 
@@ -439,6 +456,8 @@ def _resolve_audit_target(
             raise ValueError(f"Accès aux audits de code interdit : {audit_id!r}")
         if candidate.suffix.lower() != ".md":
             raise ValueError("Seuls les fichiers Markdown (.md) peuvent être lus.")
+        if candidate.name.startswith("_"):
+            raise ValueError(f"Fichier modèle/interne exclu des audits : {audit_id!r}")
         if candidate.is_file():
             return root, candidate
 
@@ -448,22 +467,23 @@ def _resolve_audit_target(
     raise FileNotFoundError(f"Audit introuvable : {audit_id!r}")
 
 
-def list_audits(
+def list_audits_bundle(
     *,
     records: Sequence[Dict[str, Any]] = (),
     audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
     workspace_dirs: Optional[Sequence[Union[Path, str]]] = None,
     bridge_db: Optional[Union[Path, str]] = None,
     include_cwd: bool = True,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-    """Liste les fichiers `.md` découverts dans les dossiers `audits/agents/` (hors `audits/code/`) en lecture seule."""
+) -> Dict[str, Any]:
+    """Découvre les audits `.md` (`audits/agents/`) en séparant `README.md` (`index_audit`) et excluant `_*`."""
     roots = discover_audit_roots(
         audits_dir=audits_dir,
         workspace_dirs=workspace_dirs,
         bridge_db=bridge_db,
         include_cwd=include_cwd,
     )
-    audits: List[Dict[str, Any]] = []
+    regular_raw: List[Dict[str, Any]] = []
+    index_candidates: List[Dict[str, Any]] = []
     for root in roots:
         root_resolved = root["path"].resolve()
         try:
@@ -474,26 +494,31 @@ def list_audits(
             try:
                 if not fpath.is_file() or fpath.suffix.lower() != ".md":
                     continue
+                if fpath.name.startswith("_"):
+                    continue
                 resolved_file = fpath.resolve()
+                if resolved_file.name.startswith("_"):
+                    continue
                 if not resolved_file.is_relative_to(root_resolved):
                     continue
                 if _is_code_audit_path(root_resolved, fpath, resolved_file):
                     continue
-                audits.append(
-                    _build_audit_record(root, resolved_file, records=records, include_content=False)
-                )
+                rec = _build_audit_record(root, resolved_file, records=records, include_content=False)
+                if rec.get("is_index"):
+                    index_candidates.append(rec)
+                else:
+                    regular_raw.append(rec)
             except OSError:
                 continue
 
-    pinned = sorted(
-        [a for a in audits if a.get("is_index")],
+    index_candidates.sort(
         key=lambda a: (
             str(a.get("workspace") or "").casefold(),
             str(a.get("rel_path") or "").casefold(),
         ),
     )
     regular = sorted(
-        [a for a in audits if not a.get("is_index")],
+        regular_raw,
         key=lambda a: (
             str(a.get("date") or ""),
             str(a.get("updated_at") or ""),
@@ -509,7 +534,31 @@ def list_audits(
         }
         for r in roots
     ]
-    return pinned + regular, roots_meta
+    return {
+        "audits": regular,
+        "roots": roots_meta,
+        "index_audit": index_candidates[0] if index_candidates else None,
+        "index_audits": index_candidates,
+    }
+
+
+def list_audits(
+    *,
+    records: Sequence[Dict[str, Any]] = (),
+    audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
+    workspace_dirs: Optional[Sequence[Union[Path, str]]] = None,
+    bridge_db: Optional[Union[Path, str]] = None,
+    include_cwd: bool = True,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    """Liste les fichiers `.md` découverts dans les dossiers `audits/agents/` (hors `audits/code/`, `README.md` et `_*`)."""
+    bundle = list_audits_bundle(
+        records=records,
+        audits_dir=audits_dir,
+        workspace_dirs=workspace_dirs,
+        bridge_db=bridge_db,
+        include_cwd=include_cwd,
+    )
+    return bundle["audits"], bundle["roots"]
 
 
 def read_audit(
@@ -535,16 +584,18 @@ def read_audit(
 
 
 def build_audit_links_by_session(audits: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    """Indexe les audits associés par `conversation_id` pour liens croisés bidirectionnels."""
+    """Indexe les audits associés par `conversation_id` pour liens croisés bidirectionnels (hors index)."""
     links: Dict[str, List[Dict[str, Any]]] = {}
     for audit in audits:
+        if audit.get("is_index"):
+            continue
         compact = {
             "audit_id": audit.get("audit_id") or "",
             "title": audit.get("title") or audit.get("filename") or "",
             "verdict": audit.get("verdict") or "",
             "verdict_tone": audit.get("verdict_tone") or "neutral",
             "workspace": audit.get("workspace") or "",
-            "is_index": bool(audit.get("is_index")),
+            "is_index": False,
             "date": audit.get("date") or "",
         }
         for sess in audit.get("linked_sessions") or []:

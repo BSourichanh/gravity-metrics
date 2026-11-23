@@ -21,6 +21,7 @@ from metrics import (  # noqa: E402
     build_audit_links_by_session,
     discover_audit_roots,
     list_audits,
+    list_audits_bundle,
     read_audit,
 )
 
@@ -191,26 +192,31 @@ class TestAuditsReader(unittest.TestCase):
             big_text = "# Gros Audit\n\nVerdict : WARN\n\n" + ("A" * (MAX_AUDIT_BYTES + 2048))
             (audits_dir / "2026-11-21-huge.md").write_text(big_text, encoding="utf-8")
 
+            audits_bundle = list_audits_bundle(records=records, audits_dir=audits_dir, include_cwd=False)
             audits, roots = list_audits(records=records, audits_dir=audits_dir, include_cwd=False)
             self.assertEqual(len(roots), 1)
-            self.assertEqual(len(audits), 3)
-            # README.md épinglé en premier, puis date décroissante
-            self.assertTrue(audits[0]["is_index"])
-            self.assertEqual(audits[0]["verdict_tone"], "ok")
-            self.assertEqual(audits[1]["filename"], "2026-11-22-revue.md")
-            self.assertEqual(audits[1]["verdict"], "BLOQUANT")
-            self.assertEqual(audits[1]["verdict_tone"], "danger")
+            # README.md exclu de audits / compteur / audit_links_by_session, exposé dans index_audit
+            self.assertEqual(len(audits), 2)
+            self.assertIsNotNone(audits_bundle.get("index_audit"))
+            self.assertEqual(audits_bundle["index_audit"]["filename"], "README.md")
+            self.assertEqual(audits_bundle["index_audit"]["verdict_tone"], "ok")
+            self.assertEqual(audits[0]["filename"], "2026-11-22-revue.md")
+            self.assertEqual(audits[0]["verdict"], "BLOQUANT")
+            self.assertEqual(audits[0]["verdict_tone"], "danger")
             self.assertEqual(
-                {s["label"] for s in audits[1]["linked_sessions"]},
+                {s["label"] for s in audits[0]["linked_sessions"]},
                 {"run-full-uuid", "run-prefix-uuid"},
             )
 
             links_by_sess = build_audit_links_by_session(audits)
             self.assertIn(cid_full, links_by_sess)
             self.assertIn(cid_pref, links_by_sess)
-            self.assertEqual(links_by_sess[cid_full][0]["filename"] if "filename" in links_by_sess[cid_full][0] else links_by_sess[cid_full][0]["title"], "Revue Architecture")
+            self.assertEqual(
+                links_by_sess[cid_full][0]["filename"] if "filename" in links_by_sess[cid_full][0] else links_by_sess[cid_full][0]["title"],
+                "Revue Architecture",
+            )
 
-            huge_loaded = read_audit(audits[2]["audit_id"], records=records, audits_dir=audits_dir, include_cwd=False)
+            huge_loaded = read_audit(audits[1]["audit_id"], records=records, audits_dir=audits_dir, include_cwd=False)
             self.assertTrue(huge_loaded["truncated"])
             self.assertGreater(huge_loaded["size_bytes"], MAX_AUDIT_BYTES)
             self.assertEqual(len(huge_loaded["content"].encode("utf-8")), MAX_AUDIT_BYTES)
@@ -324,7 +330,10 @@ class TestAuditsReader(unittest.TestCase):
             (flat_env / "sub" / "code" / "nested.md").write_text("# Code 2\n", encoding="utf-8")
 
             flat_audits, flat_roots = list_audits(audits_dir=flat_env, include_cwd=False)
-            self.assertEqual({a["filename"] for a in flat_audits}, {"README.md", "code.md"})
+            flat_bundle = list_audits_bundle(audits_dir=flat_env, include_cwd=False)
+            self.assertEqual({a["filename"] for a in flat_audits}, {"code.md"})
+            self.assertIsNotNone(flat_bundle.get("index_audit"))
+            self.assertEqual(flat_bundle["index_audit"]["filename"], "README.md")
             flat_root_id = flat_roots[0]["root_id"]
             with self.assertRaises(ValueError):
                 read_audit(f"{flat_root_id}:code/2026-11-22-audit-code-01.md", audits_dir=flat_env, include_cwd=False)
@@ -332,6 +341,42 @@ class TestAuditsReader(unittest.TestCase):
                 read_audit(f"{flat_root_id}:sub/code/nested.md", audits_dir=flat_env, include_cwd=False)
             ok_code_file = read_audit(f"{flat_root_id}:code.md", audits_dir=flat_env, include_cwd=False)
             self.assertEqual(ok_code_file["title"], "Fichier code.md autorisé")
+
+    def test_v050_exclusions_and_verdicts_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audits_dir = root / "audits" / "agents"
+            audits_dir.mkdir(parents=True)
+            (audits_dir / "_TEMPLATE.md").write_text("# Audit #XX\nVerdict : PASS\n", encoding="utf-8")
+            (audits_dir / "_brouillon.md").write_text("# Brouillon\nVerdict : FAIL\n", encoding="utf-8")
+            (audits_dir / "README.md").write_text("# Index Audits\nVerdict : OK\n", encoding="utf-8")
+            samples = [
+                ("2026-11-23-a.md", "# A\n**Verdict global :** PARTIAL — 2 réserves mineures\n", "PARTIAL", "warn"),
+                ("2026-11-23-b.md", "# B\n**Verdict:** WARN - attention requise\n", "WARN", "warn"),
+                ("2026-11-23-c.md", "# C\nVerdict : UNTESTED | non exécuté\n", "UNTESTED", "neutral"),
+                ("2026-11-23-d.md", "# D\nVerdict global : **OK** — conforme\n", "OK", "ok"),
+                ("2026-11-23-e.md", "# E\n**Verdict :** KO — échec critique\n", "KO", "danger"),
+                ("2026-11-23-f.md", "# F\n## Verdict global\n**PASS**\n", "PASS", "ok"),
+            ]
+            for fname, body, _, _ in samples:
+                (audits_dir / fname).write_text(body, encoding="utf-8")
+
+            bundle = list_audits_bundle(audits_dir=audits_dir, include_cwd=False)
+            audits = bundle["audits"]
+            self.assertEqual(len(audits), len(samples))
+            self.assertIsNotNone(bundle["index_audit"])
+            self.assertEqual(bundle["index_audit"]["filename"], "README.md")
+            by_name = {a["filename"]: a for a in audits}
+            self.assertNotIn("_TEMPLATE.md", by_name)
+            self.assertNotIn("_brouillon.md", by_name)
+            self.assertNotIn("README.md", by_name)
+            for fname, _, exp_verdict, exp_tone in samples:
+                self.assertEqual(by_name[fname]["verdict"], exp_verdict)
+                self.assertEqual(by_name[fname]["verdict_tone"], exp_tone)
+            # _TEMPLATE.md / _* bloqués également sur read_audit direct
+            root_id = bundle["roots"][0]["root_id"]
+            with self.assertRaises((ValueError, FileNotFoundError)):
+                read_audit(f"{root_id}:_TEMPLATE.md", audits_dir=audits_dir, include_cwd=False)
 
 
 if __name__ == "__main__":

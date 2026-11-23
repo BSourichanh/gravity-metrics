@@ -22,6 +22,11 @@ from .history import (
     to_session_record,
     upsert_session,
 )
+from .lifecycle import (
+    load_active_captures,
+    pop_active_capture,
+    unignore_session,
+)
 from .markdown_report import render_metrics_markdown, render_session_detail_markdown
 from .pricing import default_store_dir
 
@@ -160,12 +165,30 @@ def record_session_metrics(
             metrics_to_write["label"] = resolved_label
             metrics["label"] = resolved_label
 
+        ms = metrics_to_write.get("milestones")
+        if isinstance(ms, dict) and isinstance(ms.get("phases"), list):
+            new_phases = []
+            for ph in ms["phases"]:
+                if isinstance(ph, dict):
+                    p_copy = dict(ph)
+                    p_copy["status"] = "done"
+                    new_phases.append(p_copy)
+            metrics_to_write["milestones"] = {
+                "mode": ms.get("mode") or "2_phases",
+                "current_phase": "Clôture / Archivé",
+                "phases": new_phases,
+            }
+            metrics["milestones"] = metrics_to_write["milestones"]
+
         rec = to_session_record(metrics_to_write, label=resolved_label, note=note)
         updated = upsert_session(records, rec)
         save_history(history_path, updated)
         regenerate_views(store_dir, updated)
         if not summary_only:
             write_session_details(store_dir, rec["detail_slug"], metrics_to_write)
+        if cid:
+            pop_active_capture(cid, store_dir=store_dir)
+            unignore_session(cid, store_dir=store_dir)
 
     saved_rec = next(
         (
@@ -191,6 +214,7 @@ def archive_conversation(
     pricing_profile: str = "2026_nov_standard",
     gravity_window: bool = True,
     full_conversation: bool = False,
+    from_step: Optional[int] = None,
     project: str = "",
     gravity_profile: str = "",
     summary_only: bool = False,
@@ -199,26 +223,41 @@ def archive_conversation(
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     """Résout un UUID ou préfixe, collecte la session et l'archive avec garde-fous."""
     cid = resolve_conversation_id_in_brain(target, brain_dir)
+    eff_from_step = from_step
+    eff_label = label
+    eff_project = project
+    if not full_conversation and eff_from_step is None:
+        active_cap = load_active_captures(store_dir).get(cid)
+        if isinstance(active_cap, dict):
+            if isinstance(active_cap.get("start_step"), int):
+                eff_from_step = active_cap["start_step"]
+            if not eff_label.strip() and active_cap.get("label"):
+                eff_label = str(active_cap["label"]).strip()
+            if not eff_project.strip() and active_cap.get("project"):
+                eff_project = str(active_cap["project"]).strip()
+
     metrics = collect_run_metrics(
         root_id=cid,
         brain_dir=brain_dir,
         pricing_catalog_path=catalog_path,
         pricing_profile=pricing_profile,
-        label=label,
+        label=eff_label,
         gravity_window=bool(gravity_window and not full_conversation),
         full_conversation=bool(full_conversation),
-        project=project,
+        from_step=eff_from_step if not full_conversation else None,
+        project=eff_project,
         gravity_profile=gravity_profile,
         bridge_db_path=bridge_db_path,
+        store_dir=store_dir,
     )
     saved_rec, records = record_session_metrics(
         metrics,
         store_dir=store_dir,
         history_path=history_path,
-        label=label,
+        label=eff_label,
         note=note,
         summary_only=summary_only,
-        auto_label=not bool(label.strip()),
+        auto_label=not bool(eff_label.strip()),
         force=force,
     )
     return saved_rec, records, metrics
@@ -265,8 +304,72 @@ def load_session_for_inspect(
         pricing_profile=pricing_profile,
         label=label,
         bridge_db_path=bridge_db_path,
+        store_dir=store_dir,
     )
     return metrics, slug
+
+
+def update_session_metadata(
+    target: str,
+    *,
+    store_dir: Path,
+    history_path: Path,
+    label: Optional[str] = None,
+    project: Optional[str] = None,
+    note: Optional[str] = None,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Met à jour label, projet ou note d'une session archivée sans modifier ses métriques financières."""
+    with history_lock(history_path):
+        records = load_history(history_path)
+        if not records:
+            raise ValueError("Historique vide.")
+        idx = resolve_session_index(records, target)
+        rec = dict(records[idx])
+        cid = str(rec.get("conversation_id") or "")
+        old_slug = rec.get("detail_slug") or slugify_label(
+            str(rec.get("label") or ""), f"session-{cid[:8]}"
+        )
+
+        if label is not None and label.strip():
+            new_label = label.strip()
+            conflict = any(
+                i != idx and str(r.get("label") or "").strip() == new_label
+                for i, r in enumerate(records)
+            )
+            if conflict:
+                raise ValueError(f"Un autre rapport porte déjà le label {new_label!r}.")
+            rec["label"] = new_label
+            new_slug = slugify_label(new_label, f"session-{cid[:8]}")
+        else:
+            new_slug = old_slug
+
+        if project is not None:
+            rec["project"] = _harmonize_project_name(project, [r for i, r in enumerate(records) if i != idx])
+        if note is not None:
+            rec["note"] = note.strip()
+
+        rec["detail_slug"] = new_slug
+        records[idx] = rec
+
+        reports_dir = store_dir / "reports"
+        old_json = reports_dir / f"{old_slug}.json"
+        old_md = reports_dir / f"{old_slug}.md"
+        if old_json.is_file():
+            try:
+                det = json.loads(old_json.read_text(encoding="utf-8"))
+                if isinstance(det, dict):
+                    det["label"] = rec["label"]
+                    det["project"] = rec.get("project") or ""
+                    if new_slug != old_slug:
+                        old_json.unlink(missing_ok=True)
+                        old_md.unlink(missing_ok=True)
+                    write_session_details(store_dir, new_slug, det)
+            except Exception:
+                pass
+
+        save_history(history_path, records)
+        regenerate_views(store_dir, records)
+    return dict(rec), records
 
 
 def apply_remove(

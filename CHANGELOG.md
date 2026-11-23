@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-23
+
+### Added
+- **Hybrid Capture Lifecycle & `SessionStart` Hook (`plugin/hooks/session_start_metrics.py`, `pre_invocation_metrics.py`, `plugin/metrics/lifecycle.py`, `hooks.json`):**
+  - Added lightweight `SessionStart` hook recording workspace/project provenance into centralized `$GRAVITY_METRICS_HOME/session_meta.json` (fallback via `bridge.db` RO `from_workspace` and `canonical_path` matching).
+  - Added zero-token `/gravity-metrics start [label]` (`active_captures.json`) and `/gravity-metrics stop [label]` / `finish` commands, plus immediate auto-archival on `/gravity-architect archive <slug>` (preserving `PendingBridgeJobsError`).
+  - Added 4 automatic zero-token cycle milestones (`Conception` → `Production` → `Vérification & Push` → `Clôture / Archivé`, with 2-phase fallback in single-repo sessions) and per-phase token/cost attribution.
+  - Added reversible ignore list (`ignored.json`) and post-archival metadata editing (`metrics_ignore_session`, `metrics_unignore_session`, `metrics_update_session_meta`), plus `project` parameter on `metrics_archive_session`.
+- **Sober 3-Space MCP App UI (`plugin/mcp/widget_html.py`, `plugin/mcp/ui/`):**
+  - Replaced the 4-tab layout with 3 spaces (`Synthèse`, `Sessions` [`Archivées`, `À archiver`, `Comparer`], `Audits Agents`) separated by a visual divider and a dedicated **`Index & Matrice`** button for `README.md`.
+  - Adaptive theme inheriting `hostContext.styles.variables` (light/dark/Nord) with neutral graphite/zinc fallbacks, `tabular-nums`, single contextual `<select>` Project, conditional `2026 / 2027` toggle, inline `Archiver…` drawer, inline session metadata editor, and `74ch` audit reader.
+
+### Fixed
+- **P0 Audits, Deduplication & Performance (`plugin/metrics/audits_reader.py`, `history.py`, `collector.py`, `server.py`, `markdown_view.py`):**
+  - Excluded `_TEMPLATE.md` and `_*` files from `Audits Agents`; moved `README.md` (`is_index`) out of the audits list, badge counter, and `audit_links_by_session` into `index_audit`.
+  - Fixed verdict extraction (`Verdict(?:\s+global)?` with `**` before/after `:`, canonical token extraction before `—`/`-`/`|`, and `PARTIAL`/`WARN`/`OK`/`KO` tone classification).
+  - Fixed `--full` (`window_start_step is None`) deduplication across `find_archived_session()` and `list_pending_sessions()`, and fixed `resolve_gravity_window(current_prompt_is_metrics=False)` to surface new post-capture activity in `À archiver`.
+  - Added `(mtime_ns, size)` incremental caching in `collector.py` and `bridge_links.py`, plus separate source-signature pre-checks (`hist_sig`, `pending_sig`, `audits_sig`) in `server.py` for `< 5 ms` unchanged polls.
+  - Fixed infinite loop on `&gt;` in `markdown_view.py` and added `h1..h6`, GitHub-style callouts (`[!NOTE]`, `[!WARNING]`, `[!TIP]`, `[!CAUTION]`), nested lists, and link distinction.
+  - Updated Workflow profile lookup to `$GRAVITY_HOME/workflow/workspaces/<hash>/profile.json` > `.agents/gravity-workflow/profile.json` > `.agents/gravity/profile.json`.
+  - Fixed `/gravity-metrics pending` to open `view="pending"` (with `--project` support) and prevented incremental JS polling from wiping `detailCache`, scroll, focus, or `A vs B` state.
+
+### Changed
+- **Read-Only Bare `/gravity-metrics` & Version Bump (`plugin/hooks/pre_invocation_metrics.py`, `plugin/plugin.json`, `plugin/mcp/server.py`, `plugin/mcp/ui/app_js.py`, `README.md`, `plugin/README.md`, `CHANGELOG.md`):**
+  - Bare `/gravity-metrics` now opens the dashboard in read-only mode without mutating `history.jsonl`.
+  - Bumped manifest, MCP server, UI `appInfo`, and documentation to `0.5.0`.
+
 ## [0.4.3] - 2026-11-22
 
 ### Fixed

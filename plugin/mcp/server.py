@@ -4,6 +4,7 @@
 from collections import Counter, defaultdict
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,34 +22,119 @@ from metrics import (  # noqa: E402
     archive_conversation,
     build_audit_links_by_session,
     default_brain_dir,
-    list_audits,
+    discover_audit_roots,
+    ignore_session,
+    list_audits_bundle,
     list_pending_sessions,
+    load_active_captures,
     load_history,
     load_session_for_inspect,
     read_audit,
+    resolve_bridge_db_path,
     resolve_session_index,
     resolve_store_paths,
     slugify_label,
+    unignore_session,
+    update_session_metadata,
 )
 from mcp.widget_html import render_mcp_widget_html  # noqa: E402
 
 SERVER_NAME = "gravity-metrics"
-SERVER_VERSION = "0.4.3"
+SERVER_VERSION = "0.5.0"
 APP_URI = "ui://gravity-metrics/dashboard.html"
 APP_MIME = "text/html;profile=mcp-app"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 MAX_TRAJECTORY_BYTES = 450_000
-VALID_DASHBOARD_VIEWS = {"overview", "reports", "pending", "audits", "history", "detail"}
+VALID_DASHBOARD_VIEWS = {
+    "overview",
+    "sessions",
+    "reports",
+    "pending",
+    "compare",
+    "audits",
+    "history",
+    "detail",
+}
+
+_STATE_CACHE: Dict[Tuple[str, ...], Dict[str, Any]] = {}
+
+
+def _stat_token(path: Path) -> str:
+    try:
+        if not path.exists():
+            return "missing"
+        st = path.stat()
+        return f"{st.st_mtime_ns}:{st.st_size}"
+    except OSError:
+        return "error"
 
 
 def _history_signature(history_path: Path) -> str:
     if not history_path.is_file():
         return "missing"
-    try:
-        st = history_path.stat()
-        return f"{st.st_mtime_ns}:{st.st_size}"
-    except OSError:
-        return "error"
+    return _stat_token(history_path)
+
+
+def _compute_hist_source_sig(store_dir: Path, history_path: Path) -> str:
+    parts = [
+        _stat_token(history_path),
+        _stat_token(store_dir / "active_captures.json"),
+        _stat_token(store_dir / "session_meta.json"),
+        _stat_token(store_dir / "ignored.json"),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def _compute_pending_source_sig(
+    brain_dir: Path,
+    store_dir: Path,
+    history_path: Path,
+    bridge_db: Path,
+) -> str:
+    items: List[str] = [
+        f"hist:{_stat_token(history_path)}",
+        f"db:{_stat_token(bridge_db)}",
+        f"cap:{_stat_token(store_dir / 'active_captures.json')}",
+        f"ign:{_stat_token(store_dir / 'ignored.json')}",
+        f"meta:{_stat_token(store_dir / 'session_meta.json')}",
+    ]
+    if brain_dir.is_dir():
+        try:
+            for cdir in sorted(brain_dir.iterdir(), key=lambda p: p.name):
+                if not cdir.is_dir():
+                    continue
+                tp = cdir / ".system_generated" / "logs" / "transcript.jsonl"
+                if tp.is_file():
+                    items.append(f"{cdir.name}:{_stat_token(tp)}")
+        except OSError:
+            items.append("brain-err")
+    return hashlib.sha256("|".join(items).encode("utf-8")).hexdigest()[:12]
+
+
+def _compute_audits_source_sig(hist_src_sig: str) -> str:
+    roots = discover_audit_roots()
+    items: List[str] = [f"h:{hist_src_sig}"]
+    for r in roots:
+        rpath = r["path"]
+        items.append(f"r:{r['root_id']}")
+        try:
+            for fpath in sorted(rpath.rglob("*.md")):
+                if not fpath.is_file() or fpath.name.startswith("_"):
+                    continue
+                items.append(f"{fpath.name}:{_stat_token(fpath)}")
+        except OSError:
+            continue
+    return hashlib.sha256("|".join(items).encode("utf-8")).hexdigest()[:12]
+
+
+def _state_cache_key(store_dir: Path, history_path: Path, brain_dir: Path, bridge_db: Path) -> Tuple[str, ...]:
+    return (
+        str(store_dir),
+        str(history_path),
+        str(brain_dir),
+        str(bridge_db),
+        os.environ.get("GRAVITY_AUDITS_DIR", "").strip(),
+    )
 
 
 def _canonical_projects_map(records: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -83,16 +169,20 @@ def _resolve_slug_for_rec(rec: Optional[Dict[str, Any]], cid: str, label: str) -
     return slugify_label(label, f"session-{cid[:8]}")
 
 
-def _pending_signature(pending: List[Dict[str, Any]]) -> str:
+def _pending_signature(pending: List[Dict[str, Any]], ignored_pending: List[Dict[str, Any]]) -> str:
     compact = [
         (
             p.get("conversation_id"),
             p.get("llm_calls"),
             p.get("bridge_children_count"),
             p.get("bridge_pending_jobs_count"),
+            p.get("current_phase"),
+            p.get("project"),
             p.get("updated_at"),
+            bool(p.get("active_capture")),
+            bool(p.get("ignored")),
         )
-        for p in pending
+        for p in list(pending) + list(ignored_pending)
     ]
     raw = json.dumps(compact, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
@@ -159,34 +249,133 @@ def _aggregate_by_project(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return out
 
 
-def _audits_signature(audits: List[Dict[str, Any]]) -> str:
-    compact = [(a.get("audit_id"), a.get("size_bytes"), a.get("updated_at")) for a in audits]
+def _audits_signature(
+    audits: List[Dict[str, Any]],
+    index_audit: Optional[Dict[str, Any]] = None,
+) -> str:
+    compact = [(a.get("audit_id"), a.get("size_bytes"), a.get("updated_at"), a.get("verdict")) for a in audits]
+    if index_audit:
+        compact.append((index_audit.get("audit_id"), index_audit.get("size_bytes"), index_audit.get("updated_at"), "INDEX"))
     raw = json.dumps(compact, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
-def _load_state_snapshot(store_dir: Path, history_path: Path) -> Dict[str, Any]:
-    hist_sig = _history_signature(history_path)
-    records = load_history(history_path)
-    projects = _collect_projects(records)
-    by_project = _aggregate_by_project(records)
-    metrics_md_uri = _file_uri_if_exists(store_dir / "METRICS.md")
-    pending_sessions = list_pending_sessions(default_brain_dir(), history_path)
-    audits, audits_roots = list_audits(records=records)
-    audit_links_by_session = build_audit_links_by_session(audits)
-    sig = f"{hist_sig}|p:{_pending_signature(pending_sessions)}|a:{_audits_signature(audits)}"
+def _load_state_snapshot(
+    store_dir: Path,
+    history_path: Path,
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    brain_dir = default_brain_dir()
+    bridge_db = resolve_bridge_db_path()
+    ckey = _state_cache_key(store_dir, history_path, brain_dir, bridge_db)
+    cached = None if force_refresh else _STATE_CACHE.get(ckey)
+
+    hist_src_sig = _compute_hist_source_sig(store_dir, history_path)
+    pending_src_sig = _compute_pending_source_sig(brain_dir, store_dir, history_path, bridge_db)
+    audits_src_sig = _compute_audits_source_sig(hist_src_sig)
+
+    if cached and cached.get("hist_src_sig") == hist_src_sig:
+        hist_data = cached["hist_data"]
+        hist_sig = cached["hist_sig"]
+    else:
+        records = load_history(history_path)
+        projects = _collect_projects(records)
+        by_project = _aggregate_by_project(records)
+        metrics_md_uri = _file_uri_if_exists(store_dir / "METRICS.md")
+        active_captures = load_active_captures(store_dir)
+        hist_file_sig = _history_signature(history_path)
+        hist_sig = hashlib.sha256(
+            f"{hist_file_sig}|{len(records)}|{json.dumps(active_captures, sort_keys=True)}".encode("utf-8")
+        ).hexdigest()[:12]
+        hist_data = {
+            "records": records,
+            "projects": projects,
+            "by_project": by_project,
+            "metrics_md_uri": metrics_md_uri,
+            "active_captures": active_captures,
+        }
+
+    if cached and cached.get("pending_src_sig") == pending_src_sig:
+        pending_data = cached["pending_data"]
+        pending_sig = cached["pending_sig"]
+    else:
+        all_pending = list_pending_sessions(
+            brain_dir,
+            history_path,
+            bridge_db_path=bridge_db,
+            store_dir=store_dir,
+            include_ignored=True,
+        )
+        pending_sessions = [p for p in all_pending if not p.get("ignored")]
+        ignored_sessions = [p for p in all_pending if p.get("ignored")]
+        pending_sig = _pending_signature(pending_sessions, ignored_sessions)
+        pending_data = {
+            "pending_sessions": pending_sessions,
+            "ignored_sessions": ignored_sessions,
+        }
+
+    if cached and cached.get("audits_src_sig") == audits_src_sig:
+        audits_data = cached["audits_data"]
+        audits_sig = cached["audits_sig"]
+    else:
+        bundle = list_audits_bundle(records=hist_data["records"], bridge_db=bridge_db)
+        audits = bundle["audits"]
+        audits_roots = bundle["roots"]
+        index_audit = bundle["index_audit"]
+        index_audits = bundle["index_audits"]
+        audit_links_by_session = build_audit_links_by_session(audits)
+        audits_sig = _audits_signature(audits, index_audit)
+        audits_data = {
+            "audits": audits,
+            "audits_roots": audits_roots,
+            "audits_count": len(audits),
+            "index_audit": index_audit,
+            "index_audits": index_audits,
+            "audit_links_by_session": audit_links_by_session,
+        }
+
+    sig = f"h:{hist_sig}|p:{pending_sig}|a:{audits_sig}"
+    _STATE_CACHE[ckey] = {
+        "hist_src_sig": hist_src_sig,
+        "pending_src_sig": pending_src_sig,
+        "audits_src_sig": audits_src_sig,
+        "hist_sig": hist_sig,
+        "pending_sig": pending_sig,
+        "audits_sig": audits_sig,
+        "signature": sig,
+        "hist_data": hist_data,
+        "pending_data": pending_data,
+        "audits_data": audits_data,
+    }
+
     return {
         "signature": sig,
-        "records": records,
-        "projects": projects,
-        "by_project": by_project,
-        "metrics_md_uri": metrics_md_uri,
-        "pending_sessions": pending_sessions,
-        "audits": audits,
-        "audits_roots": audits_roots,
-        "audits_count": len(audits),
-        "audit_links_by_session": audit_links_by_session,
+        "hist_sig": hist_sig,
+        "pending_sig": pending_sig,
+        "audits_sig": audits_sig,
+        **hist_data,
+        **pending_data,
+        **audits_data,
     }
+
+
+def _fast_unchanged_signature(store_dir: Path, history_path: Path, since_sig: str) -> Optional[str]:
+    if not since_sig:
+        return None
+    brain_dir = default_brain_dir()
+    bridge_db = resolve_bridge_db_path()
+    ckey = _state_cache_key(store_dir, history_path, brain_dir, bridge_db)
+    cached = _STATE_CACHE.get(ckey)
+    if not cached or cached.get("signature") != since_sig:
+        return None
+    if _compute_hist_source_sig(store_dir, history_path) != cached.get("hist_src_sig"):
+        return None
+    if _compute_pending_source_sig(brain_dir, store_dir, history_path, bridge_db) != cached.get("pending_src_sig"):
+        return None
+    if _compute_audits_source_sig(cached["hist_src_sig"]) != cached.get("audits_src_sig"):
+        return None
+    return str(cached["signature"])
 
 
 def _tool_definitions() -> List[Dict[str, Any]]:
@@ -211,8 +400,17 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     },
                     "view": {
                         "type": "string",
-                        "enum": ["overview", "reports", "pending", "audits", "history", "detail"],
-                        "description": "Onglet/vue initial souhaité : overview, reports, pending, audits, history ou detail (optionnel).",
+                        "enum": [
+                            "overview",
+                            "sessions",
+                            "reports",
+                            "pending",
+                            "compare",
+                            "audits",
+                            "history",
+                            "detail",
+                        ],
+                        "description": "Espace/vue initial souhaité : overview, sessions, pending, compare, audits, reports, history ou detail (optionnel).",
                     },
                 },
             },
@@ -279,6 +477,10 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                         "type": "string",
                         "description": "Label optionnel (auto-généré si omis).",
                     },
+                    "project": {
+                        "type": "string",
+                        "description": "Nom du projet associé (optionnel, résolu automatiquement si omis).",
+                    },
                     "note": {
                         "type": "string",
                         "description": "Note optionnelle.",
@@ -295,6 +497,76 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                         "type": "string",
                         "description": "Profil tarifaire (défaut: 2026_nov_standard).",
                     },
+                },
+                "required": ["conversation_id"],
+            },
+            "_meta": {
+                "ui": {"visibility": ["app"]},
+            },
+        },
+        {
+            "name": "metrics_update_session_meta",
+            "title": "Mettre à jour les métadonnées d'une session",
+            "description": "Modifie label, projet ou note d'une session archivée sans altérer ses métriques financières.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Label ou UUID de la session archivée.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Nouveau label (optionnel).",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Nom du projet (optionnel).",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Note libre (optionnel).",
+                    },
+                },
+                "required": ["target"],
+            },
+            "_meta": {
+                "ui": {"visibility": ["app"]},
+            },
+        },
+        {
+            "name": "metrics_ignore_session",
+            "title": "Ignorer une session en attente",
+            "description": "Masque une conversation de la file À archiver dans ignored.json (réversible).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "UUID de la conversation à masquer.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Raison optionnelle.",
+                    },
+                },
+                "required": ["conversation_id"],
+            },
+            "_meta": {
+                "ui": {"visibility": ["app"]},
+            },
+        },
+        {
+            "name": "metrics_unignore_session",
+            "title": "Restaurer une session ignorée",
+            "description": "Retire une conversation de ignored.json pour la réafficher dans À archiver.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "UUID de la conversation à restaurer.",
+                    }
                 },
                 "required": ["conversation_id"],
             },
@@ -327,7 +599,7 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         {
             "name": "metrics_list_audits",
             "title": "Lister les Audits Agents Markdown",
-            "description": "Découvre en lecture seule les fichiers Markdown des dossiers audits/agents/ (onglet Audits Agents, hors audits/code/) et leurs liens de sessions.",
+            "description": "Découvre en lecture seule les fichiers Markdown des dossiers audits/agents/ (onglet Audits Agents, hors audits/code/ et hors README.md index) et leurs liens de sessions.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -384,11 +656,17 @@ def _tool_err(message: str) -> Dict[str, Any]:
 def _state_payload(snap: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "signature": snap["signature"],
+        "hist_sig": snap["hist_sig"],
+        "pending_sig": snap["pending_sig"],
+        "audits_sig": snap["audits_sig"],
         "records": snap["records"],
         "projects": snap["projects"],
         "by_project": snap["by_project"],
         "pending_sessions": snap["pending_sessions"],
+        "ignored_sessions": snap["ignored_sessions"],
+        "active_captures": snap["active_captures"],
         "audits_count": snap["audits_count"],
+        "index_audit": snap["index_audit"],
         "audit_links_by_session": snap["audit_links_by_session"],
         "metrics_md_uri": snap["metrics_md_uri"],
     }
@@ -409,7 +687,7 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
     req_view = str(args.get("view") or "").strip().lower()
 
     initial_target = ""
-    initial_view = req_view if req_view in VALID_DASHBOARD_VIEWS else "history"
+    initial_view = req_view if req_view in VALID_DASHBOARD_VIEWS else "overview"
     initial_detail: Optional[Dict[str, Any]] = None
     initial_detail_slug = ""
     initial_detail_md_uri = ""
@@ -423,7 +701,7 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
                 rec_proj = str(rec["project"]).strip()
                 initial_project = proj_map.get(rec_proj.casefold(), rec_proj)
                 initial_scope = "project"
-            if req_view in ("", "detail", "reports"):
+            if req_view in ("", "detail", "reports", "sessions"):
                 initial_view = "reports" if req_view == "reports" else "detail"
                 metrics, slug = load_session_for_inspect(
                     initial_target,
@@ -442,9 +720,9 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             initial_target = ""
             if initial_view == "detail":
-                initial_view = "history"
+                initial_view = "overview"
     elif initial_view == "detail":
-        initial_view = "history"
+        initial_view = "overview"
 
     structured: Dict[str, Any] = _state_payload(snap)
     structured.update(
@@ -499,6 +777,10 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_metrics_get_state(args: Dict[str, Any]) -> Dict[str, Any]:
     store_dir, history_path = resolve_store_paths()
     since_sig = str(args.get("since_signature") or "").strip()
+    fast_sig = _fast_unchanged_signature(store_dir, history_path, since_sig)
+    if fast_sig is not None:
+        return _tool_ok("Inchangé.", {"changed": False, "signature": fast_sig})
+
     snap = _load_state_snapshot(store_dir, history_path)
     sig = snap["signature"]
     if since_sig and since_sig == sig:
@@ -548,6 +830,7 @@ def _handle_metrics_archive_session(args: Dict[str, Any]) -> Dict[str, Any]:
     catalog_path = PLUGIN_ROOT / "config" / "pricing_catalog.json"
 
     label = str(args.get("label") or "").strip()
+    project = str(args.get("project") or "").strip()
     note = str(args.get("note") or "").strip()
     full = bool(args.get("full", False))
     force = bool(args.get("force", False))
@@ -565,12 +848,13 @@ def _handle_metrics_archive_session(args: Dict[str, Any]) -> Dict[str, Any]:
             pricing_profile=profile,
             gravity_window=not full,
             full_conversation=full,
+            project=project,
             force=force,
         )
     except PendingBridgeJobsError as exc:
         return _tool_err(str(exc))
 
-    snap = _load_state_snapshot(store_dir, history_path)
+    snap = _load_state_snapshot(store_dir, history_path, force_refresh=True)
     already = bool(saved_rec.get("already_archived"))
     msg = (
         f"Session '{saved_rec.get('label')}' déjà archivée (immuable)."
@@ -580,6 +864,54 @@ def _handle_metrics_archive_session(args: Dict[str, Any]) -> Dict[str, Any]:
     payload = _state_payload(snap)
     payload.update({"archived": saved_rec, "already_archived": already})
     return _tool_ok(msg, payload)
+
+
+def _handle_metrics_update_session_meta(args: Dict[str, Any]) -> Dict[str, Any]:
+    target = str(args.get("target") or "").strip()
+    if not target:
+        return _tool_err("Le paramètre 'target' est requis.")
+    store_dir, history_path = resolve_store_paths()
+    label_val = str(args["label"]).strip() if "label" in args and args["label"] is not None else None
+    proj_val = str(args["project"]).strip() if "project" in args and args["project"] is not None else None
+    note_val = str(args["note"]).strip() if "note" in args and args["note"] is not None else None
+
+    try:
+        updated_rec, _ = update_session_metadata(
+            target,
+            store_dir=store_dir,
+            history_path=history_path,
+            label=label_val,
+            project=proj_val,
+            note=note_val,
+        )
+    except (KeyError, ValueError) as exc:
+        return _tool_err(str(exc))
+
+    snap = _load_state_snapshot(store_dir, history_path, force_refresh=True)
+    payload = _state_payload(snap)
+    payload["updated"] = updated_rec
+    return _tool_ok(f"Métadonnées de '{updated_rec.get('label')}' mises à jour.", payload)
+
+
+def _handle_metrics_ignore_session(args: Dict[str, Any]) -> Dict[str, Any]:
+    cid = str(args.get("conversation_id") or "").strip()
+    if not cid:
+        return _tool_err("Le paramètre 'conversation_id' est requis.")
+    reason = str(args.get("reason") or "").strip()
+    store_dir, history_path = resolve_store_paths()
+    ignore_session(cid, reason=reason, store_dir=store_dir)
+    snap = _load_state_snapshot(store_dir, history_path, force_refresh=True)
+    return _tool_ok(f"Session '{cid[:8]}' masquée.", _state_payload(snap))
+
+
+def _handle_metrics_unignore_session(args: Dict[str, Any]) -> Dict[str, Any]:
+    cid = str(args.get("conversation_id") or "").strip()
+    if not cid:
+        return _tool_err("Le paramètre 'conversation_id' est requis.")
+    store_dir, history_path = resolve_store_paths()
+    unignore_session(cid, store_dir=store_dir)
+    snap = _load_state_snapshot(store_dir, history_path, force_refresh=True)
+    return _tool_ok(f"Session '{cid[:8]}' restaurée.", _state_payload(snap))
 
 
 def _handle_metrics_remove_session(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -594,7 +926,7 @@ def _handle_metrics_remove_session(args: Dict[str, Any]) -> Dict[str, Any]:
         history_path=history_path,
         purge_reports=purge_reports,
     )
-    snap = _load_state_snapshot(store_dir, history_path)
+    snap = _load_state_snapshot(store_dir, history_path, force_refresh=True)
     payload = _state_payload(snap)
     payload.update({"removed": removed, "remaining": remaining})
     return _tool_ok(
@@ -606,7 +938,11 @@ def _handle_metrics_remove_session(args: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_metrics_list_audits(args: Dict[str, Any]) -> Dict[str, Any]:
     _, history_path = resolve_store_paths()
     records = load_history(history_path)
-    audits, roots = list_audits(records=records)
+    bundle = list_audits_bundle(records=records)
+    audits = bundle["audits"]
+    roots = bundle["roots"]
+    index_audit = bundle["index_audit"]
+    index_audits = bundle["index_audits"]
 
     ws_filter = str(args.get("workspace") or "").strip().casefold()
     query = str(args.get("query") or "").strip().casefold()
@@ -635,6 +971,8 @@ def _handle_metrics_list_audits(args: Dict[str, Any]) -> Dict[str, Any]:
             "audits": filtered,
             "roots": roots,
             "count": len(filtered),
+            "index_audit": index_audit,
+            "index_audits": index_audits,
             "audit_links_by_session": links,
         },
     )
@@ -661,6 +999,9 @@ _TOOL_DISPATCH = {
     "metrics_get_state": _handle_metrics_get_state,
     "metrics_get_session": _handle_metrics_get_session,
     "metrics_archive_session": _handle_metrics_archive_session,
+    "metrics_update_session_meta": _handle_metrics_update_session_meta,
+    "metrics_ignore_session": _handle_metrics_ignore_session,
+    "metrics_unignore_session": _handle_metrics_unignore_session,
     "metrics_remove_session": _handle_metrics_remove_session,
     "metrics_list_audits": _handle_metrics_list_audits,
     "metrics_read_audit": _handle_metrics_read_audit,

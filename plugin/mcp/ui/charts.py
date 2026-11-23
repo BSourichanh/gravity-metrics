@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Générateurs de graphiques SVG et barres proportionnelles % (100 % stdlib)."""
+"""Générateurs de graphiques SVG et barres HTML/CSS lisibles à toutes largeurs (100 % stdlib)."""
 
 CHARTS_JS = r"""
   const PALETTE = [
@@ -11,11 +11,21 @@ CHARTS_JS = r"""
     "var(--gm-c7)"
   ];
 
+  function sortRecordsChrono(records) {
+    return (records || []).slice().sort((a, b) => {
+      const ta = String(a.started_at || a.added_at || "");
+      const tb = String(b.started_at || b.added_at || "");
+      if (ta < tb) return -1;
+      if (ta > tb) return 1;
+      return String(a.label || "").localeCompare(String(b.label || ""));
+    });
+  }
+
   function renderCostEvolutionSvg(records, activeTarget) {
     if (!records.length) return '<div class="empty">Aucune session dans cette sélection.</div>';
-    const ptsRecs = records.slice(-24);
-    const width = 620, height = 200;
-    const padL = 54, padR = 22, padT = 18, padB = 38;
+    const ptsRecs = sortRecordsChrono(records).slice(-24);
+    const width = 620, height = 195;
+    const padL = 54, padR = 22, padT = 18, padB = 36;
     const plotW = width - padL - padR;
     const plotH = height - padT - padB;
     const costs = ptsRecs.map(recCost);
@@ -33,7 +43,7 @@ CHARTS_JS = r"""
     }
     if (ptsRecs.length > 1) {
       const poly = ptsRecs.map((_, i) => xAt(i).toFixed(1) + "," + yAt(costs[i]).toFixed(1)).join(" ");
-      svg += '<polyline fill="none" stroke="var(--gm-c1)" stroke-width="2.2" points="' + poly + '"/>';
+      svg += '<polyline fill="none" stroke="var(--gm-accent)" stroke-width="2" points="' + poly + '"/>';
     }
     const labelStep = ptsRecs.length > 10 ? Math.ceil(ptsRecs.length / 7) : 1;
     ptsRecs.forEach((r, i) => {
@@ -44,8 +54,8 @@ CHARTS_JS = r"""
       const isAct = activeTarget && (rowKey === activeTarget || r.conversation_id === activeTarget);
       const shortLbl = lbl.length <= 11 ? lbl : lbl.slice(0, 9) + "..";
       svg += '<g class="svg-pt" data-action="open-detail" data-target="' + esc(rowKey) + '" style="cursor:pointer">';
-      svg += '<title>' + esc(lbl) + ' : $' + costs[i].toFixed(4) + '</title>';
-      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (isAct ? "6.2" : "4.8") + '" fill="' + (isAct ? "var(--gm-c4)" : "var(--gm-c1)") + '" stroke="var(--gm-bg-card)" stroke-width="2"/>';
+      svg += '<title>' + esc(lbl) + ' : $' + costs[i].toFixed(4) + ' (' + esc(fmtDate(r)) + ')</title>';
+      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (isAct ? "5.8" : "4.2") + '" fill="' + (isAct ? "var(--gm-c4)" : "var(--gm-accent)") + '" stroke="var(--gm-bg-card)" stroke-width="2"/>';
       if (ptsRecs.length <= 12 || i % labelStep === 0 || i === ptsRecs.length - 1) {
         svg += '<text x="' + cx + '" y="' + (height - 10) + '" text-anchor="middle" fill="var(--gm-fg-muted)" font-size="10">' + esc(shortLbl) + '</text>';
       }
@@ -55,63 +65,62 @@ CHARTS_JS = r"""
     return svg;
   }
 
-  function renderCategoryStackedSvg(records) {
+  function renderCategoryHtmlBars(records) {
     if (!records.length) return '<div class="empty">Aucune session dans cette sélection.</div>';
-    const recs = records.slice(-12);
-    const width = 620, labelW = 150, barW = width - labelW - 14, rowH = 24;
-    const height = recs.length * rowH + 8;
-    const cats = CAT_DEFS.slice(0, 5);
-    let legend = '<div class="legend">';
-    cats.forEach((c) => {
-      legend += '<span class="legend-item"><span class="legend-swatch" style="background:' + c.color + '"></span>' + esc(c.label) + '</span>';
-    });
-    legend += '</div>';
-
-    let svg = '<svg viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="Répartition par catégorie">';
-    recs.forEach((r, idx) => {
-      const y = 4 + idx * rowH;
-      const lbl = String(r.label || "");
-      const rowKey = lbl || String(r.conversation_id || "");
-      const shortLbl = lbl.length <= 20 ? lbl : lbl.slice(0, 17) + "...";
+    const totals = {};
+    let sumAll = 0;
+    records.forEach((r) => {
+      const c = recCost(r);
       const cs = r.category_share_pct || {};
-      svg += '<g data-action="open-detail" data-target="' + esc(rowKey) + '" style="cursor:pointer">';
-      svg += '<text x="2" y="' + (y + 14) + '" fill="var(--gm-fg-muted)" font-size="11">' + esc(shortLbl) + '</text>';
-      svg += '<rect x="' + labelW + '" y="' + (y + 3) + '" width="' + barW + '" height="14" rx="3" fill="var(--gm-bg-muted)"/>';
-      let xCur = labelW;
-      cats.forEach((c) => {
-        const pct = Math.max(0, Number(cs[c.key]) || 0);
-        const sw = (pct / 100) * barW;
-        if (sw > 0.5) {
-          svg += '<rect x="' + xCur.toFixed(1) + '" y="' + (y + 3) + '" width="' + sw.toFixed(1) + '" height="14" fill="' + c.color + '"><title>' + esc(c.label) + ' : ' + pct.toFixed(1) + '%</title></rect>';
-          xCur += sw;
-        }
+      CAT_DEFS.forEach((def) => {
+        const share = Math.max(0, Number(cs[def.key]) || 0);
+        const part = c * (share / 100.0);
+        totals[def.key] = (totals[def.key] || 0) + part;
+        sumAll += part;
       });
-      svg += '</g>';
     });
-    svg += "</svg>";
-    return legend + svg;
+    const rows = CAT_DEFS.map((def) => ({
+      label: def.label,
+      val: totals[def.key] || 0,
+      pct: sumAll > 0 ? ((totals[def.key] || 0) / sumAll) * 100 : 0,
+      color: def.color
+    })).filter((it) => it.val > 0 || it.pct > 0);
+    if (!rows.length) return '<div class="empty">Aucune ventilation par catégorie disponible.</div>';
+    let html = '<div class="share-list">';
+    rows.forEach((it) => {
+      const barW = Math.max(it.pct > 0 ? 2 : 0, Math.min(100, it.pct));
+      html += '<div class="share-row">' +
+        '<div class="share-top">' +
+        '<span>' + esc(it.label) + '</span>' +
+        '<span class="subline"><strong>$' + it.val.toFixed(4) + '</strong> · ' + it.pct.toFixed(1) + '%</span>' +
+        '</div>' +
+        '<div class="share-track"><div class="share-fill" style="width:' + barW.toFixed(1) + '%;background:' + it.color + '"></div></div>' +
+        '</div>';
+    });
+    html += '</div>';
+    return html;
   }
 
-  function renderHorizontalBarsSvg(items) {
+  function renderHtmlBarList(items, totalOverride) {
     if (!items.length) return '<div class="empty">Aucune donnée.</div>';
-    const width = 640, labelW = 180, valW = 84, barMaxW = width - labelW - valW - 14, rowH = 26;
-    const height = items.length * rowH + 8;
-    const maxV = Math.max.apply(null, items.map((it) => it.val)) || 1;
-    let svg = '<svg viewBox="0 0 ' + width + ' ' + height + '" role="img">';
+    const total = totalOverride != null ? totalOverride : items.reduce((acc, it) => acc + Math.max(0, Number(it.val) || 0), 0);
+    let html = '<div class="share-list">';
     items.forEach((it, idx) => {
-      const y = 4 + idx * rowH;
-      const bw = it.val > 0 ? Math.max(2, (it.val / maxV) * barMaxW) : 0;
-      const lbl = String(it.label || "");
-      const shortLbl = lbl.length <= 24 ? lbl : lbl.slice(0, 21) + "...";
-      svg += '<text x="2" y="' + (y + 16) + '" fill="var(--gm-fg-muted)" font-size="11"><title>' + esc(lbl) + '</title>' + esc(shortLbl) + '</text>';
-      svg += '<rect x="' + labelW + '" y="' + (y + 4) + '" width="' + barMaxW + '" height="15" rx="3" fill="var(--gm-bg-muted)"/>';
-      if (bw > 0) {
-        svg += '<rect x="' + labelW + '" y="' + (y + 4) + '" width="' + bw.toFixed(1) + '" height="15" rx="3" fill="' + it.color + '"/>';
-      }
-      svg += '<text x="' + (labelW + barMaxW + 8) + '" y="' + (y + 16) + '" fill="var(--gm-fg)" font-size="11" font-weight="600" font-family="var(--gm-mono)">$' + it.val.toFixed(4) + '</text>';
+      const val = Math.max(0, Number(it.val) || 0);
+      const pct = total > 0 ? (val / total) * 100 : 0;
+      const barW = Math.max(val > 0 ? 2 : 0, Math.min(100, pct));
+      const color = it.color || PALETTE[idx % PALETTE.length];
+      html += '<div class="share-row">' +
+        '<div class="share-top">' +
+        '<span>' + esc(it.label) + '</span>' +
+        '<span class="subline"><strong>$' + val.toFixed(4) + '</strong> · ' + pct.toFixed(1) + '%</span>' +
+        '</div>' +
+        '<div class="share-track"><div class="share-fill" style="width:' + barW.toFixed(1) + '%;background:' + color + '"></div></div>' +
+        (it.meta ? '<div class="share-meta">' + it.meta + '</div>' : '') +
+        '</div>';
     });
-    svg += "</svg>";
-    return svg;
+    html += '</div>';
+    return html;
   }
 
   function renderProjectShareBars(projRows, use2027) {
@@ -133,10 +142,10 @@ CHARTS_JS = r"""
         '</div>' +
         '<div class="share-track"><div class="share-fill" style="width:' + barW.toFixed(1) + '%;background:' + color + '"></div></div>' +
         '<div class="share-meta">' +
-        '<span>' + fmtInt(p.sessions) + ' session(s)</span>' +
-        '<span>Cache moy : ' + Number(p.avg_cache_hit_rate_pct || 0).toFixed(1) + '%</span>' +
-        '<span>Appels : ' + fmtInt(p.llm_calls) + '</span>' +
-        (p.bridge_sessions ? '<span>Bridge : ' + fmtInt(p.bridge_sessions) + '</span>' : '') +
+        '<span>' + fmtInt(p.sessions) + ' sess.</span>' +
+        '<span>Cache ' + Number(p.avg_cache_hit_rate_pct || 0).toFixed(1) + '%</span>' +
+        '<span>' + fmtInt(p.llm_calls) + ' appels</span>' +
+        (p.bridge_sessions ? '<span>Bridge ' + fmtInt(p.bridge_sessions) + '</span>' : '') +
         '</div></div>';
     });
     html += '</div>';
@@ -151,7 +160,6 @@ CHARTS_JS = r"""
     if (!wsEntries.length) {
       isFallback = true;
       const s = (d && d.summary) || {};
-      const c = use2027 ? (s.cost_usd_projection || s.cost_usd || {}) : (s.cost_usd || {});
       wsEntries = [[
         String((d && d.project) || "workspace principal"),
         {
@@ -177,7 +185,6 @@ CHARTS_JS = r"""
     }, 0);
 
     let barsHtml = '<div class="share-list">';
-    let rowsHtml = "";
     wsEntries.forEach(([wsName, wData], idx) => {
       const costObj = use2027 ? (wData.cost_usd_projection || wData.cost_usd) : wData.cost_usd;
       const costVal = Number((costObj || {}).total_usd || 0);
@@ -189,24 +196,15 @@ CHARTS_JS = r"""
 
       barsHtml += '<div class="share-row">' +
         '<div class="share-top">' +
-        '<span><code>' + esc(wsName) + '</code></span>' +
+        '<span class="mono"><strong>' + esc(wsName) + '</strong></span>' +
         '<span class="subline"><strong>$' + costVal.toFixed(4) + '</strong> · ' + pct.toFixed(1) + '%</span>' +
         '</div>' +
         '<div class="share-track"><div class="share-fill" style="width:' + barW.toFixed(1) + '%;background:' + color + '"></div></div>' +
         '<div class="share-meta">' +
-        '<span>Ag. : ' + fmtInt(wData.agents || 0) + '</span>' +
-        '<span>Appels : ' + fmtInt(wData.llm_calls || 0) + '</span>' +
-        '<span>Cache : ' + Number(wData.cache_hit_rate_pct || 0).toFixed(1) + '%</span>' +
+        '<span>' + fmtInt(wData.agents || 0) + ' ag.</span>' +
+        '<span>' + fmtInt(wData.llm_calls || 0) + ' appels</span>' +
+        '<span>Cache ' + Number(wData.cache_hit_rate_pct || 0).toFixed(1) + '%</span>' +
         '</div></div>';
-
-      rowsHtml += '<tr>' +
-        '<td><code>' + esc(wsName) + '</code></td>' +
-        '<td class="num">' + fmtInt(wData.agents || 0) + '</td>' +
-        '<td class="num">' + fmtInt(wData.llm_calls || 0) + '</td>' +
-        '<td class="num">' + Number(wData.cache_hit_rate_pct || 0).toFixed(1) + '%</td>' +
-        '<td class="num"><strong>$' + costVal.toFixed(4) + '</strong></td>' +
-        '<td class="num">' + pct.toFixed(1) + '%</td>' +
-        '</tr>';
     });
     barsHtml += '</div>';
 
@@ -214,10 +212,7 @@ CHARTS_JS = r"""
       ? '<span class="subline">archive 2.0.0 — repli projet</span>'
       : '<span class="subline">' + wsEntries.length + ' dossier(s) / workspace(s)</span>';
 
-    return '<div class="panel"><div class="panel-head"><span class="panel-title">Répartition par Dossier / Workspace (%)</span>' + subtitle + '</div>' +
-      '<div class="panels two">' +
-      barsHtml +
-      '<div class="table-wrap"><table><thead><tr><th>Dossier</th><th class="num">Ag.</th><th class="num">Appels</th><th class="num">Cache %</th><th class="num">Coût</th><th class="num">Part</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>' +
-      '</div></div>';
+    return '<div class="panel"><div class="panel-head"><span class="panel-title">Répartition par Dossier / Workspace</span>' + subtitle + '</div>' +
+      barsHtml + '</div>';
   }
 """

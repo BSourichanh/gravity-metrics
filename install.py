@@ -19,6 +19,7 @@ PLUGIN_NAME = "gravity-metrics"
 
 EXEC_SCRIPTS: Tuple[str, ...] = (
     "hooks/pre_invocation_metrics.py",
+    "hooks/session_start_metrics.py",
     "mcp/server.py",
     "scripts/cli.py",
     "scripts/validate.py",

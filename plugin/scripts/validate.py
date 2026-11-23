@@ -288,11 +288,32 @@ def _run_hook_dry_runs(plugin_root: Path, report: Report) -> None:
     if not hook_script.is_file():
         report.error(f"Script hook introuvable : {hook_script}")
         return
+    start_hook = plugin_root / "hooks" / "session_start_metrics.py"
+    if not start_hook.is_file():
+        report.error(f"Script hook SessionStart introuvable : {start_hook}")
+        return
 
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ)
         env["GRAVITY_METRICS_HOME"] = str(Path(tmp) / "store")
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        s_proc = subprocess.run(
+            [sys.executable, "-B", str(start_hook)],
+            input=json.dumps({"conversationId": "val-sess-1", "cwd": str(plugin_root)}),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            cwd=str(plugin_root),
+            env=env,
+            timeout=5,
+            check=False,
+        )
+        if s_proc.returncode != 0 or (s_proc.stdout.strip() != "{}"):
+            report.error(
+                f"Dry-run SessionStart invalide (rc={s_proc.returncode}, out={s_proc.stdout!r}, err={s_proc.stderr!r})"
+            )
 
         passthrough_inputs = [
             {"lastUserInput": "bonjour"},

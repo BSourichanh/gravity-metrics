@@ -484,7 +484,8 @@ class TestEntrypointsExclusionSlugAndLifecycle(unittest.TestCase):
             self.assertTrue(saved["archived_at"])
             self.assertEqual(saved["bridge_children_count"], 1)
             self.assertEqual(saved["bridge_workspaces"], ["gravity-metrics"])
-            self.assertIn("root", saved["workspace_share_pct"])
+            self.assertEqual(saved["project"], "gravity-studio")
+            self.assertIn("gravity-studio", saved["workspace_share_pct"])
             self.assertIn("gravity-metrics", saved["workspace_share_pct"])
 
             # Immuabilité : ré-archivage sans --force retourne already_archived=True sans écraser

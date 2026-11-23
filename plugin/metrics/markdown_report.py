@@ -4,7 +4,7 @@
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .collector import METRICS_MARKER, slugify_label
+from .collector import METRICS_MARKER, METRICS_OPEN_MARKER, slugify_label
 from .formatters import (
     _alerts_str,
     _bridge_badge,
@@ -245,7 +245,7 @@ def render_pending_table(pending: List[Dict[str, Any]]) -> str:
 def render_pending_markdown(pending: List[Dict[str, Any]]) -> str:
     """Formate la file `pending` pour affichage chat lors de `/gravity-metrics pending`."""
     lines = [
-        METRICS_MARKER,
+        METRICS_OPEN_MARKER,
         f"### Gravity Metrics — Sessions en attente d'archivage ({len(pending)})",
         "",
     ]
