@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-24
+
 ### Added
 - **Installer `--strict` Flag (`install.py`, `tests/test_install.py`):**
   - Added `--strict` (`11/11` CLI contract) overriding `--skip-validate`, running read-only `validate.py --strict` under `--check`, and passing `--strict` to `agy plugin validate`.
