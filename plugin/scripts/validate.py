@@ -42,6 +42,10 @@ REQUIRED_MODULE_FIELDS = {
 }
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 UTF8_BOM = b"\xef\xbb\xbf"
+RULES_WARN_BYTES = 600
+RULES_MAX_BYTES = 1000
+SKILL_MAX_BYTES = 6000
+ROOT_AGENTS_MAX_BYTES = 2500
 ALLOWED_LOCAL_MODULES = {"metrics", "bridge_links", "hook_runtime", "cli", "validate", "mcp", "widget_html"}
 FLAT_HOOK_EVENTS = ("SessionStart", "PreInvocation", "PostInvocation", "Stop")
 GROUPED_HOOK_EVENTS = ("PreToolUse", "PostToolUse")
@@ -206,6 +210,37 @@ def _check_stdlib_only(py_file: Path, report: Report) -> None:
                 report.error(f"Import non stdlib {mod!r} détecté dans {py_file}")
 
 
+def _read_markdown_d4(
+    path: Path,
+    label: str,
+    report: Report,
+    *,
+    max_bytes: int,
+    warn_bytes: Optional[int] = None,
+) -> Optional[str]:
+    """Lit un fichier Markdown en vérifiant UTF-8 sans BOM, LF et seuils D4 en octets."""
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        report.error(f"{label} illisible : {exc}")
+        return None
+    if raw_bytes.startswith(UTF8_BOM):
+        report.error(f"{label} ne doit pas contenir de BOM UTF-8.")
+    if b"\r\n" in raw_bytes or b"\r" in raw_bytes:
+        report.error(f"{label} doit utiliser des fins de ligne LF (CRLF détecté).")
+    size = len(raw_bytes)
+    if size > max_bytes:
+        report.error(f"{label} dépasse {max_bytes} octets ({size}).")
+    elif warn_bytes is not None and size > warn_bytes:
+        report.warn(f"{label} dépasse le seuil recommandé de {warn_bytes} octets ({size}).")
+    body = raw_bytes[len(UTF8_BOM) :] if raw_bytes.startswith(UTF8_BOM) else raw_bytes
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        report.error(f"{label} UTF-8 invalide : {exc}")
+        return None
+
+
 def _validate_skills(root: Path, report: Report) -> None:
     skills_dir = root / "skills"
     if not skills_dir.is_dir():
@@ -225,7 +260,14 @@ def _validate_skills(root: Path, report: Report) -> None:
         report.error("skills/gravity-metrics/SKILL.md introuvable.")
         return
 
-    txt = skill_md.read_text(encoding="utf-8", errors="replace")
+    txt = _read_markdown_d4(
+        skill_md,
+        "skills/gravity-metrics/SKILL.md",
+        report,
+        max_bytes=SKILL_MAX_BYTES,
+    )
+    if txt is None:
+        return
     fm_match = re.match(r"^\s*---\r?\n(.*?)\r?\n---\r?\n", txt, re.DOTALL)
     if not fm_match:
         report.error("skills/gravity-metrics/SKILL.md : frontmatter YAML manquant.")
@@ -662,12 +704,24 @@ def validate_plugin(root: Path, report: Report) -> None:
     if not rules_file.is_file():
         report.error("rules/AGENTS.md introuvable.")
     else:
-        raw_bytes = rules_file.read_bytes()
-        if len(raw_bytes) >= 2048:
-            report.error(f"rules/AGENTS.md dépasse 2048 octets ({len(raw_bytes)}).")
-        rules_txt = raw_bytes.decode("utf-8", errors="replace")
-        if rules_txt.lstrip().startswith("---"):
+        rules_txt = _read_markdown_d4(
+            rules_file,
+            "rules/AGENTS.md",
+            report,
+            max_bytes=RULES_MAX_BYTES,
+            warn_bytes=RULES_WARN_BYTES,
+        )
+        if rules_txt is not None and rules_txt.lstrip().startswith("---"):
             report.error("rules/AGENTS.md ne doit pas contenir de frontmatter YAML.")
+
+    root_agents = root.parent / "AGENTS.md"
+    if root.name == "plugin" and root_agents.is_file():
+        _read_markdown_d4(
+            root_agents,
+            "AGENTS.md racine",
+            report,
+            max_bytes=ROOT_AGENTS_MAX_BYTES,
+        )
 
     hooks_json = root / "hooks.json"
     if not hooks_json.is_file():

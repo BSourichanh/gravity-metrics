@@ -42,4 +42,5 @@ python scripts/cli.py add --latest -l "mon-run" -n "Note" [--force]
 python scripts/cli.py archive <uuid_ou_prefixe> -l "mon-run" [--bridge-db <chemin>] [--force]
 python scripts/cli.py inspect <label_ou_uuid> [--bridge-db <chemin>]
 python scripts/cli.py remove <label_ou_uuid> --purge-reports
+python scripts/validate.py --strict       # Contrôles stdlib, contrat module et seuils D4 (rules <= 600/1000 o, SKILL <= 6000 o, LF sans BOM)
 ```

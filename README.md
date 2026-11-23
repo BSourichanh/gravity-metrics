@@ -19,7 +19,7 @@ gravity-metrics/
 │   ├── mcp_config.json                     # MCP App stdio server configuration
 │   ├── README.md                           # Plugin documentation (French)
 │   ├── assets/logo.svg                     # 1:1 square SVG icon
-│   ├── rules/AGENTS.md                     # Lightweight rule (< 2 KB)
+│   ├── rules/AGENTS.md                     # Lightweight rule (<= 1 KB, rec. <= 600 B)
 │   ├── skills/gravity-metrics/SKILL.md     # /gravity-metrics slash skill & widget handoff
 │   ├── config/
 │   │   ├── module.json                     # Module contract v1 (id: "metrics")

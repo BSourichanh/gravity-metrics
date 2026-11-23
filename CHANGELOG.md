@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Compaction `rules/AGENTS.md` & `AGENTS.md` (D4) :**
+  - Compacté `plugin/rules/AGENTS.md` (`1 115 o` → `518 o`, UTF-8 sans BOM, LF) et `AGENTS.md` racine (`2 203 o` → `1 648 o`, 3 sections canoniques conservées) sans perte d'invariants `v0.5.0`.
+  - Mis à jour `README.md` et `plugin/README.md` pour refléter les seuils D4.
+
+### Added
+- **Contrôles D4 dans `plugin/scripts/validate.py` & Tests (`tests/test_validate.py`) :**
+  - Abaissé le seuil d'erreur de `rules/AGENTS.md` à `> 1 000 o` (avertissement pour `601..1 000 o` bloquant sous `--strict`) avec contrôles UTF-8 sans BOM, LF et frontmatter YAML.
+  - Ajouté les contrôles UTF-8 sans BOM, LF et plafonds en octets sur `skills/gravity-metrics/SKILL.md` (`<= 6 000 o`) et `AGENTS.md` racine (`<= 2 500 o` quand `root.name == "plugin"`).
+  - Ajouté la suite isolée `tests/test_validate.py` couvrant seuils D4, BOM, CRLF, frontmatter YAML et garde d'installation.
+
 ## [0.5.0] - 2026-11-23
 
 ### Added
