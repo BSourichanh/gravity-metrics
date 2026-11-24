@@ -7,9 +7,9 @@
   "homepage": "https://github.com/BSourichanh/gravity-metrics",
   "repository": "https://github.com/BSourichanh/gravity-metrics.git",
   "suggestedPrompts": [
-    "/gravity-metrics — Capturer les métriques et ouvrir le dashboard coûts/cache",
+    "/gravity-metrics — Ouvrir le dashboard coûts/cache en lecture seule",
     "/gravity-metrics pending — Lister les sessions en attente d'archivage",
-    "Analyser les coûts, économies de cache et tendances de mes sessions Gravity"
+    "/gravity-metrics start — Démarrer une fenêtre de capture à 0 token"
   ],
   "author": {
     "name": "Gravity Contributors"

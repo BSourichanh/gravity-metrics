@@ -2191,25 +2191,31 @@ def _compute_session_milestones(
             for a in bridge_agents + wf_agents
             if isinstance(a.get("spawn_step_index"), int)
         ]
-        first_prod_step = min(link_steps + child_steps) if (link_steps or child_steps) else None
+        all_prod_steps = link_steps + child_steps
+        first_prod_step = min(all_prod_steps) if all_prod_steps else None
+        last_prod_step = max(all_prod_steps) if all_prod_steps else None
 
-        # Détecter début Vérification & Push : callback reçu, read_thread post-bridge, ou run_command git push / tests
+        # Détecter début Vérification & Push uniquement après la dernière vague et sans job Bridge actif
         verif_step: Optional[int] = None
         archive_step: Optional[int] = None
         for e in win_entries:
             st_i = e.get("step_index")
             if e.get("is_architect_archive") and archive_step is None and isinstance(st_i, int):
                 archive_step = st_i
-            if first_prod_step is not None and isinstance(st_i, int) and st_i > first_prod_step:
+            if (
+                not bridge_pending_jobs
+                and last_prod_step is not None
+                and isinstance(st_i, int)
+                and st_i > last_prod_step
+            ):
                 if e.get("has_push_or_verif") and verif_step is None:
                     verif_step = st_i
-                elif not bridge_pending_jobs and e.get("is_user") and "[GRAVITY-BRIDGE" in str(e.get("clean_prompt") or ""):
+                elif e.get("is_user") and "[GRAVITY-BRIDGE" in str(e.get("clean_prompt") or ""):
                     if verif_step is None:
                         verif_step = st_i
-                elif not bridge_pending_jobs and e.get("is_planner") and verif_step is None:
+                elif e.get("is_planner") and verif_step is None:
                     # Premier tour planner racine post-bridge sans jobs actifs restants
-                    if st_i > max(link_steps or [first_prod_step]):
-                        verif_step = st_i
+                    verif_step = st_i
 
         # Statuts des 4 jalons
         if is_archived or has_arch_archive:
@@ -2619,7 +2625,7 @@ def collect_run_metrics(
 
     dup_groups_map: Dict[Tuple[Optional[str], str, str], List[Dict[str, Any]]] = defaultdict(list)
     for ag in enriched_agents:
-        if ag["parent_id"] is not None:
+        if ag["parent_id"] is not None and ag.get("source") != "bridge":
             dup_groups_map[(ag["parent_id"], ag["type_name"], ag["role"])].append(ag)
 
     dup_groups_out: List[Dict[str, Any]] = []
@@ -2852,6 +2858,7 @@ def _compute_pending_milestones(
     active_links: List[Dict[str, Any]],
     pending_jobs: List[Dict[str, Any]],
     has_workflow_children: bool,
+    wf_children: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     win_entries = [
         e
@@ -2870,16 +2877,24 @@ def _compute_pending_milestones(
             ],
         }
     link_steps = [int(lnk["spawn_step_index"]) for lnk in active_links if isinstance(lnk.get("spawn_step_index"), int)]
-    first_prod = min(link_steps) if link_steps else None
-    has_verif = any(
-        e.get("has_push_or_verif")
-        and (first_prod is None or (isinstance(e.get("step_index"), int) and e["step_index"] > first_prod))
-        for e in win_entries
-    )
-    if not has_verif and has_bridge and not pending_jobs and link_steps:
-        max_b = max(link_steps)
+    child_steps = [
+        int(c["spawn_step_index"])
+        for c in (wf_children or [])
+        if isinstance(c.get("spawn_step_index"), int)
+    ]
+    all_prod_steps = link_steps + child_steps
+    first_prod = min(all_prod_steps) if all_prod_steps else None
+    last_prod = max(all_prod_steps) if all_prod_steps else None
+    has_verif = False
+    if not pending_jobs and last_prod is not None:
         has_verif = any(
-            e.get("is_planner") and isinstance(e.get("step_index"), int) and e["step_index"] > max_b
+            isinstance(e.get("step_index"), int)
+            and e["step_index"] > last_prod
+            and (
+                e.get("has_push_or_verif")
+                or (e.get("is_user") and "[GRAVITY-BRIDGE" in str(e.get("clean_prompt") or ""))
+                or (has_bridge and e.get("is_planner"))
+            )
             for e in win_entries
         )
     has_arch_close = any(e.get("is_architect_archive") for e in win_entries)
@@ -3040,6 +3055,11 @@ def list_pending_sessions(
             and not has_work_activity
         ):
             continue
+        active_wf = [
+            c
+            for c in wf_children
+            if not apply_win or _is_spawn_in_window(c.get("spawn_step_index"), None, None, win)
+        ]
         milestones = _compute_pending_milestones(
             entries,
             start_idx,
@@ -3047,6 +3067,7 @@ def list_pending_sessions(
             active_links,
             pending_jobs,
             bool(wf_children),
+            wf_children=active_wf,
         )
 
         meta_entry = session_meta.get(cdir.name) or {}

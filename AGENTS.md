@@ -1,7 +1,7 @@
 # Gravity Metrics — Instructions Agents
 
 ## Périmètre & Architecture
-- **Module `metrics` (`plugin/`) :** `config/module.json`, hook `PreInvocation` (`/gravity-metrics`, pas de `/metrics`), `skills/gravity-metrics/SKILL.md`, MCP App `mcp/server.py` (`open_metrics_dashboard` `aux_pane`/`global`), `rules/AGENTS.md`.
+- **Module `metrics` (`plugin/`) :** `config/module.json`, hooks `SessionStart` (`hooks/session_start_metrics.py` -> `session_meta.json`, hors worktrees) et `PreInvocation` (`/gravity-metrics`, pas de `/metrics`), `skills/gravity-metrics/SKILL.md`, MCP App `mcp/server.py` (`open_metrics_dashboard` `aux_pane`/`global`), `rules/AGENTS.md`.
 - **Lot 4b :** distinct de `gravity` (`BSourichanh/gravity`) et `gravity-workflow` (`/gravity-workflow`). Émet `session-metrics` et `cost-telemetry` (`auto`), `ui.mode: "transition-mcp"` vers `gravity`.
 - **Stockage centralisé :** `$GRAVITY_METRICS_HOME` > `$GRAVITY_HOME/metrics` > `~/.gemini/gravity/metrics/` (`data/history.jsonl`, `METRICS.md`, `reports/*.{json,md}`) ; 0 fichier workspace, 0 `.html` sur disque.
 

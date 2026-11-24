@@ -11,17 +11,17 @@
 
 ## Ecosystem Role (Lot 4b Alignment)
 
-- **[`gravity` Core](https://github.com/BSourichanh/gravity)** (`/gravity`): workspace environment initializer (`~/.gemini/gravity/`), module contract registry, and future unified UI host.
+- **[`gravity` Core](https://github.com/BSourichanh/gravity)** (`/gravity`): workspace environment initializer (`~/.gemini/gravity/`), module contract registry, and unified UI host.
 - **[`gravity-workflow`](https://github.com/BSourichanh/gravity-workflow)** (`/gravity-workflow`): multi-agent orchestration harness, fail-closed safety hooks, evals, and `/caveman`.
 - **`gravity-metrics`** (`/gravity-metrics`): dedicated session telemetry & cost analytics module.
-  - **Signals for `gravity-workflow` `auto` mode:** produces `session-metrics` and `cost-telemetry` signals for future adaptive optimization loops.
+  - **Signals for `gravity-workflow` `auto` mode:** produces `session-metrics` and `cost-telemetry` signals for adaptive optimization loops.
   - **Reference UI design system (`transition-mcp` → `gravity`):** ships an adaptive, sober 3-space MCP App widget (`ui.mode: "transition-mcp"`, `ui.target: "gravity"`).
 
 ```text
 gravity-metrics/
 ├── install.py                              # Cross-platform installer / uninstaller (atomic copy + agy)
 ├── plugin/                                 # Standalone plugin ready to install
-│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.5.0)
+│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.5.1)
 │   ├── hooks.json                          # SessionStart + PreInvocation hooks
 │   ├── mcp_config.json                     # MCP App stdio server configuration
 │   ├── README.md                           # Plugin documentation (French)
@@ -37,7 +37,7 @@ gravity-metrics/
 │   └── scripts/                            # cli.py + validate.py (--strict, --fix-python-cmd)
 ├── tests/                                  # Unit & integrity test suite
 ├── AGENTS.md
-├── CHANGELOG.md                            # Release notes (v0.5.0)
+├── CHANGELOG.md                            # Release notes (v0.5.1)
 ├── LICENSE
 └── README.md
 ```
@@ -149,7 +149,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 ## 5. Documentation & Releases
 
-- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0` – `v0.5.0`)
+- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0` – `v0.5.1`)
 - [`plugin/README.md`](plugin/README.md) — Plugin documentation (French)
 - [`AGENTS.md`](AGENTS.md) — Repository invariants and verification commands
 

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "metrics",
   "plugin_name": "gravity-metrics",
-  "role": "Collecte de metriques Antigravity, couts/tokens et futurs signaux d'optimisation pour le mode auto",
+  "role": "Collecte de metriques Antigravity, couts/tokens et signaux d'optimisation pour le mode auto",
   "storage": {
     "subdir": "metrics",
     "env_override": "GRAVITY_METRICS_HOME"

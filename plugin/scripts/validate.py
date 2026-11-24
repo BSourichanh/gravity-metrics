@@ -47,11 +47,29 @@ RULES_MAX_BYTES = 1000
 SKILL_MAX_BYTES = 6000
 ROOT_AGENTS_MAX_BYTES = 2500
 ALLOWED_LOCAL_MODULES = {"metrics", "bridge_links", "hook_runtime", "cli", "validate", "mcp", "widget_html"}
+ALLOWED_UI_MODES = frozenset({"none", "core", "transition-sidecar", "transition-mcp", "mcp-app"})
+SUGGESTED_PROMPT_MAX_LEN = 100
+SUGGESTED_PROMPT_RE = re.compile(r"^/[a-z0-9:_-]+(?:\s+[^—\r\n]+?)?\s+—\s+\S")
 FLAT_HOOK_EVENTS = ("SessionStart", "PreInvocation", "PostInvocation", "Stop")
 GROUPED_HOOK_EVENTS = ("PreToolUse", "PostToolUse")
 
 FORBIDDEN_MOD_RE = re.compile(r"\bMod" + r"ule\s+0?\d\b", re.IGNORECASE)
 FORBIDDEN_TERM_RE = re.compile(r"\bbench" + r"marks?\b", re.IGNORECASE)
+PERSONAL_PATH_RE = re.compile(
+    r"(?:"
+    + r"[A-Za-z]:[/\\]Use"
+    + r"rs[/\\][^\s\"'`<>]+"
+    + r"|"
+    + r"(?<![A-Za-z0-9_.:/~-])"
+    + r"/Use"
+    + r"rs/[^\s\"'`<>]+"
+    + r"|"
+    + r"(?<![A-Za-z0-9_.:/~-])"
+    + r"/ho"
+    + r"me/[^\s\"'`<>]+"
+    + r")"
+)
+FILE_URI_RE = re.compile(r"fi" + r"le://", re.IGNORECASE)
 
 
 class Report:
@@ -140,8 +158,8 @@ def fix_python_cmd(plugin_root: Path) -> int:
                                 h["command"] = new_cmd
                                 changed = True
         if changed:
-            hooks_json.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            hooks_json.write_bytes(
+                (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
             )
             print(f"[FIXED] {hooks_json} -> '{py_cmd}'")
             any_changed = True
@@ -165,8 +183,8 @@ def fix_python_cmd(plugin_root: Path) -> int:
                         scfg["command"] = py_cmd
                     mchanged = True
         if mchanged:
-            mcp_json.write_text(
-                json.dumps(mdata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            mcp_json.write_bytes(
+                (json.dumps(mdata, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
             )
             print(f"[FIXED] {mcp_json} -> '{py_cmd}'")
             any_changed = True
@@ -210,15 +228,15 @@ def _check_stdlib_only(py_file: Path, report: Report) -> None:
                 report.error(f"Import non stdlib {mod!r} détecté dans {py_file}")
 
 
-def _read_markdown_d4(
+def _check_utf8_no_bom_lf(
     path: Path,
     label: str,
     report: Report,
-    *,
-    max_bytes: int,
-    warn_bytes: Optional[int] = None,
+    checked_paths: Optional[Set[Path]] = None,
 ) -> Optional[str]:
-    """Lit un fichier Markdown en vérifiant UTF-8 sans BOM, LF et seuils D4 en octets."""
+    """Lit un fichier texte en vérifiant UTF-8 sans BOM et fins de ligne LF."""
+    if checked_paths is not None:
+        checked_paths.add(path.resolve())
     try:
         raw_bytes = path.read_bytes()
     except OSError as exc:
@@ -228,11 +246,6 @@ def _read_markdown_d4(
         report.error(f"{label} ne doit pas contenir de BOM UTF-8.")
     if b"\r\n" in raw_bytes or b"\r" in raw_bytes:
         report.error(f"{label} doit utiliser des fins de ligne LF (CRLF détecté).")
-    size = len(raw_bytes)
-    if size > max_bytes:
-        report.error(f"{label} dépasse {max_bytes} octets ({size}).")
-    elif warn_bytes is not None and size > warn_bytes:
-        report.warn(f"{label} dépasse le seuil recommandé de {warn_bytes} octets ({size}).")
     body = raw_bytes[len(UTF8_BOM) :] if raw_bytes.startswith(UTF8_BOM) else raw_bytes
     try:
         return body.decode("utf-8")
@@ -241,7 +254,36 @@ def _read_markdown_d4(
         return None
 
 
-def _validate_skills(root: Path, report: Report) -> None:
+def _read_markdown_d4(
+    path: Path,
+    label: str,
+    report: Report,
+    *,
+    max_bytes: int,
+    warn_bytes: Optional[int] = None,
+    checked_paths: Optional[Set[Path]] = None,
+) -> Optional[str]:
+    """Lit un fichier Markdown en vérifiant UTF-8 sans BOM, LF et seuils D4 en octets."""
+    txt = _check_utf8_no_bom_lf(path, label, report, checked_paths=checked_paths)
+    if txt is None:
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = len(txt.encode("utf-8"))
+    if size > max_bytes:
+        report.error(f"{label} dépasse {max_bytes} octets ({size}).")
+    elif warn_bytes is not None and size > warn_bytes:
+        report.warn(f"{label} dépasse le seuil recommandé de {warn_bytes} octets ({size}).")
+    return txt
+
+
+def _validate_skills(
+    root: Path,
+    report: Report,
+    *,
+    checked_paths: Optional[Set[Path]] = None,
+) -> None:
     skills_dir = root / "skills"
     if not skills_dir.is_dir():
         report.error("Dossier requis manquant : skills/gravity-metrics/")
@@ -265,6 +307,7 @@ def _validate_skills(root: Path, report: Report) -> None:
         "skills/gravity-metrics/SKILL.md",
         report,
         max_bytes=SKILL_MAX_BYTES,
+        checked_paths=checked_paths,
     )
     if txt is None:
         return
@@ -535,17 +578,19 @@ def _run_mcp_dry_run(plugin_root: Path, report: Report) -> None:
             report.error(f"MCP open_metrics_dashboard résultat invalide : {call_res!r}")
 
 
-def _read_json_no_bom(path: Path, label: str, report: Report) -> Optional[Dict[str, Any]]:
-    """Lit un fichier JSON objet en vérifiant l'absence de BOM UTF-8."""
-    try:
-        raw_bytes = path.read_bytes()
-    except OSError as exc:
-        report.error(f"{label} illisible : {exc}")
+def _read_json_no_bom(
+    path: Path,
+    label: str,
+    report: Report,
+    *,
+    checked_paths: Optional[Set[Path]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Lit un fichier JSON objet en vérifiant UTF-8 sans BOM et fins de ligne LF."""
+    text = _check_utf8_no_bom_lf(path, label, report, checked_paths=checked_paths)
+    if text is None:
         return None
-    if raw_bytes.startswith(UTF8_BOM):
-        report.error(f"{label} ne doit pas contenir de BOM UTF-8.")
     try:
-        data = json.loads(raw_bytes.decode("utf-8"))
+        data = json.loads(text)
     except Exception as exc:
         report.error(f"{label} invalide : {exc}")
         return None
@@ -564,7 +609,11 @@ def _is_str_list(val: Any, *, allow_empty: bool = False) -> bool:
 
 
 def _validate_module_contract(
-    root: Path, manifest: Dict[str, Any], report: Report
+    root: Path,
+    manifest: Dict[str, Any],
+    report: Report,
+    *,
+    checked_paths: Optional[Set[Path]] = None,
 ) -> None:
     """Valide le contrat modulaire v1 dans config/module.json."""
     module_path = root / "config" / "module.json"
@@ -572,7 +621,9 @@ def _validate_module_contract(
         report.error("config/module.json introuvable.")
         return
 
-    data = _read_json_no_bom(module_path, "config/module.json", report)
+    data = _read_json_no_bom(
+        module_path, "config/module.json", report, checked_paths=checked_paths
+    )
     if data is None:
         return
 
@@ -627,8 +678,13 @@ def _validate_module_contract(
     if not isinstance(ui, dict):
         report.error("config/module.json : 'ui' doit être un objet.")
     else:
-        if not isinstance(ui.get("mode"), str) or not ui["mode"].strip():
+        ui_mode = ui.get("mode")
+        if not isinstance(ui_mode, str) or not ui_mode.strip():
             report.error("config/module.json : 'ui.mode' doit être une chaîne non vide.")
+        elif ui_mode not in ALLOWED_UI_MODES:
+            report.error(
+                f"config/module.json : 'ui.mode' invalide ({ui_mode!r}), attendu dans {sorted(ALLOWED_UI_MODES)}."
+            )
         if not isinstance(ui.get("target"), str) or not ui["target"].strip():
             report.error("config/module.json : 'ui.target' doit être une chaîne non vide.")
 
@@ -649,7 +705,10 @@ def validate_plugin(root: Path, report: Report) -> None:
         report.error("plugin.json introuvable à la racine du plugin.")
         return
 
-    manifest = _read_json_no_bom(manifest_path, "plugin.json", report)
+    checked_utf8: Set[Path] = set()
+    manifest = _read_json_no_bom(
+        manifest_path, "plugin.json", report, checked_paths=checked_utf8
+    )
     if manifest is None:
         return
 
@@ -687,7 +746,17 @@ def validate_plugin(root: Path, report: Report) -> None:
 
     prompts = manifest.get("suggestedPrompts")
     if not isinstance(prompts, list) or len(prompts) != 3 or not all(isinstance(p, str) and p.strip() for p in prompts):
-        report.warn("plugin.json : exactement 3 'suggestedPrompts' non vides sont recommandés.")
+        report.error("plugin.json : exactement 3 'suggestedPrompts' non vides sont requis.")
+    else:
+        for idx, prompt in enumerate(prompts):
+            if len(prompt) > SUGGESTED_PROMPT_MAX_LEN:
+                report.error(
+                    f"plugin.json : suggestedPrompts[{idx}] dépasse {SUGGESTED_PROMPT_MAX_LEN} caractères ({len(prompt)})."
+                )
+            if not SUGGESTED_PROMPT_RE.match(prompt):
+                report.error(
+                    f"plugin.json : suggestedPrompts[{idx}] doit respecter le format '/cmd — résumé' ({prompt!r})."
+                )
 
     logo_rel = str(manifest.get("logo") or "")
     logo_path = root / logo_rel
@@ -702,8 +771,8 @@ def validate_plugin(root: Path, report: Report) -> None:
         if not vb or float(vb.group(1)) <= 0 or float(vb.group(1)) != float(vb.group(2)):
             report.error(f"Logo {logo_rel} : viewBox carré 1:1 non détecté.")
 
-    _validate_module_contract(root, manifest, report)
-    _validate_skills(root, report)
+    _validate_module_contract(root, manifest, report, checked_paths=checked_utf8)
+    _validate_skills(root, report, checked_paths=checked_utf8)
     _validate_mcp_config(root, report)
 
     rules_file = root / "rules" / "AGENTS.md"
@@ -716,6 +785,7 @@ def validate_plugin(root: Path, report: Report) -> None:
             report,
             max_bytes=RULES_MAX_BYTES,
             warn_bytes=RULES_WARN_BYTES,
+            checked_paths=checked_utf8,
         )
         if rules_txt is not None and rules_txt.lstrip().startswith("---"):
             report.error("rules/AGENTS.md ne doit pas contenir de frontmatter YAML.")
@@ -727,6 +797,7 @@ def validate_plugin(root: Path, report: Report) -> None:
             "AGENTS.md racine",
             report,
             max_bytes=ROOT_AGENTS_MAX_BYTES,
+            checked_paths=checked_utf8,
         )
 
     hooks_json = root / "hooks.json"
@@ -793,15 +864,26 @@ def validate_plugin(root: Path, report: Report) -> None:
         _check_stdlib_only(py_file, report)
 
     for fpath in sorted(root.rglob("*")):
-        if not fpath.is_file() or "__pycache__" in fpath.parts:
+        if not fpath.is_file():
             continue
-        if fpath.suffix.lower() not in (".py", ".md", ".json", ".html", ".svg"):
+        rel = fpath.relative_to(root)
+        if "__pycache__" in rel.parts or ".git" in rel.parts:
+            continue
+        suffix = fpath.suffix.lower()
+        if suffix in (".py", ".md", ".json") and fpath.resolve() not in checked_utf8:
+            _check_utf8_no_bom_lf(fpath, rel.as_posix(), report, checked_paths=checked_utf8)
+        if suffix not in (".py", ".md", ".json", ".html", ".svg"):
             continue
         content = fpath.read_text(encoding="utf-8", errors="replace")
         if FORBIDDEN_MOD_RE.search(content):
             report.error(f"Jargon interdit détecté dans {fpath}")
         if FORBIDDEN_TERM_RE.search(content):
             report.error(f"Terme hors périmètre détecté dans {fpath}")
+        if "tests" not in rel.parts:
+            if PERSONAL_PATH_RE.search(content):
+                report.error(f"Fuite de chemin personnel OS détectée dans {rel.as_posix()}")
+            if FILE_URI_RE.search(content):
+                report.error(f"URI locale interdite détectée dans {rel.as_posix()}")
 
     _run_hook_dry_runs(root, report)
     _run_mcp_dry_run(root, report)

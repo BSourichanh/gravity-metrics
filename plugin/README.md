@@ -11,9 +11,9 @@ Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque s
 
 ## Positionnement dans l'écosystème Gravity (Lot 4b)
 
-- **[`gravity` Core](https://github.com/BSourichanh/gravity)** : socle d'initialisation (`$GRAVITY_HOME` / `~/.gemini/gravity/`), registre des modules (`config/module.json`) et futur hôte UI unifié.
+- **[`gravity` Core](https://github.com/BSourichanh/gravity)** : socle d'initialisation (`$GRAVITY_HOME` / `~/.gemini/gravity/`), registre des modules (`config/module.json`) et hôte UI unifié.
 - **[`gravity-workflow`](https://github.com/BSourichanh/gravity-workflow)** (`/gravity-workflow`) : harnais d'orchestration multi-agents, garde-fous fail-closed, evals et `/caveman`.
-- **`gravity-metrics`** (`/gravity-metrics`) : produit les signaux `session-metrics` et `cost-telemetry` destinés aux futures optimisations du mode `auto` de `gravity-workflow`. Son design system sobre sert de référence pour `gravity` (`ui.mode: "transition-mcp"`, `ui.target: "gravity"`).
+- **`gravity-metrics`** (`/gravity-metrics`) : produit les signaux `session-metrics` et `cost-telemetry` destinés à l'optimisation du mode `auto` de `gravity-workflow`. Son design system sobre sert de référence pour `gravity` (`ui.mode: "transition-mcp"`, `ui.target: "gravity"`).
 
 ## Cycle hybride & Commande `/gravity-metrics`
 

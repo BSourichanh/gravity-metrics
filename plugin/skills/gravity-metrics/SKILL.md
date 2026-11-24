@@ -12,8 +12,11 @@ description: >-
 - `/gravity-metrics stop [label]` (or `finish` / explicit `<label>`): seals and archives the window, then opens `detail`.
 - `/gravity-metrics archive <uuid_or_prefix> [label] [--full] [--force]`: archives a specific session.
 - `/gravity-metrics pending [--project <name>]`: lists unarchived Gravity root sessions with real work activity (`view="pending"`).
+- `/gravity-architect "<instruction>"` (excluding `init|add|sync|status|archive|audit`): idempotently auto-starts a zero-token `architect-<slug>` capture window without overwriting an active capture.
+- `SessionStart` (`hooks/session_start_metrics.py`): records `(conversation_id -> cwd, project)` into `session_meta.json`, ignoring subagent worktrees (`/.gemini/antigravity/worktrees/`).
 
 For end-of-cycle CLI updates (`scripts/cli.py`):
+- `cli.py start <uuid_or_prefix> [-l LABEL] [--step N]`: explicitly starts or overwrites a capture window from the CLI.
 - `cli.py archive <uuid_or_prefix> --update-sealed` / `cli.py add <uuid_or_prefix> --update-sealed`: refreshes an already-sealed window (e.g. after a final `git push`) while preserving the `PendingBridgeJobsError` guard unless `--force` is passed.
 - `cli.py pending --all`: includes consultative sessions without work tools (`write_file`, `edit_file`, `run_workflow`, `invoke_subagent`, `swarm`, etc.).
 

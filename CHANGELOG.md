@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Validator Integrity Hardening (`INT-01`, `INT-03`, `INT-04`, `INT-06` in `plugin/scripts/validate.py`):**
+  - `INT-01`: enforced `ALLOWED_UI_MODES = frozenset({"none", "core", "transition-sidecar", "transition-mcp", "mcp-app"})` on `config/module.json` `ui.mode`.
+  - `INT-03`: promoted `suggestedPrompts` checks in `plugin/plugin.json` to blocking errors (exactly 3 non-empty strings, `<= 100` chars each, `/cmd — résumé` format).
+  - `INT-04`: enforced UTF-8 without BOM and LF line endings across all `.py`, `.md`, `.json` files under the plugin root (and in `_read_json_no_bom`) without duplicating D4 Markdown errors.
+  - `INT-06`: added OS personal home-directory path (Windows, macOS, and Linux user-profile prefixes, excluding `~`) and `file:` URI leak detection across `.py`, `.md`, `.json`, `.html`, `.svg` (excluding `tests/`).
+
+### Changed
+- **Docs & Manifests Alignment (`DOC-02`, `DOC-09`):**
+  - Updated `plugin/plugin.json` `suggestedPrompts[0]` (strict read-only phrasing) and `suggestedPrompts[2]` (`/gravity-metrics start — ...` format, `<= 100` chars).
+  - Removed forward-looking phrasing from `plugin/config/module.json`, `README.md`, and `plugin/README.md`, aligned `v0.5.0` references to `v0.5.1` in `README.md`, and documented `SessionStart` (`session_start_metrics.py`, `session_meta.json`, excluding worktrees), auto-start `/gravity-architect "<instruction>"`, and `cli.py start` in `AGENTS.md`, `plugin/skills/gravity-metrics/SKILL.md`, and `plugin/rules/AGENTS.md` (within byte budgets).
+
+### Fixed
+- **Bridge Multi-Wave Duplicate Exclusion & Milestone Accuracy (`AUD-03-01`, `AUD-03-05` in `plugin/metrics/collector.py`):**
+  - `AUD-03-01`: excluded `source == "bridge"` children from `dup_groups_map` so multi-repo/multi-wave Bridge dispatches do not trigger `duplicate_role_spawns` false positives while preserving native subagent duplicate detection.
+  - `AUD-03-05`: computed `first_prod_step = min(link_steps + child_steps)` and `last_prod_step = max(link_steps + child_steps)` in `_compute_session_milestones()` and `_compute_pending_milestones()`, gating `verif_step` / `has_verif` on `not bridge_pending_jobs` (resp. `not pending_jobs`) and `st_i > last_prod_step` while preserving 4-phase and 2-phase fallback JSON compatibility.
+
+### Added (Earlier Unreleased)
 - **Auto-Capture `/gravity-architect` & CLI `start` (`plugin/hooks/pre_invocation_metrics.py`, `plugin/metrics/lifecycle.py`, `plugin/scripts/cli.py`):**
   - Added idempotent `overwrite: bool = False` (default) on `start_active_capture()` and extracted `next_step_index_in_transcript()` in `lifecycle.py` (re-exported from `metrics/__init__.py`).
   - Auto-started an idempotent zero-token `architect-<slug>` capture (`invocationNum == 0`, `overwrite=False`) in `pre_invocation_metrics.py` on `/gravity-architect <instruction>` (excluding `init|add|sync|status|archive|audit` and preserving passthrough `{}`), while explicit `/gravity-metrics start` passes `overwrite=True`.
