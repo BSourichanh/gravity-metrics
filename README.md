@@ -90,7 +90,7 @@ agy plugin install ./plugin
 
 ### Sober 3-Space MCP App Widget (`transition-mcp` → `gravity`)
 
-Open anytime with **zero LLM tokens** from **Plugins > Gravity Metrics** (`global` or `aux_pane`):
+Open anytime with **zero LLM tokens** from the **left sidebar (`Gravity Metrics`)** or the **`+` menu in the right side pane** (`global` or `aux_pane`):
 - **Adaptive Theme & Contextual Header:** inherits `hostContext.styles.variables` (light/dark/Nord) with neutral graphite/zinc fallback, `tabular-nums`, single `<select>` Project on `Synthèse`/`Sessions`, and conditional `2026 / 2027` toggle (shown only when `cost_usd != cost_2027_usd`).
 - **3 Spaces:**
   1. **`Synthèse` (`overview`):** 4 KPIs (cumulative/avg cost, avg cache/savings, sessions/agents, health/alerts), project distribution (`>= 2` projects), chronological SVG evolution (`started_at`), HTML/CSS category bars, and 5 latest sessions.

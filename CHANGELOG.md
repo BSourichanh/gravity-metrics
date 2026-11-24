@@ -13,11 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Detailed Anomaly Counters & Cold-Cache Telemetry (`plugin/metrics/collector.py`, `tests/test_neon_errors_cold_cache.py`):**
   - Preserved `error_steps` / `total_error_steps` (`status == "ERROR"`) and `error_rate_pct`, and added `invalid_steps` (`status == "INVALID"`), `shell_nonzero_steps` (`GENERIC` steps with line-anchored `Command exited with code <N>` where `N != 0`, ignoring `Command output:`/`Showing lines ` bodies), and `total_anomalies` per agent, bucket, and `summary`.
   - Added `efficiency_and_waste["cold_cache_waste"]` (`calls`, `input_tokens`, `cost_usd`, `share_of_total_cost_pct`) classifying cold/near-cold `PLANNER_RESPONSE` calls (`(cache == 0 and in > 10k)` or `(in > 50k and cache / (in + cache) < 0.25)`).
+- **MCP Apps Host Capability Check (`plugin/mcp/server.py`, `tests/test_mcp_server.py`):**
+  - Inspected `params.capabilities` and `params.clientInfo` during `initialize` (`MIN_ANTIGRAVITY_MCP_APP_VERSION = (2, 34, 0)`) and appended a non-fatal `[WARN UI]` notice to `open_metrics_dashboard` text output only when the client is identified without MCP Apps support (`isError: false`, zero false positives on minimal/uninitialized calls).
 
 ### Changed
 - **CLI Inspect & Session Detail Reports (`plugin/metrics/markdown_report.py`, `README.md`, `plugin/README.md`):**
   - Updated `render_inspect_text()` to display `invalid=<N> | shell!=0=<M>` when present, `coldCache=<N> ($<usd>, <pct>%)` in `Alertes`, `[fallback]` suffixes in `--- Par modèle ---`, and a warning line when `unmatched_models` is non-empty.
   - Updated `render_session_detail_markdown()` to surface `ERROR / INVALID / shell!=0` counts and `cold_cache_waste` in `## 6. Diagnostic & Gaspillages` with full backward compatibility on legacy payloads.
+
+### Fixed
+- **Dashboard UI Access Labels (`install.py`, `plugin/metrics/markdown_report.py`, `README.md`):**
+  - Replaced obsolete `Plugins` menu UI access labels for Gravity Metrics with the current Antigravity UI entry points (left sidebar `Gravity Metrics` or `+` menu in the right side pane).
 
 ## [0.5.1] - 2026-11-24
 

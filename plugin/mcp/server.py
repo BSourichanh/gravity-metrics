@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,6 +45,7 @@ SERVER_VERSION = "0.5.1"
 APP_URI = "ui://gravity-metrics/dashboard.html"
 APP_MIME = "text/html;profile=mcp-app"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+MIN_ANTIGRAVITY_MCP_APP_VERSION = (2, 34, 0)
 MAX_TRAJECTORY_BYTES = 450_000
 VALID_DASHBOARD_VIEWS = {
     "overview",
@@ -57,6 +59,93 @@ VALID_DASHBOARD_VIEWS = {
 }
 
 _STATE_CACHE: Dict[Tuple[str, ...], Dict[str, Any]] = {}
+
+
+def _default_host_client_state() -> Dict[str, Any]:
+    return {
+        "initialized": False,
+        "ui_supported": None,
+        "client_name": "",
+        "client_version": "",
+        "reason": "",
+    }
+
+
+_HOST_CLIENT_STATE: Dict[str, Any] = _default_host_client_state()
+
+
+def _reset_host_client_state() -> None:
+    """Réinitialise l'état de capacité UI de l'hôte MCP (isolation des tests)."""
+    _HOST_CLIENT_STATE.clear()
+    _HOST_CLIENT_STATE.update(_default_host_client_state())
+
+
+def _parse_semver_tuple(raw: Any) -> Optional[Tuple[int, int, int]]:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", str(raw or ""))
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def _is_truthy_ui_capability(value: Any) -> bool:
+    return value is True or (isinstance(value, dict) and len(value) > 0)
+
+
+def _inspect_client_ui_support(params: Any) -> Dict[str, Any]:
+    """Classifie la capacité MCP Apps UI du client depuis `initialize.params`."""
+    p = params if isinstance(params, dict) else {}
+    caps = p.get("capabilities")
+    cinfo = p.get("clientInfo")
+    client_name = str(cinfo.get("name") or "").strip() if isinstance(cinfo, dict) else ""
+    client_version = str(cinfo.get("version") or "").strip() if isinstance(cinfo, dict) else ""
+
+    if isinstance(caps, dict):
+        ext = caps.get("extensions") if isinstance(caps.get("extensions"), dict) else {}
+        exp = caps.get("experimental") if isinstance(caps.get("experimental"), dict) else {}
+        ui_candidates = (
+            ext.get("io.modelcontextprotocol/ui"),
+            exp.get("io.modelcontextprotocol/ui"),
+            ext.get("com.google.antigravity/ui"),
+            exp.get("com.google.antigravity/ui"),
+            caps.get("ui"),
+        )
+        if any(_is_truthy_ui_capability(val) for val in ui_candidates):
+            return {
+                "initialized": True,
+                "ui_supported": True,
+                "client_name": client_name,
+                "client_version": client_version,
+                "reason": "ui_capability_declared",
+            }
+
+    name_cf = client_name.casefold()
+    if "antigravity" in name_cf and "cli" not in name_cf:
+        parsed_ver = _parse_semver_tuple(client_version)
+        if parsed_ver is not None and parsed_ver < MIN_ANTIGRAVITY_MCP_APP_VERSION:
+            return {
+                "initialized": True,
+                "ui_supported": False,
+                "client_name": client_name,
+                "client_version": client_version,
+                "reason": "antigravity_version_below_min",
+            }
+
+    if not isinstance(caps, dict) or (caps == {} and not client_name):
+        return {
+            "initialized": True,
+            "ui_supported": None,
+            "client_name": client_name,
+            "client_version": client_version,
+            "reason": "unknown_or_minimal_handshake",
+        }
+
+    return {
+        "initialized": True,
+        "ui_supported": False,
+        "client_name": client_name,
+        "client_version": client_version,
+        "reason": "no_ui_capability_declared",
+    }
 
 
 def _stat_token(path: Path) -> str:
@@ -672,7 +761,20 @@ def _state_payload(snap: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
+def _format_host_client_desc(host_state: Dict[str, Any]) -> str:
+    cname = str(host_state.get("client_name") or "").strip()
+    cver = str(host_state.get("client_version") or "").strip()
+    if cname and cver:
+        return f"{cname} {cver}"
+    if cname:
+        return cname
+    return "client inconnu"
+
+
+def _handle_open_metrics_dashboard(
+    args: Dict[str, Any],
+    host_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     store_dir, history_path = resolve_store_paths()
     brain_dir = default_brain_dir()
     catalog_path = PLUGIN_ROOT / "config" / "pricing_catalog.json"
@@ -770,6 +872,15 @@ def _handle_open_metrics_dashboard(args: Dict[str, Any]) -> Dict[str, Any]:
         )
     else:
         summary_txt = f"Gravity Metrics ouvert ({scope_desc})."
+
+    active_state = host_state if host_state is not None else _HOST_CLIENT_STATE
+    if active_state.get("initialized") and active_state.get("ui_supported") is False:
+        client_desc = _format_host_client_desc(active_state)
+        summary_txt = (
+            f"{summary_txt}\n"
+            f"[WARN UI] Client MCP sans support MCP Apps détecté ({client_desc}) : "
+            "affichage texte uniquement ; Antigravity App v2.34.0+ requis pour l'interface graphique."
+        )
 
     return _tool_ok(summary_txt, structured)
 
@@ -1008,7 +1119,10 @@ _TOOL_DISPATCH = {
 }
 
 
-def handle_jsonrpc_message(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def handle_jsonrpc_message(
+    msg: Dict[str, Any],
+    session_state: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     """Traite un message JSON-RPC 2.0 MCP et retourne la réponse (None pour les notifications)."""
     if not isinstance(msg, dict):
         return {
@@ -1034,8 +1148,12 @@ def handle_jsonrpc_message(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "error": {"code": -32600, "message": "Invalid Request"},
         }
 
+    state = session_state if session_state is not None else _HOST_CLIENT_STATE
+
     try:
         if method == "initialize":
+            state.clear()
+            state.update(_inspect_client_ui_support(params))
             client_proto = str(params.get("protocolVersion") or DEFAULT_PROTOCOL_VERSION)
             result: Dict[str, Any] = {
                 "protocolVersion": client_proto,
@@ -1065,7 +1183,10 @@ def handle_jsonrpc_message(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     "error": {"code": -32602, "message": f"Unknown tool: {tool_name}"},
                 }
             try:
-                result = handler(tool_args)
+                if tool_name == "open_metrics_dashboard":
+                    result = _handle_open_metrics_dashboard(tool_args, host_state=state)
+                else:
+                    result = handler(tool_args)
             except Exception as exc:
                 result = _tool_err(str(exc))
         elif method == "resources/list":

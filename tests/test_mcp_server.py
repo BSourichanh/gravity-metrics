@@ -488,6 +488,150 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual(by_id_code[2]["structuredContent"]["audits"], [])
             self.assertTrue(by_id_code[3]["isError"])
 
+    def test_initialize_ui_capability_warning_matrix(self) -> None:
+        from mcp.server import (  # noqa: E402
+            _inspect_client_ui_support,
+            _reset_host_client_state,
+            handle_jsonrpc_message,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            self._seed_store(store, brain)
+
+            # 1) Client avec capability MCP Apps déclarée -> zéro [WARN UI]
+            res_ui = _call_mcp_stdio(
+                [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {
+                                "extensions": {
+                                    "io.modelcontextprotocol/ui": {
+                                        "mimeTypes": ["text/html;profile=mcp-app"]
+                                    }
+                                }
+                            },
+                            "clientInfo": {"name": "Antigravity", "version": "2.34.0"},
+                        },
+                    },
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {}}},
+                ],
+                store,
+                brain,
+            )
+            open_ui = {r["id"]: r["result"] for r in res_ui}[2]
+            self.assertFalse(open_ui["isError"])
+            self.assertNotIn("[WARN UI]", open_ui["content"][0]["text"])
+
+            # 2) Clients identifiés sans support MCP Apps (agy CLI & Antigravity < 2.34.0) -> [WARN UI] + isError=False
+            for client_info, caps, expected_desc in (
+                ({"name": "agy", "version": "1.2.0"}, {}, "agy 1.2.0"),
+                ({"name": "Antigravity", "version": "2.33.0"}, {"roots": {}}, "Antigravity 2.33.0"),
+            ):
+                res_no_ui = _call_mcp_stdio(
+                    [
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "initialize",
+                            "params": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": caps,
+                                "clientInfo": client_info,
+                            },
+                        },
+                        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {}}},
+                    ],
+                    store,
+                    brain,
+                )
+                open_no_ui = {r["id"]: r["result"] for r in res_no_ui}[2]
+                self.assertFalse(open_no_ui["isError"])
+                txt = open_no_ui["content"][0]["text"]
+                self.assertIn("[WARN UI]", txt)
+                self.assertIn(expected_desc, txt)
+                self.assertIn("v2.34.0+", txt)
+                self.assertEqual(len(open_no_ui["structuredContent"]["records"]), 2)
+
+            # 3) Handshake minimal sans capabilities, capabilities {} sans clientInfo, ou appel direct sans initialize -> zéro [WARN UI]
+            for init_params in (
+                {"protocolVersion": "2025-06-18"},
+                {"protocolVersion": "2025-06-18", "capabilities": {}},
+            ):
+                res_min = _call_mcp_stdio(
+                    [
+                        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init_params},
+                        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {}}},
+                    ],
+                    store,
+                    brain,
+                )
+                open_min = {r["id"]: r["result"] for r in res_min}[2]
+                self.assertFalse(open_min["isError"])
+                self.assertNotIn("[WARN UI]", open_min["content"][0]["text"])
+
+            res_direct = _call_mcp_stdio(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {}}},
+                ],
+                store,
+                brain,
+            )
+            self.assertFalse(res_direct[0]["result"]["isError"])
+            self.assertNotIn("[WARN UI]", res_direct[0]["result"]["content"][0]["text"])
+
+            # 4) Couverture directe des variantes capabilities & isolation _reset_host_client_state
+            self.assertTrue(_inspect_client_ui_support({"capabilities": {"experimental": {"com.google.antigravity/ui": True}}})["ui_supported"])
+            self.assertTrue(_inspect_client_ui_support({"capabilities": {"ui": True}})["ui_supported"])
+            self.assertIs(_inspect_client_ui_support({"capabilities": {}, "clientInfo": {"name": "Antigravity", "version": "2.33.9"}})["ui_supported"], False)
+            self.assertIsNone(_inspect_client_ui_support({"capabilities": {}})["ui_supported"])
+
+            old_env = os.environ.get("GRAVITY_METRICS_HOME")
+            old_brain = os.environ.get("ANTIGRAVITY_BRAIN_DIR")
+            try:
+                os.environ["GRAVITY_METRICS_HOME"] = str(store)
+                os.environ["ANTIGRAVITY_BRAIN_DIR"] = str(brain)
+                _reset_host_client_state()
+                r_no_init = handle_jsonrpc_message(
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {}}}
+                )
+                self.assertNotIn("[WARN UI]", r_no_init["result"]["content"][0]["text"])
+
+                handle_jsonrpc_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "initialize",
+                        "params": {"capabilities": {}, "clientInfo": {"name": "agy", "version": "0.9.0"}},
+                    }
+                )
+                r_warn = handle_jsonrpc_message(
+                    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {}}}
+                )
+                self.assertIn("[WARN UI]", r_warn["result"]["content"][0]["text"])
+
+                _reset_host_client_state()
+                r_after_reset = handle_jsonrpc_message(
+                    {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {}}}
+                )
+                self.assertNotIn("[WARN UI]", r_after_reset["result"]["content"][0]["text"])
+            finally:
+                _reset_host_client_state()
+                if old_env is None:
+                    os.environ.pop("GRAVITY_METRICS_HOME", None)
+                else:
+                    os.environ["GRAVITY_METRICS_HOME"] = old_env
+                if old_brain is None:
+                    os.environ.pop("ANTIGRAVITY_BRAIN_DIR", None)
+                else:
+                    os.environ["ANTIGRAVITY_BRAIN_DIR"] = old_brain
+
 
 if __name__ == "__main__":
     unittest.main()

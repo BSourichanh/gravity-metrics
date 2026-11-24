@@ -178,7 +178,7 @@ def print_next_steps(target_dir: Optional[Path]) -> None:
     print(f"  - Centralized metrics store : {store_dir}")
     print("  - Manage plugin in Antigravity : [Gravity Metrics](customization://gravity-metrics)")
     print("  - Run /gravity-metrics at the end of a session to capture metrics and open the widget.")
-    print("  - Or open the global dashboard anytime from Plugins -> Gravity Metrics (zero tokens).")
+    print("  - Or open the global dashboard anytime from the left sidebar (Gravity Metrics) or the + menu in the right side pane (zero tokens).")
 
 
 def check_environment(

@@ -172,7 +172,7 @@ def render_metrics_markdown(records: List[Dict[str, Any]]) -> str:
         [
             "",
             "---",
-            "*Commande : `/gravity-metrics` · Widget interactif : **Plugins > Gravity Metrics***",
+            "*Commande : `/gravity-metrics` · Widget interactif : **barre latérale gauche (`Gravity Metrics`) / menu `+` panneau droit***",
             "",
         ]
     )
