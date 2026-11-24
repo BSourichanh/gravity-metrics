@@ -492,6 +492,7 @@ class TestPreInvocationHook(unittest.TestCase):
                         "cache_read_tokens": 0,
                         "output_tokens": 200,
                         "tool_calls": [
+                            {"name": "edit_file"},
                             {
                                 "name": "call_mcp_tool",
                                 "args": {
@@ -506,7 +507,7 @@ class TestPreInvocationHook(unittest.TestCase):
                                         }
                                     ),
                                 },
-                            }
+                            },
                         ],
                     },
                     {
@@ -545,7 +546,7 @@ class TestPreInvocationHook(unittest.TestCase):
 
             extra_env = {"GRAVITY_BRIDGE_HOME": str(bridge_home)}
 
-            # 1) /gravity-metrics pending -> liste uniquement la racine (exclut child_cid) sans écrire
+            # 1) /gravity-metrics pending -> liste uniquement la racine (exclut child_cid via transcript) sans lire bridge.db
             out_pend = _run_hook(
                 json.dumps({"cwd": str(ws), "lastUserInput": "/gravity-metrics pending"}),
                 store,
@@ -556,27 +557,10 @@ class TestPreInvocationHook(unittest.TestCase):
             md_pend = out_pend["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
             self.assertIn("7777aaaa", md_pend)
             self.assertNotIn("8888bbbb", md_pend)
-            self.assertIn("job actif", md_pend)
+            self.assertNotIn("job actif", md_pend)
             self.assertFalse((store / "data" / "history.jsonl").exists())
 
-            # 2) Archivage bloqué tant que le job Bridge est 'dispatched' (zéro écriture)
-            out_blk = _run_hook(
-                json.dumps({"cwd": str(ws), "lastUserInput": "/gravity-metrics archive 7777aaaa"}),
-                store,
-                brain,
-                extra_env=extra_env,
-            )
-            self.assertEqual(out_blk.get("terminationBehavior"), "terminate")
-            md_blk = out_blk["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
-            self.assertIn("--force", md_blk)
-            self.assertFalse((store / "data" / "history.jsonl").exists())
-
-            # 3) Clôture du job Bridge -> /gravity-metrics archive <prefix> réussit et unifie les tokens
-            con = sqlite3.connect(str(db_path))
-            con.execute("UPDATE jobs SET status = 'completed' WHERE id = 'job-1'")
-            con.commit()
-            con.close()
-
+            # 2) Aucun blocage Bridge même si bridge.db contient un job 'dispatched' -> archive directe réussit
             out_arch = _run_hook(
                 json.dumps({"cwd": str(ws), "lastUserInput": "/gravity-metrics archive 7777aaaa e2e-arch"}),
                 store,
@@ -587,10 +571,10 @@ class TestPreInvocationHook(unittest.TestCase):
             recs = load_history(store / "data" / "history.jsonl")
             self.assertEqual(len(recs), 1)
             self.assertEqual(recs[0]["label"], "e2e-arch")
-            self.assertEqual(recs[0]["agents"], 2)
-            self.assertEqual(recs[0]["input_tokens"], 15_000)
-            self.assertEqual(recs[0]["bridge_children_count"], 1)
-            self.assertEqual(recs[0]["bridge_workspaces"], ["gravity-metrics"])
+            self.assertEqual(recs[0]["agents"], 1)
+            self.assertEqual(recs[0]["input_tokens"], 10_000)
+            self.assertEqual(recs[0]["bridge_children_count"], 0)
+            self.assertEqual(recs[0]["bridge_workspaces"], [])
 
     def test_architect_auto_capture_idempotence_and_exclusions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

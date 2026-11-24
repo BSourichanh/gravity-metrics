@@ -276,41 +276,37 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             self.assertNotIn(ignored_cmd_cid, by_wcid)
 
             metrics = collect_run_metrics(
-                root_id,
+                bridge_cid,
                 brain,
                 CATALOG_PATH,
-                gravity_window=True,
-                project="gravity-studio",
-                bridge_db_path=db_path,
+                gravity_window=False,
+                project="gravity-metrics",
             )
             summary = metrics["summary"]
-            self.assertEqual(summary["total_agents"], 8)
-            self.assertEqual(summary["max_tree_depth"], 2)
+            self.assertEqual(summary["total_agents"], 7)
+            self.assertEqual(summary["max_tree_depth"], 1)
             self.assertEqual(summary["execution_mode"], "workflow")
             self.assertIn("workflow", summary["features_used"])
 
             wf_agents = [a for a in metrics["agents"] if a["source"] == "workflow"]
             self.assertEqual(len(wf_agents), 6)
             for wag in wf_agents:
-                self.assertEqual(wag["bridge_workspace"], "gravity-metrics")
-                self.assertEqual(wag["depth"], 2)
+                self.assertEqual(wag["depth"], 1)
 
-            self.assertEqual(metrics["by_workspace"]["gravity-studio"]["agents"], 1)
             self.assertEqual(metrics["by_workspace"]["gravity-metrics"]["agents"], 7)
 
             self.assertEqual(metrics["by_category"]["orchestration"]["agents"], 3)
-            self.assertEqual(metrics["by_category"]["build"]["agents"], 3)
+            self.assertEqual(metrics["by_category"]["build"]["agents"], 2)
             self.assertEqual(metrics["by_category"]["verification"]["agents"], 2)
 
             inspect_txt = render_inspect_text(metrics)
             self.assertIn("[workflow]", inspect_txt)
 
             detail_md = render_session_detail_markdown(metrics)
-            self.assertIn("[workflow · d.2]", detail_md)
+            self.assertIn("[workflow · d.1]", detail_md)
 
-            known_children = load_known_child_conversation_ids(brain, bridge_db_path=db_path)
+            known_children = load_known_child_conversation_ids(brain)
             self.assertNotIn(root_id, known_children)
-            self.assertIn(bridge_cid, known_children)
             self.assertIn(wf_p1, known_children)
 
     def test_bridge_v020_callback_and_v010_compatibility(self) -> None:
@@ -424,10 +420,10 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             self.assertEqual(caller_ids, {root_id, root_no_out})
 
             convs = list_gravity_conversations(brain, include_all=False, bridge_db_path=db_v2)
-            self.assertEqual({c["conversation_id"] for c in convs}, {root_id, root_no_out})
+            self.assertEqual({c["conversation_id"] for c in convs}, {root_no_out})
 
             pend = list_pending_sessions(brain, root / "history.jsonl", bridge_db_path=db_v2)
-            self.assertEqual({p["conversation_id"] for p in pend}, {root_id, root_no_out})
+            self.assertEqual({p["conversation_id"] for p in pend}, set())
 
             # discover_bridge_links sur root_id : garde child_id & gravity-metrics, expose callback actif
             links_root = discover_bridge_links(
@@ -679,7 +675,6 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             self.assertNotIn(cid_slash, known_children)
             self.assertIn(cid_sub_cycle, known_children)
             self.assertIn(cid_wf_child_user, known_children)
-            self.assertIn(cid_bridge_child, known_children)
             self.assertIn(cid_noise_sub_uri, known_children)
 
             # Anti-cycle discover_agent_tree sans boucle
@@ -689,7 +684,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                 {cid_slash, cid_sub_cycle, cid_wf_child_user},
             )
 
-            expected_roots = {cid_slash, cid_runs, cid_caller}
+            expected_roots = {cid_slash, cid_runs}
             convs = list_gravity_conversations(
                 brain,
                 include_all=False,

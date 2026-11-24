@@ -151,7 +151,6 @@ def _run_metrics_command(
     from metrics import (
         METRICS_MARKER,
         METRICS_OPEN_MARKER,
-        PendingBridgeJobsError,
         archive_conversation,
         classify_metrics_prompt,
         collect_run_metrics,
@@ -271,6 +270,7 @@ def _run_metrics_command(
             project=parsed.get("project") or (project if same_conv else ""),
             gravity_profile=gravity_profile if same_conv else "",
             force=parsed["force"],
+            self_archiving=same_conv,
         )
         already = bool(saved_rec.get("already_archived"))
         md_out = render_chat_summary_markdown(
@@ -340,6 +340,7 @@ def _run_metrics_command(
         project=eff_project,
         gravity_profile=gravity_profile,
         store_dir=store_dir,
+        self_archiving=True,
     )
 
     if metrics["summary"]["total_llm_calls"] == 0:
@@ -382,18 +383,16 @@ def _run_metrics_command(
         )
         return "handoff", md_out, sys_msg
 
-    try:
-        saved_rec, _ = record_session_metrics(
-            metrics,
-            store_dir=store_dir,
-            history_path=history_path,
-            label=eff_label,
-            note=parsed["note"],
-            auto_label=not bool(eff_label),
-            force=parsed["force"],
-        )
-    except PendingBridgeJobsError:
-        raise
+    saved_rec, _ = record_session_metrics(
+        metrics,
+        store_dir=store_dir,
+        history_path=history_path,
+        label=eff_label,
+        note=parsed["note"],
+        auto_label=not bool(eff_label),
+        force=parsed["force"],
+        self_archiving=True,
+    )
 
     already = bool(saved_rec.get("already_archived"))
     md_out = render_chat_summary_markdown(
@@ -504,11 +503,6 @@ def main() -> int:
     try:
         result = _run_metrics_command(payload, raw_input, rest)
     except Exception as exc:
-        if exc.__class__.__name__ == "PendingBridgeJobsError":
-            emit_user_markdown(
-                f"### Gravity Metrics — Archivage bloqué (Bridge actif)\n\n{exc}"
-            )
-            return 0
         emit_user_markdown(
             f"### Gravity Metrics — Erreur\n\n"
             f"`{exc}`\n\n"

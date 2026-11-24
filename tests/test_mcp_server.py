@@ -331,7 +331,7 @@ class TestMcpServer(unittest.TestCase):
                         "input_tokens": 10_000,
                         "cache_read_tokens": 20_000,
                         "output_tokens": 400,
-                        "tool_calls": [],
+                        "tool_calls": [{"name": "write_file"}],
                     },
                 ],
             )
@@ -377,16 +377,17 @@ class TestMcpServer(unittest.TestCase):
 
             pend = by_id[1]["structuredContent"]["pending_sessions"]
             self.assertEqual([p["conversation_id"] for p in pend], [cid_root])
-            self.assertTrue(pend[0]["has_pending_bridge_jobs"])
+            self.assertFalse(pend[0]["has_pending_bridge_jobs"])
 
-            self.assertTrue(by_id[2]["isError"])
-            self.assertIn("--force", by_id[2]["content"][0]["text"])
+            # Aucun blocage live bridge.db : archivage sans force réussit directement
+            self.assertFalse(by_id[2]["isError"])
+            arch_sc = by_id[2]["structuredContent"]
+            self.assertEqual(arch_sc["archived"]["label"], "mcp-run")
+            self.assertEqual(arch_sc["archived"]["agents"], 1)
+            self.assertEqual(arch_sc["pending_sessions"], [])
 
             self.assertFalse(by_id[3]["isError"])
-            arch_sc = by_id[3]["structuredContent"]
-            self.assertEqual(arch_sc["archived"]["label"], "mcp-run")
-            self.assertEqual(arch_sc["archived"]["agents"], 2)
-            self.assertEqual(arch_sc["pending_sessions"], [])
+            self.assertEqual(by_id[3]["structuredContent"]["archived"]["label"], "mcp-run")
 
             self.assertFalse(by_id[4]["isError"])
             self.assertTrue(by_id[4]["structuredContent"]["already_archived"])

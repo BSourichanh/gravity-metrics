@@ -13,12 +13,6 @@ import shlex
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import unicodedata
 
-from .bridge_links import (
-    discover_bridge_links,
-    load_bridge_caller_conversation_ids,
-    load_bridge_target_conversation_ids,
-    resolve_project_from_bridge_or_transcript,
-)
 from .lifecycle import (
     load_active_captures,
     load_ignored_sessions,
@@ -657,6 +651,29 @@ def _stat_sig(path: Path) -> Tuple[int, int]:
         return (0, -1)
 
 
+def _parse_tool_call_args(tc: Dict[str, Any]) -> Dict[str, Any]:
+    """Extrait le dictionnaire d'arguments d'un tool_call (`args` ou `arguments`)."""
+    raw_args = tc.get("args") if tc.get("args") is not None else tc.get("arguments")
+    if isinstance(raw_args, str):
+        try:
+            raw_args = json.loads(raw_args)
+        except Exception:
+            return {"CommandLine": raw_args}
+    return raw_args if isinstance(raw_args, dict) else {}
+
+
+def _extract_shell_command_str(tc: Dict[str, Any]) -> str:
+    """Extrait la commande shell depuis un tool_call (`CommandLine`/`command`/`cmd`)."""
+    args = _parse_tool_call_args(tc)
+    return str(
+        args.get("CommandLine")
+        or args.get("command")
+        or args.get("command_line")
+        or args.get("cmd")
+        or ""
+    )
+
+
 def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
     """Indexe en une passe (avec cache mtime_ns+size) un `transcript.jsonl` racine."""
     tpath = Path(transcript_path)
@@ -760,8 +777,7 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                             if tname in _WORK_TOOL_NAMES:
                                 has_work_activity = True
                         if tname in ("run_command", "execute_command", "bash", "shell"):
-                            args_obj = tc.get("args") if isinstance(tc.get("args"), dict) else {}
-                            cmd_str = str(args_obj.get("CommandLine") or args_obj.get("command") or "").lower()
+                            cmd_str = _extract_shell_command_str(tc).lower()
                             if any(tok in cmd_str for tok in ("git push", "validate.py", "unittest", "pytest")):
                                 has_push_or_verif = True
 
@@ -986,8 +1002,9 @@ def load_known_child_conversation_ids(
     brain_dir: Union[Path, str],
     bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> Set[str]:
-    """Agrège tous les identifiants connus de conversations enfants (Bridge, subagents, workflow)."""
-    child_ids: Set[str] = set(load_bridge_target_conversation_ids(bridge_db_path))
+    """Agrège tous les identifiants connus de conversations enfants (subagents, workflow)."""
+    _ = bridge_db_path
+    child_ids: Set[str] = set()
     base = Path(brain_dir)
     if not base.is_dir():
         return child_ids
@@ -1056,13 +1073,12 @@ def is_bridge_child_conversation(
     brain_dir: Optional[Union[Path, str]] = None,
     bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> bool:
-    """Retourne True si la conversation est un enfant délégué via Gravity Bridge."""
+    """Retourne True si la conversation est un enfant délégué via Gravity Bridge (détection transcript)."""
+    _ = bridge_db_path
     cid = str(conversation_id or "").strip()
     if not cid:
         return False
-    if bridge_target_ids is None:
-        bridge_target_ids = load_bridge_target_conversation_ids(bridge_db_path)
-    if cid in bridge_target_ids:
+    if bridge_target_ids and cid in bridge_target_ids:
         return True
 
     prompt_txt = first_prompt_raw
@@ -1122,15 +1138,14 @@ def list_gravity_conversations(
     runs_jsonl_paths: Optional[List[Path]] = None,
     bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Liste les conversations racines récentes, en excluant les enfants Bridge par défaut."""
+    """Liste les conversations racines récentes, en excluant les enfants par défaut."""
+    _ = bridge_db_path
     base = Path(brain_dir)
     if not base.is_dir():
         return []
 
     known_session_ids = _collect_known_gravity_session_ids(runs_jsonl_paths)
-    bridge_target_ids = load_bridge_target_conversation_ids(bridge_db_path)
-    bridge_caller_ids = load_bridge_caller_conversation_ids(bridge_db_path)
-    known_child_ids = load_known_child_conversation_ids(base, bridge_db_path=bridge_db_path)
+    known_child_ids = load_known_child_conversation_ids(base)
     results: List[Dict[str, Any]] = []
 
     for cdir in base.iterdir():
@@ -1148,7 +1163,6 @@ def list_gravity_conversations(
         is_bridge_child = is_bridge_child_conversation(
             cdir.name,
             first_prompt_raw=first_prompt_raw,
-            bridge_target_ids=bridge_target_ids,
         )
         is_child = is_bridge_child or (cdir.name in known_child_ids)
         if not include_all and is_child:
@@ -1158,7 +1172,6 @@ def list_gravity_conversations(
         is_gravity = (not is_child) and (
             has_gravity_cmd
             or (cdir.name in known_session_ids)
-            or (cdir.name in bridge_caller_ids)
         )
         if not include_all and not is_gravity:
             continue
@@ -1488,7 +1501,8 @@ def discover_agent_tree(
     brain_dir: Union[Path, str],
     bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Découvre l'arbre complet (sous-agents natifs + enfants Gravity Bridge) par BFS anti-cycles."""
+    """Découvre l'arbre complet (sous-agents natifs + run_workflow) par BFS anti-cycles."""
+    _ = bridge_db_path
     base = Path(brain_dir)
     visited: Set[str] = set()
     enqueued: Set[str] = {root_id}
@@ -1557,33 +1571,7 @@ def discover_agent_tree(
                         }
                     )
 
-        bridge_links = discover_bridge_links(cid, transcript_path, bridge_db=bridge_db_path)
-        for link in bridge_links:
-            bcid = str(link.get("target_conversation_id") or "").strip()
-            if not bcid or bcid in visited:
-                continue
-            if bcid not in children_ids:
-                children_ids.append(bcid)
-            if bcid not in enqueued:
-                enqueued.add(bcid)
-                msg_type = str(link.get("msg_type") or "handoff").strip().lower()
-                to_ws = str(link.get("to_workspace") or "unknown").strip()
-                queue.append(
-                    {
-                        "cid": bcid,
-                        "parent_id": cid,
-                        "depth": depth + 1,
-                        "type_name": f"bridge_{msg_type}" if msg_type else "bridge",
-                        "role": f"bridge:{to_ws}",
-                        "state": link.get("job_status") or link.get("thread_status"),
-                        "spawn_step": link.get("spawn_step_index"),
-                        "source": "bridge",
-                        "bridge_thread_id": link.get("thread_id"),
-                        "bridge_workspace": to_ws,
-                        "bridge_job_status": link.get("job_status") or "",
-                        "bridge_created_at": link.get("created_at"),
-                    }
-                )
+        bridge_links: List[Dict[str, Any]] = []
 
         workflow_children = discover_workflow_children(cid, base)
         for w in workflow_children:
@@ -1676,6 +1664,215 @@ def _has_finish_tool_call(step_obj: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+_CLI_VALUE_FLAGS = frozenset(
+    {
+        "-l",
+        "--label",
+        "-n",
+        "--note",
+        "--profile",
+        "--workspace",
+        "--brain-dir",
+        "--bridge-db",
+        "--catalog",
+        "--store",
+        "--history",
+    }
+)
+
+
+def _split_shell_segments(cmd: str) -> List[str]:
+    """Découpe une ligne shell en segments sur `;`, `|`, `&` et retours ligne hors quotes."""
+    segments: List[str] = []
+    buf: List[str] = []
+    quote: Optional[str] = None
+    escaped = False
+    for ch in cmd:
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            continue
+        if ch == "\\" and quote == '"':
+            buf.append(ch)
+            escaped = True
+            continue
+        if quote is not None:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            buf.append(ch)
+            continue
+        if ch in (";", "|", "&", "\r", "\n"):
+            seg = "".join(buf).strip()
+            if seg:
+                segments.append(seg)
+            buf.clear()
+            continue
+        buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def _segment_is_cli_self_archive(seg: str, current_cid: str) -> bool:
+    """Vérifie si un segment invoque directement `cli.py archive|add` pour `current_cid`."""
+    try:
+        raw_tokens = shlex.split(seg, posix=False)
+    except ValueError:
+        raw_tokens = seg.split()
+    tokens = [
+        t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in ('"', "'") else t
+        for t in raw_tokens
+        if t
+    ]
+    if not tokens:
+        return False
+    if Path(tokens[0].replace("\\", "/")).name.lower() in ("git", "echo", "printf", "grep", "rg"):
+        return False
+    cli_idx = next(
+        (idx for idx, tok in enumerate(tokens) if Path(tok.replace("\\", "/")).name.lower() == "cli.py"),
+        None,
+    )
+    if cli_idx is None or cli_idx + 1 >= len(tokens):
+        return False
+    subcmd = tokens[cli_idx + 1].lower()
+    if subcmd not in ("archive", "add"):
+        return False
+
+    positionals: List[str] = []
+    has_latest = False
+    j = cli_idx + 2
+    while j < len(tokens):
+        tok = tokens[j]
+        if tok in _CLI_VALUE_FLAGS:
+            j += 2
+            continue
+        if tok.startswith("-"):
+            if tok == "--latest":
+                has_latest = True
+            j += 1
+            continue
+        positionals.append(tok)
+        j += 1
+
+    target = positionals[0] if positionals else ""
+    cid_low = current_cid.strip().lower()
+    if subcmd == "archive":
+        if not target:
+            return False
+        if cid_low and not cid_low.startswith(target.lower()):
+            return False
+        return True
+    if target:
+        if cid_low and not cid_low.startswith(target.lower()):
+            return False
+        return True
+    return has_latest
+
+
+def _is_cli_archive_tool_call(
+    step_obj: Optional[Dict[str, Any]],
+    current_cid: str = "",
+) -> bool:
+    """Détecte un step PLANNER_RESPONSE appelant directement `cli.py archive` ou `cli.py add` sur `current_cid`."""
+    if not isinstance(step_obj, dict) or step_obj.get("type") != "PLANNER_RESPONSE":
+        return False
+    if step_obj.get("status") in ("ERROR", "INVALID"):
+        return False
+    raw_tcs = step_obj.get("tool_calls")
+    if not isinstance(raw_tcs, (list, tuple)):
+        return False
+    for tc in raw_tcs:
+        if not isinstance(tc, dict):
+            continue
+        tname = str(tc.get("name") or "").strip().lower()
+        if tname not in ("run_command", "execute_command", "bash", "shell"):
+            continue
+        cmd = _extract_shell_command_str(tc)
+        if not cmd or "cli.py" not in cmd.lower():
+            continue
+        if any(_segment_is_cli_self_archive(seg, current_cid) for seg in _split_shell_segments(cmd)):
+            return True
+    return False
+
+
+def _review_dict_is_failed(obj: Dict[str, Any]) -> Optional[bool]:
+    """Retourne True/False si `obj` porte un verdict Reviewer structuré, sinon None."""
+    if not any(k in obj for k in ("verdict", "blockers", "majors")):
+        return None
+    if str(obj.get("verdict") or "").strip().upper() == "FAIL":
+        return True
+    for key in ("blockers", "majors"):
+        val = obj.get(key)
+        if isinstance(val, list) and any(str(x).strip() for x in val):
+            return True
+        if (
+            isinstance(val, str)
+            and val.strip()
+            and val.strip().lower() not in ("[]", "none", "null", "aucun", "aucune", "0", "n/a")
+        ):
+            return True
+    return False
+
+
+def _is_reviewer_verdict_failed(step_obj: Optional[Dict[str, Any]]) -> bool:
+    """Détermine si la réponse finale d'un Reviewer retourne `FAIL`, des `blockers` ou des `majors`."""
+    if not isinstance(step_obj, dict) or step_obj.get("type") != "PLANNER_RESPONSE":
+        return False
+    for tc in step_obj.get("tool_calls") or []:
+        if not isinstance(tc, dict):
+            continue
+        args = _parse_tool_call_args(tc)
+        res = _review_dict_is_failed(args)
+        if res is not None:
+            return res
+
+    content = step_obj.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return False
+
+    decoder = json.JSONDecoder()
+    pos = 0
+    saw_review_json = False
+    while True:
+        idx = content.find("{", pos)
+        if idx < 0:
+            break
+        try:
+            parsed, end_idx = decoder.raw_decode(content, idx)
+        except ValueError:
+            pos = idx + 1
+            continue
+        pos = max(idx + 1, end_idx)
+        if isinstance(parsed, dict):
+            res = _review_dict_is_failed(parsed)
+            if res is not None:
+                saw_review_json = True
+                if res:
+                    return True
+    if saw_review_json:
+        return False
+
+    if re.search(
+        r"(?i)\bverdict(?:\s+global)?\b\s*(?:\*{1,2})?\s*[:=]\s*(?:\*{1,2})?\s*fail\b",
+        content,
+    ):
+        return True
+    if re.search(r"\[(?:BLOCKER|MAJOR)\]\s*\S", content):
+        return True
+    if re.search(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\*{1,2}|#{1,4}\s*)?(?:blockers?|majors?)(?:\*{1,2})?\s*:"
+        r"\s*(?!\s*(?:\[\s*\]|none|null|aucun[e]?|0|n/?a|-)\s*$)\S",
+        content,
+    ):
+        return True
+    return False
+
+
 def parse_agent_transcript(
     transcript_path: Union[Path, str],
     catalog: Dict[str, Any],
@@ -1684,6 +1881,10 @@ def parse_agent_transcript(
     active_gap_cap_s: float = 120.0,
     start_line_idx: int = 0,
     end_line_idx: Optional[int] = None,
+    *,
+    self_archiving: bool = False,
+    allow_cli_self_archive: bool = True,
+    conversation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Extrait les métriques d'exécution, tokens, coûts et qualité d'un transcript (optionnellement fenêtré)."""
     tpath = Path(transcript_path)
@@ -1728,6 +1929,7 @@ def parse_agent_transcript(
     timestamps: List[datetime] = []
     prev_non_sys: Optional[Dict[str, Any]] = None
     last_non_sys: Optional[Dict[str, Any]] = None
+    last_planner_resp: Optional[Dict[str, Any]] = None
     user_prompt_texts: List[str] = []
     step_costs: List[Dict[str, Any]] = []
 
@@ -1791,6 +1993,7 @@ def parse_agent_transcript(
                         tool_calls_by_name[str(tc.get("name") or "unknown")] += 1
 
                 if step_type == "PLANNER_RESPONSE":
+                    last_planner_resp = obj
                     llm_calls += 1
                     in_t = int(obj.get("input_tokens") or 0)
                     cache_t = int(obj.get("cache_read_tokens") or 0)
@@ -1878,22 +2081,49 @@ def parse_agent_transcript(
     avg_ctx = round(sum(sorted_ctx) / len(sorted_ctx), 1) if sorted_ctx else 0.0
     p95_ctx = _percentile_sorted(sorted_ctx, 0.95)
 
+    eff_cid = str(conversation_id or "").strip()
+    if not eff_cid and tpath.parent.name == "logs" and tpath.parent.parent.name == ".system_generated":
+        eff_cid = tpath.parents[2].name
+
     clean_term = False
     last_non_sys_type: Optional[str] = None
     if last_non_sys is not None:
         last_non_sys_type = last_non_sys.get("type")
-        if last_non_sys_type == "PLANNER_RESPONSE":
-            clean_term = (not bool(last_non_sys.get("tool_calls"))) or (
-                last_non_sys.get("status") == "DONE"
-                and _has_finish_tool_call(last_non_sys)
+        last_status = last_non_sys.get("status")
+        has_terminal_error = (
+            last_status in ("ERROR", "INVALID")
+            or (
+                last_non_sys_type == "GENERIC"
+                and _extract_shell_nonzero_code(last_non_sys.get("content")) is not None
+            )
+        )
+        if has_terminal_error:
+            clean_term = False
+        elif self_archiving:
+            clean_term = True
+        elif last_non_sys_type == "PLANNER_RESPONSE":
+            clean_term = (
+                (not bool(last_non_sys.get("tool_calls")))
+                or (last_status == "DONE" and _has_finish_tool_call(last_non_sys))
+                or (
+                    allow_cli_self_archive
+                    and _is_cli_archive_tool_call(last_non_sys, eff_cid)
+                )
             )
         elif last_non_sys_type == "GENERIC":
-            clean_term = (
-                last_non_sys.get("status") == "DONE"
-                and prev_non_sys is not None
-                and prev_non_sys.get("status") == "DONE"
-                and _has_finish_tool_call(prev_non_sys)
-            )
+            if (
+                allow_cli_self_archive
+                and last_status in ("DONE", "RUNNING", None, "")
+                and _is_cli_archive_tool_call(prev_non_sys, eff_cid)
+            ):
+                clean_term = True
+            else:
+                clean_term = (
+                    last_status == "DONE"
+                    and prev_non_sys is not None
+                    and prev_non_sys.get("status") == "DONE"
+                    and _has_finish_tool_call(prev_non_sys)
+                )
 
     ts_sorted = sorted(timestamps)
     first_dt = ts_sorted[0] if ts_sorted else None
@@ -1976,6 +2206,7 @@ def parse_agent_transcript(
         "_raw_proj": proj_acc,
         "_user_prompts": user_prompt_texts,
         "_step_costs": step_costs,
+        "_reviewer_verdict_failed": _is_reviewer_verdict_failed(last_planner_resp),
     }
 
 
@@ -2330,10 +2561,12 @@ def collect_run_metrics(
     gravity_profile: str = "",
     bridge_db_path: Optional[Union[Path, str]] = None,
     store_dir: Optional[Union[Path, str]] = None,
+    self_archiving: bool = False,
 ) -> Dict[str, Any]:
     """Collecte et agrège les métriques et coûts complets d'un arbre de conversation."""
+    _ = bridge_db_path
     catalog = load_pricing_catalog(pricing_catalog_path)
-    nodes = discover_agent_tree(root_id, brain_dir, bridge_db_path=bridge_db_path)
+    nodes = discover_agent_tree(root_id, brain_dir)
     if not nodes:
         raise ValueError(f"Aucun nœud découvert pour {root_id!r} dans {brain_dir}")
 
@@ -2348,12 +2581,6 @@ def collect_run_metrics(
     if not resolved_project:
         meta_entry = load_session_meta(store_dir).get(root_id) or {}
         resolved_project = str(meta_entry.get("project") or "").strip()
-    if not resolved_project:
-        resolved_project = resolve_project_from_bridge_or_transcript(
-            root_id,
-            root_node["transcript_path"],
-            bridge_db=bridge_db_path,
-        )
 
     if apply_window:
         window_info = resolve_gravity_window(
@@ -2400,33 +2627,9 @@ def collect_run_metrics(
     root_workspace = resolved_project or "root"
 
     bridge_pending_jobs: List[Dict[str, Any]] = []
-    seen_pending_keys: Set[Tuple[str, str]] = set()
 
     for node in nodes:
         is_root = node["conversation_id"] == root_id
-        for link in node.get("_bridge_links") or []:
-            if not link.get("has_active_job"):
-                continue
-            if is_root and apply_window and not _is_spawn_in_window(
-                link.get("spawn_step_index"),
-                link.get("created_at"),
-                None,
-                window_info,
-            ):
-                continue
-            pkey = (str(link.get("thread_id") or ""), str(link.get("job_id") or ""))
-            if pkey not in seen_pending_keys:
-                seen_pending_keys.add(pkey)
-                bridge_pending_jobs.append(
-                    {
-                        "thread_id": pkey[0],
-                        "job_id": pkey[1],
-                        "to_workspace": str(link.get("to_workspace") or "unknown"),
-                        "status": str(link.get("job_status") or ""),
-                        "action": str(link.get("job_action") or ""),
-                        "target_conversation_id": str(link.get("target_conversation_id") or ""),
-                    }
-                )
 
         parsed = parse_agent_transcript(
             node["transcript_path"],
@@ -2435,6 +2638,9 @@ def collect_run_metrics(
             secondary_profile=secondary_profile,
             start_line_idx=window_info["start_line_idx"] if is_root else 0,
             end_line_idx=window_info["end_line_idx"] if is_root else None,
+            self_archiving=bool(self_archiving and is_root),
+            allow_cli_self_archive=is_root,
+            conversation_id=node["conversation_id"],
         )
         unmatched_models.update(parsed["unmatched_models"])
         if parsed["transcript_missing"]:
@@ -2639,7 +2845,25 @@ def collect_run_metrics(
             grp,
             key=lambda a: (a["first_ts"] or "9999", a["spawn_step_index"] or 0, a["conversation_id"]),
         )
-        dups = grp_sorted[1:]
+        remediation_excluded = 0
+        if str(tname or "").strip().lower() == "reviewer":
+            dups = []
+            for idx in range(1, len(grp_sorted)):
+                cur = grp_sorted[idx]
+                prev_rev = grp_sorted[idx - 1]
+                if (
+                    idx == 1
+                    and cur.get("source") == "workflow"
+                    and prev_rev.get("source") == "workflow"
+                    and prev_rev.get("_reviewer_verdict_failed")
+                ):
+                    remediation_excluded += 1
+                    continue
+                dups.append(cur)
+        else:
+            dups = grp_sorted[1:]
+        if not dups:
+            continue
         d_calls = sum(d["llm_calls"] for d in dups)
         d_cost = sum(d["_raw_cost"]["total_usd"] for d in dups)
         dup_agent_count += len(dups)
@@ -2651,7 +2875,7 @@ def collect_run_metrics(
                 "parent_role": parent_role,
                 "type_name": tname,
                 "role": rl,
-                "spawn_count": len(grp_sorted),
+                "spawn_count": len(grp_sorted) - remediation_excluded,
                 "duplicate_count": len(dups),
                 "duplicate_calls": d_calls,
                 "duplicate_cost_usd": round(d_cost, 6),
@@ -2939,6 +3163,7 @@ def list_pending_sessions(
     include_noise: bool = False,
 ) -> List[Dict[str, Any]]:
     """Liste les sessions Gravity racines ayant de l'activité LLM non encore archivée."""
+    _ = bridge_db_path
     base = Path(brain_dir)
     if not base.is_dir():
         return []
@@ -2951,9 +3176,7 @@ def list_pending_sessions(
     ignored_map = load_ignored_sessions(eff_store)
 
     known_session_ids = _collect_known_gravity_session_ids(runs_jsonl_paths)
-    bridge_target_ids = load_bridge_target_conversation_ids(bridge_db_path)
-    bridge_caller_ids = load_bridge_caller_conversation_ids(bridge_db_path)
-    known_child_ids = load_known_child_conversation_ids(base, bridge_db_path=bridge_db_path)
+    known_child_ids = load_known_child_conversation_ids(base)
     pending: List[Dict[str, Any]] = []
 
     for cdir in base.iterdir():
@@ -2970,7 +3193,6 @@ def list_pending_sessions(
         is_bridge_child = is_bridge_child_conversation(
             cdir.name,
             first_prompt_raw=first_prompt_raw,
-            bridge_target_ids=bridge_target_ids,
         )
         is_child = is_bridge_child or (cdir.name in known_child_ids)
         if is_child:
@@ -2979,7 +3201,6 @@ def list_pending_sessions(
         is_gravity = (
             has_gravity_cmd
             or (cdir.name in known_session_ids)
-            or (cdir.name in bridge_caller_ids)
             or (cdir.name in active_captures)
         )
         if not is_gravity:
@@ -3031,25 +3252,14 @@ def list_pending_sessions(
         if llm_calls == 0:
             continue
 
-        links = discover_bridge_links(cdir.name, tpath, bridge_db=bridge_db_path)
         apply_win = bool(win.get("has_gravity_anchor") or win.get("mode") != "full_conversation")
-        active_links = [
-            lnk
-            for lnk in links
-            if not apply_win
-            or _is_spawn_in_window(lnk.get("spawn_step_index"), lnk.get("created_at"), None, win)
-        ]
-        pending_jobs = [lnk for lnk in active_links if lnk.get("has_active_job")]
-        bridge_children = [lnk for lnk in active_links if lnk.get("target_conversation_id")]
-        bridge_workspaces = sorted(
-            {str(lnk.get("to_workspace") or "").strip() for lnk in active_links if lnk.get("to_workspace")}
-        )
+        active_links: List[Dict[str, Any]] = []
+        pending_jobs: List[Dict[str, Any]] = []
+        bridge_children: List[Dict[str, Any]] = []
+        bridge_workspaces: List[str] = []
         wf_children = discover_workflow_children(cdir.name, base)
         if (
             not include_noise
-            and not active_links
-            and not bridge_children
-            and not pending_jobs
             and not wf_children
             and cap_entry is None
             and not has_work_activity
@@ -3074,7 +3284,6 @@ def list_pending_sessions(
         resolved_proj = (
             str((cap_entry or {}).get("project") or "").strip()
             or str(meta_entry.get("project") or "").strip()
-            or resolve_project_from_bridge_or_transcript(cdir.name, tpath, bridge_db=bridge_db_path)
         )
 
         mtime = float(tx["mtime"] or 0.0)

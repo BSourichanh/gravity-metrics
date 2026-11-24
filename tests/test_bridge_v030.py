@@ -309,56 +309,55 @@ class TestBridgeTreeAndWorkspaces(unittest.TestCase):
                 bridge_db_path=db_path,
             )
             s = m["summary"]
-            # root + sub_root + arch_id + wf_id + wf_sub + br_id = 6 agents, depth 2
-            self.assertEqual(s["total_agents"], 6)
-            self.assertEqual(s["max_tree_depth"], 2)
-            self.assertEqual(s["execution_mode"], "bridge")
-            self.assertIn("bridge", s["features_used"])
+            # Zéro lecture live bridge.db : uniquement root + sub_root natifs (2 agents, depth 1)
+            self.assertEqual(s["total_agents"], 2)
+            self.assertEqual(s["max_tree_depth"], 1)
+            self.assertEqual(m["bridge_pending_jobs"], [])
             self.assertIn("gravity", s["features_used"])
             self.assertNotIn("gemini-4-neon", m["by_model"])
 
-            # by_workspace : gravity-studio (root+sub_root=2), gravity-workflow (wf_id+wf_sub=2), gravity-architect (1), gravity-bridge (1)
-            by_ws = m["by_workspace"]
-            self.assertEqual(
-                set(by_ws.keys()),
-                {"gravity-studio", "gravity-architect", "gravity-workflow", "gravity-bridge"},
-            )
-            self.assertEqual(by_ws["gravity-studio"]["agents"], 2)
-            self.assertEqual(by_ws["gravity-workflow"]["agents"], 2)
-            self.assertAlmostEqual(sum(v["cost_share_pct"] for v in by_ws.values()), 100.0, delta=0.1)
-
-            # by_phase : chaque bridge:<workspace> agrège son sous-arbre
-            self.assertIn("bridge:gravity-workflow", m["by_phase"])
-            self.assertEqual(m["by_phase"]["bridge:gravity-workflow"]["agents"], 2)
-            self.assertIn("bridge:gravity-architect", m["by_phase"])
-            self.assertIn("bridge:gravity-bridge", m["by_phase"])
-
-            # Rapports & inspect incluent workspace & arbre Bridge
-            det_md = render_session_detail_markdown(m)
+            # Compatibilité RO d'un rapport archivé historique (#01-#04) avec sections workspace & arbre Bridge
+            archived_compat = dict(m)
+            archived_compat["by_workspace"] = {
+                "gravity-studio": m["by_workspace"]["gravity-studio"],
+                "gravity-architect": m["by_workspace"]["gravity-studio"],
+            }
+            archived_compat["agents"] = list(m["agents"]) + [
+                {
+                    **m["agents"][0],
+                    "conversation_id": arch_id,
+                    "parent_id": root_id,
+                    "depth": 1,
+                    "type_name": "bridge_handoff",
+                    "role": "bridge:gravity-architect",
+                    "category": "build",
+                    "source": "bridge",
+                    "bridge_thread_id": "thr-arch-1",
+                    "bridge_workspace": "gravity-architect",
+                    "workspace": "gravity-architect",
+                }
+            ]
+            det_md = render_session_detail_markdown(archived_compat)
             self.assertIn("Répartition par Workspace", det_md)
             self.assertIn("Arbre Bridge Inter-Workspaces", det_md)
             self.assertIn("thr-arch-1", det_md)
-            insp = render_inspect_text(m)
+            insp = render_inspect_text(archived_compat)
             self.assertIn("--- Par workspace ---", insp)
             self.assertIn("--- Arbre Bridge ---", insp)
 
-            # Cas 2 : bridge.db v0.1.0 sans caller_conversation_id -> fallback transcript parent fonctionne
+            # Cas 2 : bridge-v1.db présent sur disque -> toléré et ignoré (arbre natif seul)
             db_v1 = root / "bridge-v1.db"
             con1 = _create_bridge_db(db_v1, v2_schema=False)
             con1.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)",
                 ("thr-arch-1", "gravity-studio", "gravity-architect", "handoff", "done", arch_id, "2026-11-22T18:10:12Z"),
             )
-            con1.execute(
-                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("thr-wf-1", "gravity-studio", "gravity-workflow", "question", "done", wf_id, "2026-11-22T18:20:02Z"),
-            )
             con1.commit()
             con1.close()
 
             tree_v1 = discover_agent_tree(root_id, brain, bridge_db_path=db_v1)
             tree_ids_v1 = {n["conversation_id"] for n in tree_v1}
-            self.assertEqual(tree_ids_v1, {root_id, sub_root, arch_id, wf_id, wf_sub})
+            self.assertEqual(tree_ids_v1, {root_id, sub_root})
 
 
 class TestEntrypointsExclusionSlugAndLifecycle(unittest.TestCase):
@@ -415,7 +414,7 @@ class TestEntrypointsExclusionSlugAndLifecycle(unittest.TestCase):
                 brain / cid_root,
                 [
                     {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T15:00:00Z", "content": "/gravity-bridge send"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T15:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 2000, "output_tokens": 100, "tool_calls": []},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T15:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 2000, "output_tokens": 100, "tool_calls": [{"name": "write_file"}]},
                 ],
             )
             _write_transcript(
@@ -446,18 +445,19 @@ class TestEntrypointsExclusionSlugAndLifecycle(unittest.TestCase):
             con.close()
 
             self.assertTrue(is_bridge_child_conversation(cid_br_prompt, brain_dir=brain, bridge_db_path=db_path))
-            self.assertTrue(is_bridge_child_conversation(cid_br_db, brain_dir=brain, bridge_db_path=db_path))
+            # Sans préfixe [GRAVITY-BRIDGE | dans le transcript, aucune lecture live bridge.db
+            self.assertFalse(is_bridge_child_conversation(cid_br_db, brain_dir=brain, bridge_db_path=db_path))
             self.assertFalse(is_bridge_child_conversation(cid_root, brain_dir=brain, bridge_db_path=db_path))
 
-            # Par défaut, enfants Bridge exclus de list_gravity_conversations et list_pending_sessions
+            # Par défaut, enfants marqués [GRAVITY-BRIDGE | exclus de list_gravity_conversations et list_pending_sessions
             convs_default = {c["conversation_id"] for c in list_gravity_conversations(brain, include_all=False, bridge_db_path=db_path)}
-            self.assertEqual(convs_default, {cid_root})
+            self.assertEqual(convs_default, {cid_root, cid_br_db})
             convs_all = {c["conversation_id"] for c in list_gravity_conversations(brain, include_all=True, bridge_db_path=db_path)}
             self.assertEqual(convs_all, {cid_root, cid_br_prompt, cid_br_db})
 
             pending = list_pending_sessions(brain, hist_path, bridge_db_path=db_path)
             self.assertEqual([p["conversation_id"] for p in pending], [cid_root])
-            self.assertTrue(pending[0]["has_pending_bridge_jobs"])
+            self.assertFalse(pending[0]["has_pending_bridge_jobs"])
             self.assertIn("aaaa0000", render_pending_table(pending))
 
             # Rétrocompatibilité schema 2.0.0 sans status -> lu avec status='archived'
@@ -466,27 +466,24 @@ class TestEntrypointsExclusionSlugAndLifecycle(unittest.TestCase):
                 "label": "legacy-v200",
                 "conversation_id": cid_legacy,
                 "cost_usd": 1.0,
+                "bridge_children_count": 1,
+                "bridge_workspaces": ["gravity-metrics"],
+                "workspace_share_pct": {"gravity-studio": 60.0, "gravity-metrics": 40.0},
             }
             save_history(hist_path, [legacy_rec])
             loaded_legacy = load_history(hist_path)
             self.assertEqual(loaded_legacy[0]["status"], "archived")
+            self.assertEqual(loaded_legacy[0]["bridge_children_count"], 1)
 
-            # Blocage job Bridge actif si force=False
-            m = collect_run_metrics(cid_root, brain, CATALOG_PATH, gravity_window=True, bridge_db_path=db_path)
-            with self.assertRaises(PendingBridgeJobsError) as ctx:
-                record_session_metrics(m, store_dir=store, history_path=hist_path, label="arch-1", force=False)
-            self.assertIn("--force", str(ctx.exception))
-
-            # --force autorise l'archivage
-            saved, _ = record_session_metrics(m, store_dir=store, history_path=hist_path, label="arch-1", force=True)
+            # Stub PendingBridgeJobsError conservé mais jamais levé même si bridge.db a un job actif
+            self.assertTrue(issubclass(PendingBridgeJobsError, RuntimeError))
+            m = collect_run_metrics(cid_root, brain, CATALOG_PATH, gravity_window=True, project="gravity-studio", bridge_db_path=db_path)
+            self.assertEqual(m["bridge_pending_jobs"], [])
+            saved, _ = record_session_metrics(m, store_dir=store, history_path=hist_path, label="arch-1", force=False)
             self.assertEqual(saved["schema_version"], SCHEMA_VERSION)
             self.assertEqual(saved["status"], "archived")
             self.assertTrue(saved["archived_at"])
-            self.assertEqual(saved["bridge_children_count"], 1)
-            self.assertEqual(saved["bridge_workspaces"], ["gravity-metrics"])
             self.assertEqual(saved["project"], "gravity-studio")
-            self.assertIn("gravity-studio", saved["workspace_share_pct"])
-            self.assertIn("gravity-metrics", saved["workspace_share_pct"])
 
             # Immuabilité : ré-archivage sans --force retourne already_archived=True sans écraser
             saved_again, _ = record_session_metrics(m, store_dir=store, history_path=hist_path, label="autre-label", force=False)

@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Découverte et lecture sécurisée en lecture seule des dossiers audits/agents/ (100 % stdlib)."""
 
-from contextlib import closing
 from datetime import datetime, timezone
 import os
 from pathlib import Path, PurePosixPath
 import re
-import sqlite3
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
-
-from .bridge_links import _connect_ro, _table_columns, resolve_bridge_db_path
 
 MAX_AUDIT_BYTES = 262_144
 
@@ -46,40 +42,6 @@ def _slugify_root_id(raw: str) -> str:
 def _split_env_dirs(raw: str) -> List[Path]:
     parts = [p.strip() for p in raw.split(os.pathsep) if p.strip()]
     return [Path(p).expanduser() for p in parts]
-
-
-def _load_bridge_workspace_dirs(bridge_db: Optional[Union[Path, str]] = None) -> List[Tuple[str, Path]]:
-    db_path = resolve_bridge_db_path(bridge_db)
-    conn = _connect_ro(db_path)
-    if conn is None:
-        return []
-    out: List[Tuple[str, Path]] = []
-    try:
-        with closing(conn):
-            cols = _table_columns(conn, "workspaces")
-            if "canonical_path" not in cols:
-                return []
-            select_cols = ["canonical_path"]
-            if "slug" in cols:
-                select_cols.append("slug")
-            if "display_name" in cols:
-                select_cols.append("display_name")
-            order_col = "slug" if "slug" in cols else "canonical_path"
-            rows = conn.execute(
-                f"SELECT {', '.join(select_cols)} FROM workspaces "
-                f"WHERE canonical_path IS NOT NULL AND TRIM(canonical_path) != '' "
-                f"ORDER BY {order_col} ASC"
-            ).fetchall()
-            for row in rows:
-                r = dict(row)
-                cpath = str(r.get("canonical_path") or "").strip()
-                if not cpath:
-                    continue
-                ws_name = str(r.get("slug") or r.get("display_name") or Path(cpath).name or "").strip()
-                out.append((ws_name, Path(cpath).expanduser()))
-    except sqlite3.Error:
-        return []
-    return out
 
 
 def _is_audits_code_dir(path: Path) -> bool:
@@ -127,6 +89,7 @@ def discover_audit_roots(
     include_cwd: bool = True,
 ) -> List[Dict[str, Any]]:
     """Découvre les dossiers `audits/agents/` en lecture seule selon la priorité Gravity."""
+    _ = bridge_db
     candidates: List[Tuple[str, Path, str, bool]] = []
 
     if audits_dir is not None:
@@ -152,10 +115,6 @@ def discover_audit_roots(
                 cwd = Path.cwd()
                 candidates.append(
                     (_workspace_label(cwd), cwd / "audits" / "agents", "workspace", False)
-                )
-            for ws_name, ws_path in _load_bridge_workspace_dirs(bridge_db):
-                candidates.append(
-                    (_workspace_label(ws_path, ws_name), ws_path / "audits" / "agents", "bridge_db", False)
                 )
 
     roots: List[Dict[str, Any]] = []

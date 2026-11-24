@@ -19,6 +19,11 @@ for p in (str(PLUGIN_ROOT), str(SCRIPTS_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from metrics import (  # noqa: E402
+    render_metrics_markdown,
+    render_session_detail_markdown,
+    to_session_record,
+)
 from metrics.collector import collect_run_metrics, list_pending_sessions  # noqa: E402
 import validate  # noqa: E402
 
@@ -125,6 +130,8 @@ class TestBridgeDuplicatesAndMultiWaveMilestones(unittest.TestCase):
             data_no_native = collect_run_metrics(
                 root_id, brain, CATALOG_PATH, label="bridge-only", bridge_db_path=db_path
             )
+            self.assertEqual(data_no_native["bridge_pending_jobs"], [])
+            self.assertEqual(data_no_native["summary"]["total_agents"], 1)
             dups_only = data_no_native["efficiency_and_waste"]["duplicate_role_spawns"]
             self.assertEqual(dups_only["duplicate_agent_count"], 0)
             self.assertEqual(dups_only["groups"], [])
@@ -152,54 +159,39 @@ class TestBridgeDuplicatesAndMultiWaveMilestones(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             brain = root / "brain"
-            db_path = root / "bridge" / "bridge.db"
 
-            root_id = "wave0001-1111-2222-3333-444455556666"
-            w1_cid = "wave0002-1111-2222-3333-444455556666"
-            w2_cid = "wave0003-1111-2222-3333-444455556666"
-            solo_id = "solo0001-1111-2222-3333-444455556666"
+            root_id = "aaaa0001-1111-2222-3333-444455556666"
+            w1_cid = "aaaa0002-1111-2222-3333-444455556666"
+            w2_cid = "aaaa0003-1111-2222-3333-444455556666"
+            solo_id = "bbbb0001-1111-2222-3333-444455556666"
 
-            # Wave 1 (step 2) -> callback/verif intermédiaire (steps 4, 5) -> Wave 2 (step 6)
-            def _bridge_call(to_ws: str) -> dict:
-                return {
-                    "name": "call_mcp_tool",
-                    "args": {
-                        "ServerName": '"gravity-bridge_bridge"',
-                        "ToolName": '"send_message"',
-                        "Arguments": json.dumps(
-                            {
-                                "from_workspace": "studio",
-                                "to_workspace": to_ws,
-                                "msg_type": "handoff",
-                                "dispatch": True,
-                            }
-                        ),
-                    },
-                }
-
+            # Wave 1 (step 2) -> verif intermédiaire (steps 4, 5) -> Wave 2 (step 6) via run_workflow
             root_entries_active = [
                 {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T11:00:00Z", "content": "/gravity-architect spec multi-wave"},
                 {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
-                {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 3_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [_bridge_call("repo-w1")]},
-                {"step_index": 3, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-24T11:00:11Z", "content": json.dumps({"thread_id": "thr-w1", "to_workspace": "repo-w1"})},
-                {"step_index": 4, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T11:01:00Z", "content": "[GRAVITY-BRIDGE CALLBACK] wave 1 done"},
+                {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 3_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "run_workflow"}]},
+                {"step_index": 3, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-24T11:00:11Z", "content": f"- [agent:builder] Builder W1: DONE ({w1_cid})\n"},
+                {"step_index": 4, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T11:01:00Z", "content": "Vague 1 terminée"},
                 {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:01:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 4_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "run_command", "arguments": {"CommandLine": "python -m unittest"}}]},
-                {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:02:00Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 6_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [_bridge_call("repo-w2")]},
-                {"step_index": 7, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-24T11:02:01Z", "content": json.dumps({"thread_id": "thr-w2", "to_workspace": "repo-w2"})},
+                {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:02:00Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 6_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "run_workflow"}]},
+                {"step_index": 7, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-24T11:02:01Z", "content": f"- [agent:builder] Builder W2: DONE ({w2_cid})\n"},
             ]
             _write_transcript(brain / root_id, root_entries_active)
+            tasks_dir = brain / root_id / ".system_generated" / "tasks"
+            tasks_dir.mkdir(parents=True, exist_ok=True)
+            (tasks_dir / "task-2.log").write_text(f"- [agent:builder] Builder W1: DONE ({w1_cid})\n", encoding="utf-8")
+            (tasks_dir / "task-6.log").write_text(f"- [agent:builder] Builder W2: DONE ({w2_cid})\n", encoding="utf-8")
+
             _write_transcript(
                 brain / w1_cid,
                 [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T11:00:20Z", "content": "[GRAVITY-BRIDGE | thread=thr-w1]"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:00:30Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 300, "tool_calls": []},
+                    {"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:00:30Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 300, "tool_calls": []},
                 ],
             )
             _write_transcript(
                 brain / w2_cid,
                 [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T11:02:10Z", "content": "[GRAVITY-BRIDGE | thread=thr-w2]"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:02:20Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 20_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
+                    {"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:02:20Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 20_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
                 ],
             )
 
@@ -212,27 +204,15 @@ class TestBridgeDuplicatesAndMultiWaveMilestones(unittest.TestCase):
                 ],
             )
 
-            _create_bridge_db(
-                db_path,
-                threads=[
-                    ("thr-w1", "studio", "repo-w1", "handoff", "closed", w1_cid, root_id, "2026-11-24T11:00:11Z"),
-                    ("thr-w2", "studio", "repo-w2", "handoff", "open", w2_cid, root_id, "2026-11-24T11:02:01Z"),
-                ],
-                jobs=[
-                    ("job-w1", "thr-w1", "repo-w1", "new_conversation", w1_cid, "completed", "2026-11-24T11:00:11Z"),
-                    ("job-w2", "thr-w2", "repo-w2", "new_conversation", w2_cid, "claimed", "2026-11-24T11:02:01Z"),
-                ],
-            )
-
-            # Wave 2 active => current_phase == "Production" malgré callback/verif Wave 1
+            # Wave 2 active => current_phase == "Production" malgré verif Wave 1
             active_data = collect_run_metrics(
-                root_id, brain, CATALOG_PATH, label="wave2-active", bridge_db_path=db_path
+                root_id, brain, CATALOG_PATH, label="wave2-active"
             )
             self.assertEqual(active_data["milestones"]["mode"], "4_phases")
             self.assertEqual(active_data["milestones"]["current_phase"], "Production")
             pending_active = {
                 p["conversation_id"]: p
-                for p in list_pending_sessions(brain, bridge_db_path=db_path)
+                for p in list_pending_sessions(brain)
             }
             self.assertEqual(pending_active[root_id]["milestones"]["current_phase"], "Production")
             self.assertEqual(pending_active[solo_id]["milestones"]["mode"], "2_phases")
@@ -245,39 +225,51 @@ class TestBridgeDuplicatesAndMultiWaveMilestones(unittest.TestCase):
             self.assertEqual(solo_data["milestones"]["current_phase"], "Production")
             self.assertEqual([ph["id"] for ph in solo_data["milestones"]["phases"]], ["production", "cloture"])
 
-            # Clôture Wave 2 + callback/verif Wave 2 (steps 8, 9)
-            con = sqlite3.connect(str(db_path))
-            con.execute("UPDATE jobs SET status = 'completed' WHERE id = 'job-w2'")
-            con.execute("UPDATE threads SET status = 'closed' WHERE id = 'thr-w2'")
-            con.commit()
-            con.close()
+            # Clôture Wave 2 + push (steps 8, 9)
             _write_transcript(
                 brain / root_id,
                 root_entries_active
                 + [
-                    {"step_index": 8, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T11:03:00Z", "content": "[GRAVITY-BRIDGE CALLBACK] wave 2 done"},
+                    {"step_index": 8, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T11:03:00Z", "content": "Vague 2 terminée"},
                     {"step_index": 9, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:03:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 9_000, "cache_read_tokens": 0, "output_tokens": 300, "tool_calls": [{"name": "run_command", "arguments": {"CommandLine": "git push origin dev"}}]},
                 ],
             )
 
             done_data = collect_run_metrics(
-                root_id, brain, CATALOG_PATH, label="wave2-done", bridge_db_path=db_path
+                root_id, brain, CATALOG_PATH, label="wave2-done"
             )
             ms = done_data["milestones"]
             self.assertEqual(ms["current_phase"], "Vérification & Push")
             by_id = {ph["id"]: ph for ph in ms["phases"]}
             self.assertEqual(by_id["production"]["status"], "done")
             self.assertEqual(by_id["verification"]["status"], "active")
-            # Wave 2 (step 5 root=6200 + w1=10300 + w2=20500) + step 2(3100) + step 4(4100) = 44200 en production; step 7(9300) en verification
+            # Wave 2 (step 6 root=6200 + w1=10300 + w2=20500) + step 2(3100) + step 5(4100) = 44200 en production; step 9(9300) en verification
             self.assertEqual(by_id["conception"]["tokens"], 2100)
             self.assertEqual(by_id["production"]["tokens"], 44200)
             self.assertEqual(by_id["verification"]["tokens"], 9300)
 
             pending_done = {
                 p["conversation_id"]: p
-                for p in list_pending_sessions(brain, bridge_db_path=db_path)
+                for p in list_pending_sessions(brain)
             }
             self.assertEqual(pending_done[root_id]["milestones"]["current_phase"], "Vérification & Push")
+
+            # Rétrocompatibilité RO des champs archivés #01-#04 (`bridge_children_count`, `bridge_workspaces`)
+            archived_compat = dict(done_data)
+            archived_compat["bridge"] = {
+                "children_count": 2,
+                "workspaces": ["gravity-architect", "gravity-workflow"],
+                "pending_jobs": [],
+            }
+            archived_compat["by_workspace"] = {
+                "gravity-studio": {"cost_share_pct": 40.0, "agents": 1, "llm_calls": 5, "cost_usd": {"total_usd": 0.4}, "cost_usd_projection": {"total_usd": 0.2}, "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "total_tokens": 1100, "cache_hit_rate_pct": 0.0, "first_ts": None, "last_ts": None, "wall_span_s": 0.0},
+                "gravity-architect": {"cost_share_pct": 60.0, "agents": 1, "llm_calls": 1, "cost_usd": {"total_usd": 0.6}, "cost_usd_projection": {"total_usd": 0.3}, "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "total_tokens": 1100, "cache_hit_rate_pct": 0.0, "first_ts": None, "last_ts": None, "wall_span_s": 0.0},
+            }
+            rec_compat = to_session_record(archived_compat, label="compat-04")
+            self.assertEqual(rec_compat["bridge_children_count"], 2)
+            self.assertEqual(rec_compat["bridge_workspaces"], ["gravity-architect", "gravity-workflow"])
+            self.assertIn("gravity-architect", render_metrics_markdown([rec_compat]))
+            self.assertIn("Répartition par Workspace", render_session_detail_markdown(archived_compat))
 
 
 class TestValidateHardening(unittest.TestCase):

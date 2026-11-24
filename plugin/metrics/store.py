@@ -125,8 +125,10 @@ def record_session_metrics(
     auto_label: bool = False,
     force: bool = False,
     update_sealed: bool = False,
+    self_archiving: bool = False,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Enregistre/archive une session de manière immuable sous verrou dans `history.jsonl`."""
+    _ = self_archiving
     explicit_label = label.strip()
     metrics_to_write = dict(metrics)
 
@@ -140,10 +142,6 @@ def record_session_metrics(
             ret = dict(existing)
             ret["already_archived"] = True
             return ret, records
-
-        pending_jobs = list(metrics_to_write.get("bridge_pending_jobs") or [])
-        if pending_jobs and not force:
-            raise PendingBridgeJobsError(pending_jobs)
 
         harmonized_proj = _harmonize_project_name(str(metrics_to_write.get("project") or ""), records)
         if not harmonized_proj and existing is not None and existing.get("project"):
@@ -228,8 +226,10 @@ def archive_conversation(
     force: bool = False,
     update_sealed: bool = False,
     bridge_db_path: Optional[Path] = None,
+    self_archiving: bool = False,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     """Résout un UUID ou préfixe, collecte la session et l'archive avec garde-fous."""
+    _ = bridge_db_path
     cid = resolve_conversation_id_in_brain(target, brain_dir)
     eff_from_step = from_step
     eff_label = label
@@ -255,8 +255,8 @@ def archive_conversation(
         from_step=eff_from_step if not full_conversation else None,
         project=eff_project,
         gravity_profile=gravity_profile,
-        bridge_db_path=bridge_db_path,
         store_dir=store_dir,
+        self_archiving=self_archiving,
     )
     saved_rec, records = record_session_metrics(
         metrics,
@@ -268,6 +268,7 @@ def archive_conversation(
         auto_label=not bool(eff_label.strip()),
         force=force,
         update_sealed=update_sealed,
+        self_archiving=self_archiving,
     )
     return saved_rec, records, metrics
 
@@ -283,6 +284,7 @@ def load_session_for_inspect(
     bridge_db_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, Any], str]:
     """Charge une session depuis `reports/<slug>.json` (hors-ligne) ou la recalcule depuis `brain_dir`."""
+    _ = bridge_db_path
     records = load_history(history_path)
     cid = target.strip()
     label = ""
@@ -312,7 +314,6 @@ def load_session_for_inspect(
         pricing_catalog_path=catalog_path,
         pricing_profile=pricing_profile,
         label=label,
-        bridge_db_path=bridge_db_path,
         store_dir=store_dir,
     )
     return metrics, slug
