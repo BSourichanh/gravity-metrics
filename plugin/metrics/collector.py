@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shlex
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+import unicodedata
 
 from .bridge_links import (
     discover_bridge_links,
@@ -59,8 +60,10 @@ _GRAVITY_CMD_RE = re.compile(
     re.IGNORECASE,
 )
 _GRAVITY_LEADING_AXES_RE = re.compile(
-    r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity-architect(?::gravity-architect)?|gravity-bridge(?::gravity-bridge)?|gravity(?::gravity)?)"
-    r"(?:\s+(?:low|medium|high|ultra|evo|evolutive|slow|fast|safe|unsafe|auto|init|status|evals|modules|doctor|sync|spec|handoff|archive|workspaces|link|send|read|take|reply|done|prune))*\s*",
+    r"^/(?:gravity-workflow|gravity-architect|gravity-bridge|gravity|boost|grill-me|plan|caveman)(?::[a-z0-9_-]+)?(?=\s|$)"
+    r"(?:\s+(?:quick|standard|deep|evo|evolutive|low|medium|high|ultra|slow|fast|safe|unsafe|auto)(?=\s|$))*"
+    r"(?:\s+(?:init|add|sync|status|evals|modules|doctor|dashboard|help|spec|handoff|archive|audit|workspaces|link|send|read|take|reply|done|prune)(?=\s|$))?"
+    r"(?:\s+(?:quick|standard|deep|evo|evolutive|low|medium|high|ultra|slow|fast|safe|unsafe|auto)(?=\s|$))*\s*",
     re.IGNORECASE,
 )
 _WORKFLOW_AGENT_LINE_RE = re.compile(
@@ -493,7 +496,12 @@ def read_gravity_profile_summary(
 
 def slugify_label(label: str, fallback: str = "session", max_len: int = 64) -> str:
     """Normalise un label en nom de fichier sûr ([a-z0-9._-]) borné à `max_len` caractères."""
-    slug = re.sub(r"[^a-z0-9._-]+", "-", (label or "").strip().lower())
+    norm = (
+        unicodedata.normalize("NFKD", str(label or ""))
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    slug = re.sub(r"[^a-z0-9._-]+", "-", norm.strip().lower())
     slug = re.sub(r"-{2,}", "-", slug).strip(".-_")
     if not slug:
         slug = fallback
@@ -507,10 +515,21 @@ def slugify_label(label: str, fallback: str = "session", max_len: int = 64) -> s
     return slug
 
 
+def _strip_leading_gravity_commands(text: str) -> str:
+    """Retire itérativement les commandes Gravity/pilotage en tête jusqu'à point fixe."""
+    current = str(text or "").strip()
+    while current:
+        nxt = _GRAVITY_LEADING_AXES_RE.sub("", current, count=1).strip()
+        if nxt == current:
+            break
+        current = nxt
+    return current
+
+
 def _extract_label_keywords(raw_prompt: str, project_slug: str = "") -> List[str]:
     """Extrait les mots-clés significatifs d'un prompt (ignore commandes `/gravity` et stopwords)."""
     cleaned = extract_user_request_text(raw_prompt)
-    cleaned = _GRAVITY_LEADING_AXES_RE.sub("", cleaned).strip()
+    cleaned = _strip_leading_gravity_commands(cleaned)
     words: List[str] = []
     for tok in re.findall(r"[a-z0-9]+", slugify_label(cleaned, fallback="", max_len=0).replace(".", "-")):
         if len(tok) < 2 or tok in _STOPWORDS or (project_slug and tok == project_slug):
@@ -524,10 +543,11 @@ def suggest_auto_label(
     first_prompt: str = "",
     started_at: Optional[str] = None,
     existing_labels: Iterable[str] = (),
+    max_len: int = 64,
 ) -> str:
     """Génère un label court, lisible et unique à partir du projet, prompt et horodatage."""
     proj_slug = slugify_label(project, fallback="")[:18].strip("-")
-    words = _extract_label_keywords(first_prompt, proj_slug)[:3]
+    words = _extract_label_keywords(first_prompt, proj_slug)[:5]
 
     dt = _parse_iso_ts(started_at)
     ts_tag = dt.astimezone(timezone.utc).strftime("%Y%m%d-%H%M") if dt else "session"
@@ -541,14 +561,19 @@ def suggest_auto_label(
     else:
         base = f"gravity-{ts_tag}"
 
-    base = base[:42].strip("-") or "session"
+    base = slugify_label(base, fallback="session", max_len=max_len)
     existing_set = {str(lbl).strip().lower() for lbl in existing_labels if lbl}
     if base.lower() not in existing_set:
         return base
 
     idx = 2
     while True:
-        candidate = f"{base[:36].strip('-')}-{idx}"
+        suffix = f"-{idx}"
+        if max_len > 0:
+            prefix = base[: max(1, max_len - len(suffix))].strip("-") or "session"
+            candidate = f"{prefix}{suffix}"[:max_len]
+        else:
+            candidate = f"{base}{suffix}"
         if candidate.lower() not in existing_set:
             return candidate
         idx += 1
@@ -2275,7 +2300,7 @@ def _compute_session_milestones(
 
 def _clean_pending_title(first_prompt: str, fallback_prompt: str) -> str:
     txt = extract_user_request_text(first_prompt)
-    stripped = _GRAVITY_LEADING_AXES_RE.sub("", txt).strip()
+    stripped = _strip_leading_gravity_commands(txt)
     if stripped:
         return stripped if len(stripped) <= 90 else stripped[:87] + "..."
     return _clean_user_prompt(fallback_prompt or first_prompt)

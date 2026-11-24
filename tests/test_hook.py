@@ -16,7 +16,7 @@ HOOK_SCRIPT = PLUGIN_ROOT / "hooks" / "pre_invocation_metrics.py"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from metrics import METRICS_MARKER, load_history  # noqa: E402
+from metrics import METRICS_MARKER, load_active_captures, load_history  # noqa: E402
 
 
 def _write_transcript(conv_dir: Path, lines: list) -> Path:
@@ -591,6 +591,125 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertEqual(recs[0]["input_tokens"], 15_000)
             self.assertEqual(recs[0]["bridge_children_count"], 1)
             self.assertEqual(recs[0]["bridge_workspaces"], ["gravity-metrics"])
+
+    def test_architect_auto_capture_idempotence_and_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            ws = root / "ProjetArch"
+            ws.mkdir()
+
+            cid = "9999aaaa-1111-2222-3333-444455556666"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T10:00:00Z", "content": "Intro"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T10:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                ],
+            )
+
+            # 1) invocationNum = 1 / None / True + commandes maintenance/vide ignorés
+            for bad_inv in (1, None, True):
+                out = _run_hook(
+                    json.dumps({
+                        "conversationId": cid,
+                        "transcriptPath": str(tpath),
+                        "cwd": str(ws),
+                        "invocationNum": bad_inv,
+                        "lastUserInput": "/gravity-architect spec nouveau module",
+                    }),
+                    store,
+                    brain,
+                )
+                self.assertEqual(out, {})
+            self.assertEqual(load_active_captures(store), {})
+
+            for maint_cmd in (
+                "/gravity-architect",
+                "/gravity-architect   ",
+                "/gravity-architect init",
+                "/gravity-architect add",
+                "/gravity-architect sync",
+                "/gravity-architect status",
+                "/gravity-architect archive mon-lot",
+                "/gravity-architect audit security",
+            ):
+                out = _run_hook(
+                    json.dumps({
+                        "conversationId": cid,
+                        "transcriptPath": str(tpath),
+                        "cwd": str(ws),
+                        "invocationNum": 0,
+                        "lastUserInput": maint_cmd,
+                    }),
+                    store,
+                    brain,
+                )
+                self.assertEqual(out, {})
+            self.assertEqual(load_active_captures(store), {})
+
+            # 2) invocationNum == 0 avec instruction -> passthrough {}, capture architect-<slug>, 0 fichier workspace
+            out_ok = _run_hook(
+                json.dumps({
+                    "conversationId": cid,
+                    "transcriptPath": str(tpath),
+                    "cwd": str(ws),
+                    "invocationNum": 0,
+                    "lastUserInput": '/gravity-architect handoff /caveman ultra "Créer écosystème W1"',
+                }),
+                store,
+                brain,
+            )
+            self.assertEqual(out_ok, {})
+            self.assertEqual(list(ws.iterdir()), [])
+            caps = load_active_captures(store)
+            self.assertIn(cid, caps)
+            self.assertEqual(caps[cid]["start_step"], 2)
+            self.assertEqual(caps[cid]["label"], "architect-creer-ecosysteme-w1")
+            self.assertEqual(caps[cid]["project"], "ProjetArch")
+
+            # 3) Non-écrasement d'une capture ouverte (overwrite=False) sur second /gravity-architect invocationNum=0
+            _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Intro"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": "/gravity-architect handoff"},
+                    {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 2_000, "cache_read_tokens": 0, "output_tokens": 60, "tool_calls": []},
+                ],
+            )
+            out_second = _run_hook(
+                json.dumps({
+                    "conversationId": cid,
+                    "transcriptPath": str(tpath),
+                    "cwd": str(ws),
+                    "invocationNum": 0,
+                    "lastUserInput": "/gravity-architect autre instruction",
+                }),
+                store,
+                brain,
+            )
+            self.assertEqual(out_second, {})
+            caps_after = load_active_captures(store)
+            self.assertEqual(caps_after[cid]["start_step"], 2)
+            self.assertEqual(caps_after[cid]["label"], "architect-creer-ecosysteme-w1")
+
+            # 4) /gravity-metrics start explicite écrase (overwrite=True)
+            out_explicit = _run_hook(
+                json.dumps({
+                    "conversationId": cid,
+                    "transcriptPath": str(tpath),
+                    "cwd": str(ws),
+                    "lastUserInput": "/gravity-metrics start jalon-manuel",
+                }),
+                store,
+                brain,
+            )
+            self.assertEqual(out_explicit.get("terminationBehavior"), "terminate")
+            caps_explicit = load_active_captures(store)
+            self.assertEqual(caps_explicit[cid]["start_step"], 4)
+            self.assertEqual(caps_explicit[cid]["label"], "jalon-manuel")
 
 
 if __name__ == "__main__":

@@ -336,8 +336,11 @@ def _run_hook_dry_runs(plugin_root: Path, report: Report) -> None:
         return
 
     with tempfile.TemporaryDirectory() as tmp:
+        brain_dir = Path(tmp) / "brain"
+        brain_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
         env["GRAVITY_METRICS_HOME"] = str(Path(tmp) / "store")
+        env["ANTIGRAVITY_BRAIN_DIR"] = str(brain_dir)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         s_proc = subprocess.run(
@@ -452,8 +455,11 @@ def _run_mcp_dry_run(plugin_root: Path, report: Report) -> None:
         return
 
     with tempfile.TemporaryDirectory() as tmp:
+        brain_dir = Path(tmp) / "brain"
+        brain_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
         env["GRAVITY_METRICS_HOME"] = str(Path(tmp) / "store")
+        env["ANTIGRAVITY_BRAIN_DIR"] = str(brain_dir)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         requests = [

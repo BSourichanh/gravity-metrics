@@ -26,8 +26,10 @@ from metrics import (  # noqa: E402
     default_store_dir,
     discover_agent_tree,
     list_gravity_conversations,
+    load_active_captures,
     load_history,
     load_pricing_catalog,
+    next_step_index_in_transcript,
     parse_agent_transcript,
     read_gravity_profile_summary,
     record_session_metrics,
@@ -582,6 +584,30 @@ class TestGravityWindowAndProfile(unittest.TestCase):
             )
             self.assertEqual(lbl_ns, "myapp-ajoute-tests")
 
+            lbl_chained = suggest_auto_label(
+                "MyApp",
+                "/gravity-workflow standard /caveman ultra /grill-me corrige bug auth cache pipeline",
+                "2026-11-22T09:06:00Z",
+                [],
+            )
+            self.assertEqual(lbl_chained, "myapp-corrige-bug-auth-cache-pipeline")
+            self.assertLessEqual(len(lbl_chained), 64)
+
+            lbl_boost_plan = suggest_auto_label(
+                "MyApp",
+                "/boost /plan ultra refactorer moteur collecte metriques complet",
+                "2026-11-22T09:07:00Z",
+                [],
+            )
+            self.assertEqual(lbl_boost_plan, "myapp-refactorer-moteur-collecte-metriques-complet")
+            self.assertLessEqual(len(lbl_boost_plan), 64)
+
+            # Ne doit pas mordre /plan-b ni avaler audit après send
+            lbl_plan_b = suggest_auto_label("MyApp", "/plan-b secours", "2026-11-22T09:08:00Z", [])
+            self.assertEqual(lbl_plan_b, "myapp-plan-secours")
+            lbl_bridge = suggest_auto_label("MyApp", "/gravity-bridge send audit bridge", "2026-11-22T09:09:00Z", [])
+            self.assertEqual(lbl_bridge, "myapp-audit-bridge")
+
     def test_default_store_dir_precedence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -608,6 +634,7 @@ class TestGravityWindowAndProfile(unittest.TestCase):
 class TestHistoryAndCLI(unittest.TestCase):
     def test_slugify_label(self) -> None:
         self.assertEqual(slugify_label("v0.1 Prototype / Test!"), "v0.1-prototype-test")
+        self.assertEqual(slugify_label("créer écosystème"), "creer-ecosysteme")
         self.assertEqual(slugify_label("   ", fallback="session-abcd"), "session-abcd")
 
     def test_history_lifecycle_and_markdown(self) -> None:
@@ -814,6 +841,64 @@ class TestHistoryAndCLI(unittest.TestCase):
             self.assertEqual(r_rm2.returncode, 0, r_rm2.stderr)
             self.assertFalse((rep_dir / "run-2.json").exists())
             self.assertFalse((rep_dir / "run-2.md").exists())
+
+            # Sous-commande `start` (calcul transcript + --step explicite + prefixe ambigu)
+            store_start = root / "start_store"
+            ws_start = root / "ProjetStart"
+            ws_start.mkdir()
+            self.assertEqual(
+                next_step_index_in_transcript(brain / cid1 / ".system_generated" / "logs" / "transcript.jsonl"),
+                2,
+            )
+            self.assertEqual(next_step_index_in_transcript(root / "absent.jsonl"), 0)
+
+            r_start_tx = run_cli(
+                "start",
+                "aaaa1111",
+                "-l",
+                "depuis-tx",
+                "--workspace",
+                str(ws_start),
+                "--brain-dir",
+                str(brain),
+                "--store",
+                str(store_start),
+            )
+            self.assertEqual(r_start_tx.returncode, 0, r_start_tx.stderr)
+            caps_tx = load_active_captures(store_start)
+            self.assertEqual(caps_tx[cid1]["start_step"], 2)
+            self.assertEqual(caps_tx[cid1]["label"], "depuis-tx")
+            self.assertEqual(caps_tx[cid1]["project"], "ProjetStart")
+
+            r_start_step = run_cli(
+                "start",
+                "cccc3333-0000-0000-0000-000000000003",
+                "-l",
+                "step-manuel",
+                "--step",
+                "7",
+                "--brain-dir",
+                str(brain),
+                "--store",
+                str(store_start),
+            )
+            self.assertEqual(r_start_step.returncode, 0, r_start_step.stderr)
+            caps_step = load_active_captures(store_start)
+            self.assertEqual(caps_step["cccc3333-0000-0000-0000-000000000003"]["start_step"], 7)
+
+            # Préfixe ambigu rejeté même avec --step
+            _write_transcript(brain / "aaaa9999-0000-0000-0000-000000000009", [])
+            r_start_amb = run_cli(
+                "start",
+                "aaaa",
+                "--step",
+                "0",
+                "--brain-dir",
+                str(brain),
+                "--store",
+                str(store_start),
+            )
+            self.assertEqual(r_start_amb.returncode, 1)
 
     def test_execution_mode_detection_swarm_teamwork_and_single(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

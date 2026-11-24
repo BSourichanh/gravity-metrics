@@ -79,7 +79,7 @@ agy plugin install ./plugin
 ### Commands (`/gravity-metrics` & CLI)
 
 - **`/gravity-metrics`** *(bare)*: opens the interactive dashboard in **read-only** mode (`view="overview"`, zero history mutation).
-- **`/gravity-metrics start [label]`**: starts an explicit capture window in `active_captures.json` (**0 LLM tokens**, terminates before model turn).
+- **`/gravity-metrics start [label]`** *(and auto-capture on `/gravity-architect <instruction>`)*: starts an explicit capture window in `active_captures.json` (**0 LLM tokens**; `/gravity-architect` excluding `init|add|sync|status|archive|audit` auto-starts `architect-<slug>` idempotently without overwriting an existing capture).
 - **`/gravity-metrics stop [label]`** *(alias `finish`, or `/gravity-metrics <label> [-n "note"] [--full] [--force]`)*: seals `[start_step .. current]`, archives immutably (`--full` deduplicated, blocked on active Bridge jobs unless `--force`), and opens `detail`.
 - **`/gravity-metrics archive <uuid_or_prefix> [label] [--full] [--force]`**: archives a specific session.
 - **`/gravity-metrics pending [--project <name>]`**: lists unarchived root Gravity sessions with work activity (`view="pending"`, hiding consultative noise by default; use `cli.py pending --all` to include all sessions).
@@ -132,6 +132,7 @@ Workflow profile lookup reads `$GRAVITY_HOME/workflow/workspaces/<hash>/profile.
 ## 4. CLI & Verification
 
 ```powershell
+python plugin/scripts/cli.py start <uuid_or_prefix> [-l "my-run"] [--step N]
 python plugin/scripts/cli.py list
 python plugin/scripts/cli.py pending [--all]
 python plugin/scripts/cli.py add --latest -l "my-run" -n "Short note" [--update-sealed]

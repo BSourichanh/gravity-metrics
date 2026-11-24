@@ -34,6 +34,10 @@ _METRICS_CMD_RE = re.compile(
     r"^/gravity-metrics(?::gravity-metrics)?(?:\s+(.*))?$",
     re.IGNORECASE | re.DOTALL,
 )
+_ARCHITECT_RUN_RE = re.compile(
+    r"^/gravity-architect(?::gravity-architect)?\s+(?!(?:init|add|sync|status|archive|audit)\b)(.+)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _resolve_transcript_path(
@@ -45,27 +49,6 @@ def _resolve_transcript_path(
     if cid:
         return brain_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
     return None
-
-
-def _next_step_index_in_transcript(tpath: Optional[Path]) -> int:
-    if tpath is None or not tpath.is_file():
-        return 0
-    max_step = -1
-    try:
-        for raw_line in tpath.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(obj, dict) and isinstance(obj.get("step_index"), int):
-                if obj["step_index"] > max_step:
-                    max_step = obj["step_index"]
-    except OSError:
-        return 0
-    return max_step + 1
 
 
 def _is_handoff_already_active(
@@ -176,6 +159,7 @@ def _run_metrics_command(
         list_pending_sessions,
         load_active_captures,
         load_history,
+        next_step_index_in_transcript,
         pop_active_capture,
         read_gravity_profile_summary,
         record_session_metrics,
@@ -237,13 +221,14 @@ def _run_metrics_command(
         if not cid:
             raise ValueError("Impossible de démarrer une capture sans `conversationId`.")
         tpath = _resolve_transcript_path(payload, brain_dir, cid)
-        start_step = _next_step_index_in_transcript(tpath)
+        start_step = next_step_index_in_transcript(tpath)
         cap = start_active_capture(
             cid,
             start_step=start_step,
             label=str(parsed.get("label") or ""),
             project=project,
             store_dir=store_dir,
+            overwrite=True,
         )
         lbl_part = f" (`{cap['label']}`)" if cap.get("label") else ""
         proj_part = f" · projet `{cap['project']}`" if cap.get("project") else ""
@@ -436,6 +421,50 @@ def _run_metrics_command(
     return "handoff", md_out, sys_msg
 
 
+def _maybe_auto_start_architect_capture(payload: Dict[str, Any], cleaned: str) -> None:
+    """Auto-démarre une capture idempotente (0 token) sur `/gravity-architect <instruction>`."""
+    inv_num = payload.get("invocationNum")
+    if not (isinstance(inv_num, int) and not isinstance(inv_num, bool) and inv_num == 0):
+        return
+    cid = resolve_conversation_id(payload)
+    if not cid:
+        return
+    try:
+        if str(PLUGIN_ROOT) not in sys.path:
+            sys.path.insert(0, str(PLUGIN_ROOT))
+        from metrics import (
+            default_brain_dir,
+            next_step_index_in_transcript,
+            resolve_store_paths,
+            slugify_label,
+            start_active_capture,
+        )
+        from metrics.collector import _extract_label_keywords
+
+        store_dir, _ = resolve_store_paths()
+        brain_dir = resolve_brain_dir(payload) or default_brain_dir()
+        tpath = _resolve_transcript_path(payload, brain_dir, cid)
+        start_step = next_step_index_in_transcript(tpath)
+        ws_root = resolve_workspace_root(payload)
+        project = ws_root.name if ws_root else ""
+        kws = _extract_label_keywords(cleaned)[:5]
+        auto_lbl = (
+            slugify_label("architect-" + "-".join(kws), fallback="architect", max_len=64)
+            if kws
+            else "architect"
+        )
+        start_active_capture(
+            cid,
+            start_step=start_step,
+            label=auto_lbl,
+            project=project,
+            store_dir=store_dir,
+            overwrite=False,
+        )
+    except Exception:
+        pass
+
+
 def main() -> int:
     configure_utf8_stdio()
     raw = read_stdin_text()
@@ -462,6 +491,8 @@ def main() -> int:
     cleaned = re.sub(r"\s+", " ", _STRIP_META_RE.sub("", raw_input)).strip()
     match = _METRICS_CMD_RE.match(cleaned)
     if match is None:
+        if _ARCHITECT_RUN_RE.match(cleaned) is not None:
+            _maybe_auto_start_architect_capture(payload, cleaned)
         emit_passthrough()
         return 0
 

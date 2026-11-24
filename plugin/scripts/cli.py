@@ -23,6 +23,7 @@ from metrics import (  # noqa: E402
     list_pending_sessions,
     load_history,
     load_session_for_inspect,
+    next_step_index_in_transcript,
     read_gravity_profile_summary,
     record_session_metrics,
     regenerate_views,
@@ -31,6 +32,7 @@ from metrics import (  # noqa: E402
     render_terminal_table,
     resolve_conversation_id_in_brain,
     resolve_store_paths,
+    start_active_capture,
 )
 
 DEFAULT_CATALOG_PATH = PLUGIN_ROOT / "config" / "pricing_catalog.json"
@@ -108,6 +110,54 @@ def _print_archived_summary(
         f"Cache: {saved_rec['cache_hit_rate_pct']:.1f}%"
     )
     print(f"     Historique global: {store_dir / 'METRICS.md'}" + reports_msg)
+
+
+def _cmd_start(args: argparse.Namespace) -> int:
+    store_dir, _ = resolve_store_paths(args.history, args.store)
+    brain_dir = args.brain_dir.expanduser()
+    cid = str(args.cid or "").strip()
+    if not cid:
+        print("[ERREUR] Identifiant de conversation vide.", file=sys.stderr)
+        return 1
+
+    if brain_dir.is_dir():
+        try:
+            cid = resolve_conversation_id_in_brain(cid, brain_dir)
+        except ValueError as exc:
+            print(f"[ERREUR] {exc}", file=sys.stderr)
+            return 1
+        except FileNotFoundError as exc:
+            if args.step is None:
+                print(f"[ERREUR] {exc}", file=sys.stderr)
+                return 1
+    elif args.step is None:
+        print(f"[ERREUR] Répertoire des conversations introuvable : {brain_dir}", file=sys.stderr)
+        return 1
+
+    start_step = (
+        max(0, args.step)
+        if args.step is not None
+        else next_step_index_in_transcript(
+            brain_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        )
+    )
+    project = args.workspace.expanduser().resolve().name if args.workspace else ""
+    cap = start_active_capture(
+        cid,
+        start_step=start_step,
+        label=args.label,
+        project=project,
+        store_dir=store_dir,
+        overwrite=True,
+    )
+    lbl_txt = cap.get("label") or "(auto)"
+    proj_txt = cap.get("project") or "(aucun)"
+    print(
+        f"[OK] Capture démarrée : {cid[:8]} | step={cap['start_step']} | "
+        f"label={lbl_txt} | projet={proj_txt}"
+    )
+    print(f"     État : {store_dir / 'active_captures.json'}")
+    return 0
 
 
 def _cmd_add(args: argparse.Namespace) -> int:
@@ -314,6 +364,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Outil CLI de collecte, d'historisation et d'analyse des métriques de sessions Gravity.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_start = sub.add_parser("start", help="Démarre ou réinitialise une capture active pour une conversation.")
+    p_start.add_argument("cid", help="UUID ou préfixe unique de la conversation.")
+    p_start.add_argument("-l", "--label", default="", help="Label lisible de la capture.")
+    p_start.add_argument("--step", type=int, default=None, help="Step de départ explicite (défaut: max(step_index)+1 du transcript).")
+    p_start.add_argument("--workspace", type=Path, default=None, help="Workspace projet pour enregistrer le nom du projet.")
+    p_start.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
+    p_start.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
+    p_start.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_start.set_defaults(func=_cmd_start)
 
     p_add = sub.add_parser("add", help="Ajoute et archive une session Gravity dans l'historique.")
     p_add.add_argument("conversation_id", nargs="?", default=None, help="UUID (ou préfixe) de la conversation (optionnel).")

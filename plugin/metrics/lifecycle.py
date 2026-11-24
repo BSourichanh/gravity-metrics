@@ -148,6 +148,35 @@ def record_session_meta(
     return entry
 
 
+def next_step_index_in_transcript(
+    transcript_path: Optional[Union[Path, str]],
+) -> int:
+    """Retourne `max(step_index) + 1` depuis un `transcript.jsonl` (repli `0` si absent/illisible)."""
+    if transcript_path is None:
+        return 0
+    tpath = Path(transcript_path).expanduser()
+    if not tpath.is_file():
+        return 0
+    max_step = -1
+    try:
+        for raw_line in tpath.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                step_val = obj.get("step_index")
+                if isinstance(step_val, int) and not isinstance(step_val, bool):
+                    if step_val > max_step:
+                        max_step = step_val
+    except OSError:
+        return 0
+    return max_step + 1
+
+
 def load_active_captures(store_dir: Optional[Union[Path, str]] = None) -> Dict[str, Dict[str, Any]]:
     """Retourne les captures actives démarrées via `/gravity-metrics start`."""
     s_dir = _resolve_dir(store_dir)
@@ -169,8 +198,9 @@ def start_active_capture(
     label: str = "",
     project: str = "",
     store_dir: Optional[Union[Path, str]] = None,
+    overwrite: bool = False,
 ) -> Dict[str, Any]:
-    """Enregistre ou remplace une fenêtre de capture active pour `conversation_id`."""
+    """Enregistre une fenêtre de capture active pour `conversation_id` (idempotente si `overwrite=False`)."""
     cid = str(conversation_id or "").strip()
     if not cid:
         raise ValueError("conversation_id requis pour démarrer une capture.")
@@ -187,6 +217,8 @@ def start_active_capture(
     with state_file_lock(cap_path):
         raw = _read_json_dict(cap_path)
         captures = raw.get("captures") if isinstance(raw.get("captures"), dict) else {}
+        if not overwrite and isinstance(captures.get(cid), dict):
+            return dict(captures[cid])
         captures[cid] = entry
         _atomic_write_json(cap_path, {"schema_version": 1, "captures": captures})
     return entry

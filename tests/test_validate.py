@@ -3,6 +3,7 @@
 
 import contextlib
 import io
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -174,6 +175,40 @@ class TestValidateD4(unittest.TestCase):
                 report_installed.ok(strict=True),
                 report_installed.errors + report_installed.warnings,
             )
+
+    def test_dry_runs_isolate_antigravity_brain_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = self._make_plugin_copy(tmp)
+            captured_envs: list[dict[str, str]] = []
+            real_run = validate.subprocess.run
+
+            def _spy_run(*args, **kwargs):
+                env = kwargs.get("env") or {}
+                captured_envs.append(dict(env))
+                bdir = Path(env["ANTIGRAVITY_BRAIN_DIR"])
+                self.assertTrue(bdir.is_dir())
+                return real_run(*args, **kwargs)
+
+            with (
+                mock.patch.dict(os.environ, {"ANTIGRAVITY_BRAIN_DIR": str(Path(tmp) / "outer_brain")}, clear=False),
+                mock.patch.object(validate.subprocess, "run", side_effect=_spy_run),
+            ):
+                rc, out = self._run_main_captured(
+                    "--plugin-root", str(plugin_dir), "--strict", mock_dry_runs=False
+                )
+
+            self.assertEqual(rc, 0, out)
+            self.assertGreaterEqual(len(captured_envs), 2)
+            for env in captured_envs:
+                self.assertIn("ANTIGRAVITY_BRAIN_DIR", env)
+                self.assertNotEqual(
+                    Path(env["ANTIGRAVITY_BRAIN_DIR"]).resolve(),
+                    (Path(tmp) / "outer_brain").resolve(),
+                )
+                self.assertEqual(
+                    Path(env["ANTIGRAVITY_BRAIN_DIR"]).parent.resolve(),
+                    Path(env["GRAVITY_METRICS_HOME"]).parent.resolve(),
+                )
 
 
 if __name__ == "__main__":

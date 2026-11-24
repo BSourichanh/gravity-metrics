@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Auto-Capture `/gravity-architect` & CLI `start` (`plugin/hooks/pre_invocation_metrics.py`, `plugin/metrics/lifecycle.py`, `plugin/scripts/cli.py`):**
+  - Added idempotent `overwrite: bool = False` (default) on `start_active_capture()` and extracted `next_step_index_in_transcript()` in `lifecycle.py` (re-exported from `metrics/__init__.py`).
+  - Auto-started an idempotent zero-token `architect-<slug>` capture (`invocationNum == 0`, `overwrite=False`) in `pre_invocation_metrics.py` on `/gravity-architect <instruction>` (excluding `init|add|sync|status|archive|audit` and preserving passthrough `{}`), while explicit `/gravity-metrics start` passes `overwrite=True`.
+  - Added `cli.py start <cid> [-l LABEL] [--step N] [--workspace PATH] [--brain-dir PATH] [--store PATH] [--history PATH]` (`overwrite=True`).
 - **End-of-Cycle `--update-sealed` Flag (`plugin/metrics/store.py`, `plugin/scripts/cli.py`):**
   - Added `update_sealed: bool = False` to `record_session_metrics()` and `archive_conversation()` (default `False` preserves strict immutability) and exposed `--update-sealed` on `cli.py archive` and `cli.py add` to refresh an already-sealed window (e.g., after a final `git push`) while still enforcing `PendingBridgeJobsError` unless `--force` is passed.
 - **Anti-Noise Pending Filter & `--all` CLI Flag (`plugin/metrics/collector.py`, `plugin/scripts/cli.py`):**
@@ -21,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Inspected `params.capabilities` and `params.clientInfo` during `initialize` (`MIN_ANTIGRAVITY_MCP_APP_VERSION = (2, 34, 0)`) and appended a non-fatal `[WARN UI]` notice to `open_metrics_dashboard` text output only when the client is identified without MCP Apps support (`isError: false`, zero false positives on minimal/uninitialized calls).
 
 ### Changed
+- **NFKD Slugification & Chained-Command Stripping (`plugin/metrics/collector.py`):**
+  - Normalized accents via `unicodedata.normalize("NFKD", ...)` in `slugify_label()`.
+  - Extended `_GRAVITY_LEADING_AXES_RE` (namespace guard `(?::[a-z0-9_-]+)?(?=\s|$)`, `/boost`, `/grill-me`, `/plan`, `/caveman`, `quick`/`standard`/`deep`, single subcommand slot preserving `/gravity-bridge send audit bridge`) with fixed-point `_strip_leading_gravity_commands()` across `_extract_label_keywords()` and `_clean_pending_title()`.
+  - Expanded `suggest_auto_label(..., max_len=64)` to 5 keywords bounded cleanly via `slugify_label()`.
 - **End-of-Cycle Archival & Worktree Exclusion (`plugin/hooks/pre_invocation_metrics.py`, `plugin/hooks/session_start_metrics.py`, `plugin/rules/AGENTS.md`, `plugin/skills/gravity-metrics/SKILL.md`, `README.md`, `plugin/README.md`):**
   - Removed premature auto-archiving on `/gravity-architect archive <slug>` from `PreInvocation` (`_ARCHITECT_ARCHIVE_CMD_RE`, `_handle_architect_archive_passthrough()`), retaining `parse_architect_archive_prompt()` / `is_architect_archive` in `collector.py` solely for the passive `Clôture / Archivé` milestone.
   - Updated `session_start_metrics.py` to skip subagent worktree paths containing `/.gemini/antigravity/worktrees/` or `\worktrees\` without writing to `session_meta.json`.
@@ -29,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated `render_session_detail_markdown()` to surface `ERROR / INVALID / shell!=0` counts and `cold_cache_waste` in `## 6. Diagnostic & Gaspillages` with full backward compatibility on legacy payloads.
 
 ### Fixed
+- **Validator Brain Isolation & Markdown Escaping Test (`plugin/scripts/validate.py`, `tests/test_lifecycle_and_ux_v050.py`):**
+  - Isolated `ANTIGRAVITY_BRAIN_DIR` to a temporary directory in `_run_hook_dry_runs()` and `_run_mcp_dry_run()` to prevent scanning the user's brain directory.
+  - Aligned `test_markdown_view_no_loop_on_gt_entities` with `esc(val)` from `app_js.py` and asserted `!loopCheck.includes('&amp;gt;')`.
 - **Dashboard UI Access Labels (`install.py`, `plugin/metrics/markdown_report.py`, `README.md`):**
   - Replaced obsolete `Plugins` menu UI access labels for Gravity Metrics with the current Antigravity UI entry points (left sidebar `Gravity Metrics` or `+` menu in the right side pane).
 

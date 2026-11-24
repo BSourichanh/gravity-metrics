@@ -454,12 +454,12 @@ class TestLifecycleAndUxV050(unittest.TestCase):
         if not node_bin:
             return
         harness = (
-            "function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}\n"
+            "function esc(val){return String(val==null?'':val).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;');}\n"
             + js
-            + "\nconst out = renderSafeMarkdown('> citation simple\\n> [!WARNING]\\n> Alerte critique\\n\\n# Titre 1\\n## Titre 2\\n- item 1\\n  - sub 1');\n"
+            + "\nconst out = renderSafeMarkdown('> citation simple\\n\\n> [!WARNING]\\n> Alerte critique\\n\\n# Titre 1\\n## Titre 2\\n- item 1\\n  - sub 1');\n"
             + "if (!out.includes('blockquote') || !out.includes('md-callout-warning') || !out.includes('<h1>') || !out.includes('<ul>')) process.exit(2);\n"
             + "const loopCheck = renderSafeMarkdown('&gt; deja echappe');\n"
-            + "if (!loopCheck.includes('blockquote')) process.exit(3);\n"
+            + "if (!loopCheck.includes('blockquote') || loopCheck.includes('&amp;gt;')) process.exit(3);\n"
         )
         proc = subprocess.run(
             [node_bin, "-e", harness],

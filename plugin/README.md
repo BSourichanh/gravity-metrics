@@ -18,7 +18,7 @@ Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque s
 ## Cycle hybride & Commande `/gravity-metrics`
 
 - `/gravity-metrics` *(nu)* : ouvre le tableau de bord en **lecture seule** (`view="overview"`, zéro écriture ni mutation).
-- `/gravity-metrics start [label]` : démarre une fenêtre explicite dans `active_captures.json` à **0 token LLM** (terminaison avant tour modèle).
+- `/gravity-metrics start [label]` *(et auto-capture sur `/gravity-architect <instruction>`)* : démarre une fenêtre explicite dans `active_captures.json` à **0 token LLM** (`/gravity-architect` hors `init|add|sync|status|archive|audit` ouvre automatiquement `architect-<slug>` de façon idempotente sans écraser une capture existante).
 - `/gravity-metrics stop [label]` *(alias `finish`, ou `/gravity-metrics <label>` / `--full` / `--force`)* : scelle la fenêtre `[start_step .. courant]`, archive de façon immuable (`schema_version 2.1.0`, bloqué sauf `--force` si un job Bridge est actif) et ouvre la vue détail.
 - `/gravity-metrics archive <uuid_ou_prefixe> [label] [-n "note"] [--full] [--force]` : analyse et archive *a posteriori* une session existante.
 - `/gravity-metrics pending [--project <nom>]` : affiche la file des sessions Gravity racines avec activité de travail non encore archivées (filtre anti-bruit actif par défaut ; `cli.py pending --all` réaffiche tout) et ouvre `Sessions → À archiver`.
@@ -44,6 +44,7 @@ Toutes les données vivent sous **`$GRAVITY_METRICS_HOME` > `$GRAVITY_HOME/metri
 ## CLI non-interactif (`scripts/cli.py`)
 
 ```bash
+python scripts/cli.py start <uuid_ou_prefixe> [-l "mon-run"] [--step N]
 python scripts/cli.py list [--regen]
 python scripts/cli.py pending [--all] [--bridge-db <chemin>] [--json]
 python scripts/cli.py add --latest -l "mon-run" -n "Note" [--update-sealed] [--force]
