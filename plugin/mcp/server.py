@@ -18,7 +18,6 @@ if str(MCP_DIR) not in sys.path:
     sys.path.insert(0, str(MCP_DIR))
 
 from metrics import (  # noqa: E402
-    PendingBridgeJobsError,
     apply_remove,
     archive_conversation,
     build_audit_links_by_session,
@@ -31,7 +30,6 @@ from metrics import (  # noqa: E402
     load_history,
     load_session_for_inspect,
     read_audit,
-    resolve_bridge_db_path,
     resolve_session_index,
     resolve_store_paths,
     slugify_label,
@@ -178,11 +176,9 @@ def _compute_pending_source_sig(
     brain_dir: Path,
     store_dir: Path,
     history_path: Path,
-    bridge_db: Path,
 ) -> str:
     items: List[str] = [
         f"hist:{_stat_token(history_path)}",
-        f"db:{_stat_token(bridge_db)}",
         f"cap:{_stat_token(store_dir / 'active_captures.json')}",
         f"ign:{_stat_token(store_dir / 'ignored.json')}",
         f"meta:{_stat_token(store_dir / 'session_meta.json')}",
@@ -216,12 +212,11 @@ def _compute_audits_source_sig(hist_src_sig: str) -> str:
     return hashlib.sha256("|".join(items).encode("utf-8")).hexdigest()[:12]
 
 
-def _state_cache_key(store_dir: Path, history_path: Path, brain_dir: Path, bridge_db: Path) -> Tuple[str, ...]:
+def _state_cache_key(store_dir: Path, history_path: Path, brain_dir: Path) -> Tuple[str, ...]:
     return (
         str(store_dir),
         str(history_path),
         str(brain_dir),
-        str(bridge_db),
         os.environ.get("GRAVITY_AUDITS_DIR", "").strip(),
     )
 
@@ -263,8 +258,6 @@ def _pending_signature(pending: List[Dict[str, Any]], ignored_pending: List[Dict
         (
             p.get("conversation_id"),
             p.get("llm_calls"),
-            p.get("bridge_children_count"),
-            p.get("bridge_pending_jobs_count"),
             p.get("current_phase"),
             p.get("project"),
             p.get("updated_at"),
@@ -356,12 +349,11 @@ def _load_state_snapshot(
     force_refresh: bool = False,
 ) -> Dict[str, Any]:
     brain_dir = default_brain_dir()
-    bridge_db = resolve_bridge_db_path()
-    ckey = _state_cache_key(store_dir, history_path, brain_dir, bridge_db)
+    ckey = _state_cache_key(store_dir, history_path, brain_dir)
     cached = None if force_refresh else _STATE_CACHE.get(ckey)
 
     hist_src_sig = _compute_hist_source_sig(store_dir, history_path)
-    pending_src_sig = _compute_pending_source_sig(brain_dir, store_dir, history_path, bridge_db)
+    pending_src_sig = _compute_pending_source_sig(brain_dir, store_dir, history_path)
     audits_src_sig = _compute_audits_source_sig(hist_src_sig)
 
     if cached and cached.get("hist_src_sig") == hist_src_sig:
@@ -392,7 +384,6 @@ def _load_state_snapshot(
         all_pending = list_pending_sessions(
             brain_dir,
             history_path,
-            bridge_db_path=bridge_db,
             store_dir=store_dir,
             include_ignored=True,
         )
@@ -408,7 +399,7 @@ def _load_state_snapshot(
         audits_data = cached["audits_data"]
         audits_sig = cached["audits_sig"]
     else:
-        bundle = list_audits_bundle(records=hist_data["records"], bridge_db=bridge_db)
+        bundle = list_audits_bundle(records=hist_data["records"])
         audits = bundle["audits"]
         audits_roots = bundle["roots"]
         index_audit = bundle["index_audit"]
@@ -453,14 +444,13 @@ def _fast_unchanged_signature(store_dir: Path, history_path: Path, since_sig: st
     if not since_sig:
         return None
     brain_dir = default_brain_dir()
-    bridge_db = resolve_bridge_db_path()
-    ckey = _state_cache_key(store_dir, history_path, brain_dir, bridge_db)
+    ckey = _state_cache_key(store_dir, history_path, brain_dir)
     cached = _STATE_CACHE.get(ckey)
     if not cached or cached.get("signature") != since_sig:
         return None
     if _compute_hist_source_sig(store_dir, history_path) != cached.get("hist_src_sig"):
         return None
-    if _compute_pending_source_sig(brain_dir, store_dir, history_path, bridge_db) != cached.get("pending_src_sig"):
+    if _compute_pending_source_sig(brain_dir, store_dir, history_path) != cached.get("pending_src_sig"):
         return None
     if _compute_audits_source_sig(cached["hist_src_sig"]) != cached.get("audits_src_sig"):
         return None
@@ -580,7 +570,7 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     },
                     "force": {
                         "type": "boolean",
-                        "description": "Forcer l'archivage même si déjà archivée ou si un job Bridge est actif.",
+                        "description": "Forcer le ré-archivage même si la session est déjà archivée.",
                     },
                     "profile": {
                         "type": "string",
@@ -947,23 +937,20 @@ def _handle_metrics_archive_session(args: Dict[str, Any]) -> Dict[str, Any]:
     force = bool(args.get("force", False))
     profile = str(args.get("profile") or "2026_nov_standard").strip() or "2026_nov_standard"
 
-    try:
-        saved_rec, _, _metrics = archive_conversation(
-            cid_arg,
-            store_dir=store_dir,
-            history_path=history_path,
-            brain_dir=brain_dir,
-            catalog_path=catalog_path,
-            label=label,
-            note=note,
-            pricing_profile=profile,
-            gravity_window=not full,
-            full_conversation=full,
-            project=project,
-            force=force,
-        )
-    except PendingBridgeJobsError as exc:
-        return _tool_err(str(exc))
+    saved_rec, _, _metrics = archive_conversation(
+        cid_arg,
+        store_dir=store_dir,
+        history_path=history_path,
+        brain_dir=brain_dir,
+        catalog_path=catalog_path,
+        label=label,
+        note=note,
+        pricing_profile=profile,
+        gravity_window=not full,
+        full_conversation=full,
+        project=project,
+        force=force,
+    )
 
     snap = _load_state_snapshot(store_dir, history_path, force_refresh=True)
     already = bool(saved_rec.get("already_archived"))

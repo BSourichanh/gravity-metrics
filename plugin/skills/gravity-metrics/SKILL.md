@@ -17,7 +17,7 @@ description: >-
 
 For end-of-cycle CLI updates (`scripts/cli.py`):
 - `cli.py start <uuid_or_prefix> [-l LABEL] [--step N]`: explicitly starts or overwrites a capture window from the CLI.
-- `cli.py archive <uuid_or_prefix> --update-sealed` / `cli.py add <uuid_or_prefix> --update-sealed`: refreshes an already-sealed window (e.g. after a final `git push`) while preserving the `PendingBridgeJobsError` guard unless `--force` is passed.
+- `cli.py archive <uuid_or_prefix> --update-sealed` / `cli.py add <uuid_or_prefix> --update-sealed`: refreshes an already-sealed window (e.g. after a final `git push`) directly without live Bridge job blocking.
 - `cli.py pending --all`: includes consultative sessions without work tools (`write_file`, `edit_file`, `run_workflow`, `invoke_subagent`, `swarm`, etc.).
 
 When the hook injects `<SYSTEM_MESSAGE>`:

@@ -4,7 +4,6 @@
 import json
 import os
 from pathlib import Path
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -21,7 +20,6 @@ if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 from metrics import (  # noqa: E402
-    PendingBridgeJobsError,
     archive_conversation,
     collect_run_metrics,
     list_pending_sessions,
@@ -59,25 +57,6 @@ def _run_py(script: Path, args: list, *, stdin_text: str = "", store_dir: Path, 
         env=env,
         check=False,
     )
-
-
-def _create_bridge_db(db_path: Path, threads: list, jobs: list) -> None:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(db_path))
-    con.execute(
-        "CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, "
-        "msg_type TEXT, status TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, created_at TEXT)"
-    )
-    con.execute(
-        "CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, "
-        "action TEXT, direction TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, status TEXT, created_at TEXT)"
-    )
-    for row in threads:
-        con.execute("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
-    for row in jobs:
-        con.execute("INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
-    con.commit()
-    con.close()
 
 
 class TestClosureAndPendingHygiene(unittest.TestCase):
@@ -121,33 +100,19 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
             self.assertEqual(m["milestones"]["current_phase"], "Clôture / Archivé")
             self.assertEqual(m["milestones"]["phases"][-1]["status"], "active")
 
-    def test_update_sealed_cli_and_pending_bridge_jobs_guard(self) -> None:
+    def test_update_sealed_cli_and_immutability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = root / "store"
             brain = root / "brain"
-            bridge_db = root / "bridge" / "bridge.db"
             hist_path = store / "data" / "history.jsonl"
 
             cid = "u2000001-1111-2222-3333-444455556666"
-            child_cid = "u2000002-1111-2222-3333-444455556666"
             steps_v1 = [
                 {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T11:00:00Z", "content": "/gravity-architect spec sealed"},
                 {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 12_000, "cache_read_tokens": 0, "output_tokens": 400, "tool_calls": [{"name": "edit_file"}]},
             ]
             _write_transcript(brain / cid, steps_v1)
-            _write_transcript(
-                brain / child_cid,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T11:00:20Z", "content": "[GRAVITY-BRIDGE | thread=thr-seal]"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T11:00:30Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
-                ],
-            )
-            _create_bridge_db(
-                bridge_db,
-                [("thr-seal", "gravity-studio", "gravity-metrics", "handoff", "done", child_cid, cid, "2026-11-24T11:00:15Z")],
-                [("job-seal", "thr-seal", "gravity-metrics", "new_conversation", "outbound", child_cid, cid, "completed", "2026-11-24T11:00:15Z")],
-            )
 
             # 1) Archivage initial (zéro lecture live bridge.db -> seuls les tokens natifs 12_000)
             proc_init = _run_py(
@@ -161,8 +126,6 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
                     "Note initiale",
                     "--brain-dir",
                     str(brain),
-                    "--bridge-db",
-                    str(bridge_db),
                     "--store",
                     str(store),
                 ],
@@ -182,7 +145,7 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
 
             proc_imm = _run_py(
                 CLI_SCRIPT,
-                ["archive", cid, "--brain-dir", str(brain), "--bridge-db", str(bridge_db), "--store", str(store)],
+                ["archive", cid, "--brain-dir", str(brain), "--store", str(store)],
                 store_dir=store,
                 brain_dir=brain,
             )
@@ -190,19 +153,13 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
             self.assertIn("déjà archivée", proc_imm.stdout)
             self.assertEqual(load_history(hist_path)[0]["input_tokens"], 12_000)
 
-            # 3) Même avec un job Bridge 'dispatched' sur disque, aucune lecture SQLite live ni blocage PendingBridgeJobsError
-            con = sqlite3.connect(str(bridge_db))
-            con.execute("UPDATE jobs SET status = 'dispatched' WHERE id = 'job-seal'")
-            con.commit()
-            con.close()
-
-            m_live = collect_run_metrics(cid, brain, CATALOG_PATH, gravity_window=True, bridge_db_path=bridge_db, store_dir=store)
+            # 3) --update-sealed rafraîchit directement la fenêtre scellée
+            m_live = collect_run_metrics(cid, brain, CATALOG_PATH, gravity_window=True, store_dir=store)
             self.assertEqual(m_live["bridge_pending_jobs"], [])
-            self.assertIsNotNone(PendingBridgeJobsError)
 
             proc_upd = _run_py(
                 CLI_SCRIPT,
-                ["archive", cid, "--update-sealed", "--brain-dir", str(brain), "--bridge-db", str(bridge_db), "--store", str(store)],
+                ["archive", cid, "--update-sealed", "--brain-dir", str(brain), "--store", str(store)],
                 store_dir=store,
                 brain_dir=brain,
             )
@@ -220,7 +177,7 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
             _write_transcript(brain / cid, steps_v3)
             proc_add_upd = _run_py(
                 CLI_SCRIPT,
-                ["add", cid, "--gravity-window", "--update-sealed", "--brain-dir", str(brain), "--bridge-db", str(bridge_db), "--store", str(store)],
+                ["add", cid, "--gravity-window", "--update-sealed", "--brain-dir", str(brain), "--store", str(store)],
                 store_dir=store,
                 brain_dir=brain,
             )
@@ -230,7 +187,7 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
             self.assertEqual(recs_add[0]["label"], "sealed-lot")
             self.assertEqual(recs_add[0]["input_tokens"], 23_000)
 
-            # Vérifier directement que record_session_metrics ne lève jamais PendingBridgeJobsError
+            # Vérifier directement que record_session_metrics ne bloque jamais sur des champs bridge_pending_jobs hérités
             m_stub = dict(m_live)
             m_stub["bridge_pending_jobs"] = [{"thread_id": "t", "to_workspace": "w", "status": "dispatched"}]
             rec_no_raise, _ = record_session_metrics(m_stub, store_dir=store, history_path=hist_path, update_sealed=True, force=False)

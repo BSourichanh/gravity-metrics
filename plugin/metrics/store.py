@@ -31,23 +31,6 @@ from .markdown_report import render_metrics_markdown, render_session_detail_mark
 from .pricing import default_store_dir
 
 
-class PendingBridgeJobsError(RuntimeError):
-    """Erreur levée lorsqu'un archivage est bloqué par des jobs Gravity Bridge encore actifs."""
-
-    def __init__(self, pending_jobs: List[Dict[str, Any]]) -> None:
-        self.pending_jobs = list(pending_jobs)
-        details = ", ".join(
-            f"{j.get('thread_id') or '?'}->{j.get('to_workspace') or '?'} ({j.get('status') or 'actif'})"
-            for j in self.pending_jobs[:5]
-        )
-        if len(self.pending_jobs) > 5:
-            details += f", +{len(self.pending_jobs) - 5} autre(s)"
-        super().__init__(
-            f"Archivage bloqué : {len(self.pending_jobs)} job(s) Gravity Bridge encore actif(s) "
-            f"[{details}]. Attendez leur clôture ou relancez avec --force."
-        )
-
-
 def resolve_store_paths(
     history_path: Optional[Path] = None,
     store_dir: Optional[Path] = None,
@@ -225,11 +208,9 @@ def archive_conversation(
     summary_only: bool = False,
     force: bool = False,
     update_sealed: bool = False,
-    bridge_db_path: Optional[Path] = None,
     self_archiving: bool = False,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     """Résout un UUID ou préfixe, collecte la session et l'archive avec garde-fous."""
-    _ = bridge_db_path
     cid = resolve_conversation_id_in_brain(target, brain_dir)
     eff_from_step = from_step
     eff_label = label
@@ -281,10 +262,8 @@ def load_session_for_inspect(
     brain_dir: Path,
     catalog_path: Path,
     pricing_profile: str = "2026_nov_standard",
-    bridge_db_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, Any], str]:
     """Charge une session depuis `reports/<slug>.json` (hors-ligne) ou la recalcule depuis `brain_dir`."""
-    _ = bridge_db_path
     records = load_history(history_path)
     cid = target.strip()
     label = ""

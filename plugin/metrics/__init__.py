@@ -9,15 +9,6 @@ from .audits_reader import (
     list_audits_bundle,
     read_audit,
 )
-from .bridge_links import (
-    ACTIVE_BRIDGE_JOB_STATUSES,
-    default_bridge_db_path,
-    discover_bridge_links,
-    load_bridge_caller_conversation_ids,
-    load_bridge_target_conversation_ids,
-    resolve_bridge_db_path,
-    resolve_project_from_bridge_or_transcript,
-)
 from .collector import (
     METRICS_MARKER,
     METRICS_OPEN_MARKER,
@@ -86,7 +77,6 @@ from .pricing import (
 )
 
 from .store import (
-    PendingBridgeJobsError,
     apply_remove,
     archive_conversation,
     load_session_for_inspect,
@@ -106,19 +96,12 @@ __all__ = [
     "CATEGORY_ORDER",
     "CATEGORY_LABELS_FR",
     "TYPE_TO_CATEGORY",
-    "ACTIVE_BRIDGE_JOB_STATUSES",
     "discover_audit_roots",
     "list_audits",
     "list_audits_bundle",
     "read_audit",
     "build_audit_links_by_session",
     "default_brain_dir",
-    "default_bridge_db_path",
-    "resolve_bridge_db_path",
-    "load_bridge_caller_conversation_ids",
-    "load_bridge_target_conversation_ids",
-    "discover_bridge_links",
-    "resolve_project_from_bridge_or_transcript",
     "default_store_dir",
     "default_history_path",
     "load_pricing_catalog",
@@ -168,7 +151,6 @@ __all__ = [
     "render_inspect_text",
     "render_session_detail_markdown",
     "render_chat_summary_markdown",
-    "PendingBridgeJobsError",
     "resolve_store_paths",
     "regenerate_views",
     "write_session_details",

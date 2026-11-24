@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -284,61 +283,26 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             root = Path(tmp)
             store = root / "store"
             brain = root / "brain"
-            bridge_home = root / "bridge"
-            db_path = bridge_home / "bridge.db"
             ws = root / "Atelier"
             ws.mkdir()
 
             cid = "arch0001-1111-2222-3333-444455556666"
-            child_cid = "arch0002-1111-2222-3333-444455556666"
             _write_transcript(
                 brain / cid,
                 [
                     {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-23T14:00:00Z", "content": "/gravity-architect spec ux-v05"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-23T14:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 12_000, "cache_read_tokens": 0, "output_tokens": 400, "tool_calls": [{"name": "mcp_gravity-bridge_bridge_send_message"}]},
-                    {"step_index": 2, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-23T14:00:11Z", "content": json.dumps({"thread_id": "thr-arch", "to_workspace": "gravity-metrics"})},
-                    {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-23T14:02:00Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 6_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "run_command", "arguments": {"CommandLine": "git push origin dev"}}]},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-23T14:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 12_000, "cache_read_tokens": 0, "output_tokens": 400, "tool_calls": [{"name": "write_file"}]},
+                    {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-23T14:02:00Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 6_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "run_command", "arguments": {"CommandLine": "git push origin dev"}}]},
                 ],
             )
-            _write_transcript(
-                brain / child_cid,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-23T14:00:20Z", "content": "[GRAVITY-BRIDGE | thread=thr-arch]"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-23T14:01:00Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 30_000, "cache_read_tokens": 0, "output_tokens": 1_000, "tool_calls": []},
-                ],
-            )
-            bridge_home.mkdir(parents=True, exist_ok=True)
-            con = sqlite3.connect(str(db_path))
-            con.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, msg_type TEXT, status TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, created_at TEXT)")
-            con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, action TEXT, target_conversation_id TEXT, status TEXT, created_at TEXT)")
-            con.execute("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)", ("thr-arch", "gravity-studio", "gravity-metrics", "handoff", "open", child_cid, cid, "2026-11-23T14:00:15Z"))
-            con.execute("INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)", ("job-arch", "thr-arch", "gravity-metrics", "new_conversation", child_cid, "claimed", "2026-11-23T14:00:15Z"))
-            con.commit()
-            con.close()
 
-            # Job Bridge ouvert -> /gravity-architect archive passe en passthrough silencieux sans archiver
+            # /gravity-architect archive <slug> reste un passthrough silencieux sans archivage prématuré
             tpath = brain / cid / ".system_generated" / "logs" / "transcript.jsonl"
-            out_blocked = _run_py_hook(
-                PRE_HOOK,
-                json.dumps({"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "lastUserInput": "/gravity-architect archive mon-lot"}),
-                store_dir=store,
-                brain_dir=brain,
-                extra_env={"GRAVITY_BRIDGE_HOME": str(bridge_home)},
-            )
-            self.assertEqual(out_blocked, {})
-            self.assertEqual(load_history(store / "data" / "history.jsonl"), [])
-
-            # Clôture job Bridge -> /gravity-architect archive <slug> reste un passthrough (pas d'archivage prématuré)
-            con = sqlite3.connect(str(db_path))
-            con.execute("UPDATE jobs SET status = 'completed' WHERE id = 'job-arch'")
-            con.commit()
-            con.close()
             out_ok = _run_py_hook(
                 PRE_HOOK,
                 json.dumps({"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "lastUserInput": "/gravity-architect archive mon-lot"}),
                 store_dir=store,
                 brain_dir=brain,
-                extra_env={"GRAVITY_BRIDGE_HOME": str(bridge_home)},
             )
             self.assertEqual(out_ok, {})
             self.assertEqual(load_history(store / "data" / "history.jsonl"), [])
@@ -353,7 +317,6 @@ class TestLifecycleAndUxV050(unittest.TestCase):
                 catalog_path=CATALOG_PATH,
                 label="mon-lot",
                 project="Atelier",
-                bridge_db_path=db_path,
             )
             self.assertEqual(len(recs), 1)
             self.assertEqual(saved_rec["label"], "mon-lot")

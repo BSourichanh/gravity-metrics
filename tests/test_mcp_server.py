@@ -166,6 +166,10 @@ class TestMcpServer(unittest.TestCase):
             ):
                 self.assertIn(required_token, html_txt)
             self.assertIn(f'version: "{expected_version}"', html_txt)
+            self.assertIn("rec.bridge_children_count", html_txt)
+            self.assertIn("pill bridge", html_txt)
+            self.assertNotIn("confirmForceArchiveCid", html_txt)
+            self.assertNotIn("has_pending_bridge_jobs", html_txt)
             self.assertNotIn("window.confirm", html_txt)
             self.assertNotIn("https://", html_txt)
             self.assertNotIn("http://", html_txt)
@@ -305,23 +309,20 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual(len(sc["records"]), 2)
             self.assertEqual(sc["projects"], ["ProjA", "ProjB"])
 
-    def test_pending_sessions_and_archive_tool_with_bridge_guard(self) -> None:
-        import sqlite3
-
+    def test_pending_sessions_and_archive_tool_and_historical_bridge_ro(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = root / "store"
             brain = root / "brain"
-            bridge_home = root / "bridge"
-            bridge_home.mkdir()
-            db_path = bridge_home / "bridge.db"
+            history_path = store / "data" / "history.jsonl"
 
             cid_root = "55555555-aaaa-bbbb-cccc-000000000005"
-            cid_bridge = "66666666-aaaa-bbbb-cccc-000000000006"
+            cid_legacy_child = "66666666-aaaa-bbbb-cccc-000000000006"
+            cid_hist = "77777777-aaaa-bbbb-cccc-000000000007"
             _write_transcript(
                 brain / cid_root,
                 [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T14:00:00Z", "content": "/gravity-bridge send"},
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T14:00:00Z", "content": "/gravity-workflow run"},
                     {
                         "step_index": 1,
                         "type": "PLANNER_RESPONSE",
@@ -336,32 +337,33 @@ class TestMcpServer(unittest.TestCase):
                 ],
             )
             _write_transcript(
-                brain / cid_bridge,
+                brain / cid_legacy_child,
                 [
                     {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T14:00:20Z", "content": "[GRAVITY-BRIDGE | thread=thr-20261122-mcp1]"},
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T14:00:30Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
                 ],
             )
 
-            con = sqlite3.connect(str(db_path))
-            con.execute(
-                "CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, msg_type TEXT, status TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, created_at TEXT)"
-            )
-            con.execute(
-                "CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, action TEXT, target_conversation_id TEXT, status TEXT, created_at TEXT)"
-            )
-            con.execute(
-                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-20261122-mcp1", "gravity-studio", "gravity-metrics", "handoff", "open", cid_bridge, cid_root, "2026-11-22T14:00:15Z"),
-            )
-            con.execute(
-                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("job-mcp1", "thr-20261122-mcp1", "gravity-metrics", "new_conversation", cid_bridge, "queued", "2026-11-22T14:00:15Z"),
-            )
-            con.commit()
-            con.close()
+            # Historique RO pré-existant (#01-#04) conservant bridge_children_count et bridge_workspaces
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            hist_rec = {
+                "schema_version": "2.1.0",
+                "status": "archived",
+                "label": "legacy-audit-04",
+                "detail_slug": "legacy-audit-04",
+                "conversation_id": cid_hist,
+                "project": "ProjHist",
+                "cost_usd": 1.25,
+                "cost_2027_usd": 1.25,
+                "cache_hit_rate_pct": 80.0,
+                "llm_calls": 10,
+                "agents": 3,
+                "wall_clock_s": 120.0,
+                "bridge_children_count": 2,
+                "bridge_workspaces": ["gravity-architect", "gravity-workflow"],
+            }
+            history_path.write_text(json.dumps(hist_rec) + "\n", encoding="utf-8")
 
-            env_extra = {"GRAVITY_BRIDGE_HOME": str(bridge_home)}
             resps = _call_mcp_stdio(
                 [
                     {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "metrics_get_state", "arguments": {}}},
@@ -371,15 +373,17 @@ class TestMcpServer(unittest.TestCase):
                 ],
                 store,
                 brain,
-                extra_env=env_extra,
             )
             by_id = {r["id"]: r["result"] for r in resps}
 
-            pend = by_id[1]["structuredContent"]["pending_sessions"]
+            state_sc = by_id[1]["structuredContent"]
+            pend = state_sc["pending_sessions"]
             self.assertEqual([p["conversation_id"] for p in pend], [cid_root])
-            self.assertFalse(pend[0]["has_pending_bridge_jobs"])
+            hist_by_proj = {p["project"]: p for p in state_sc["by_project"]}
+            self.assertEqual(hist_by_proj["ProjHist"]["bridge_sessions"], 1)
+            self.assertEqual(state_sc["records"][0]["bridge_children_count"], 2)
 
-            # Aucun blocage live bridge.db : archivage sans force réussit directement
+            # Archivage direct sans garde-fou Bridge
             self.assertFalse(by_id[2]["isError"])
             arch_sc = by_id[2]["structuredContent"]
             self.assertEqual(arch_sc["archived"]["label"], "mcp-run")

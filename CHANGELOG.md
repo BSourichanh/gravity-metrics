@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **False Positives `AUD-04-09` & Native Clean Termination (`plugin/metrics/collector.py`, `plugin/metrics/store.py`, `plugin/scripts/cli.py`, `plugin/hooks/pre_invocation_metrics.py`):**
+  - `AUD-04-09a`: added `--self-archiving` / `self_archiving` propagation across `cli.py`, `pre_invocation_metrics.py`, `store.py`, and `parse_agent_transcript()` so self-archival from the active root session (`cli.py archive` / `add`) no longer flags `clean_termination=False` (`Interrompu`).
+  - `AUD-04-09b`: excluded legitimate remediation `Reviewer` second passes (`source == "workflow"`, `type_name == "reviewer"`) preceded by a `Reviewer` `FAIL` verdict/blocker/major from `duplicate_role_spawns` in `collect_run_metrics()`.
+
+### Changed
+- **Live Gravity Bridge Retirement & `#01–#04` Read-Only Compatibility (`plugin/metrics/`, `plugin/mcp/`, `plugin/hooks/`, `plugin/scripts/`, `README.md`, `plugin/README.md`, `plugin/skills/gravity-metrics/SKILL.md`):**
+  - Retired all live SQLite `bridge.db` reads across `collector.py`, `audits_reader.py` (`_load_bridge_workspace_dirs` removed), `store.py`, `cli.py`, `pre_invocation_metrics.py`, `mcp/server.py`, and `mcp/ui/app_js.py`.
+  - Removed `PendingBridgeJobsError` and unused `bridge_db_path` parameters from `store.py`, removed `plugin/metrics/bridge_links.py` and its live exports from `plugin/metrics/__init__.py`, and removed the `confirmForceArchiveCid` modal and live `has_pending_bridge_jobs` / `bridge_pending_jobs_count` alerts from `app_js.py`.
+  - Preserved read-only rendering (`bridge:N` badges, `bridge_sessions`, workspace share, and Bridge tree panels) for historical archived reports (`#01–#04`) across `history.py`, `markdown_report.py`, `mcp/server.py`, and `app_js.py`, and aligned MCP, closure, workflow, lifecycle, and `#01–#04` compatibility tests (`tests/test_mcp_server.py`, `tests/test_bridge_v030.py`, `tests/test_closure_and_pending_hygiene.py`, `tests/test_workflow_and_pending_v042.py`, `tests/test_lifecycle_and_ux_v050.py`).
+
 ### Added
 - **Validator Integrity Hardening (`INT-01`, `INT-03`, `INT-04`, `INT-06` in `plugin/scripts/validate.py`):**
   - `INT-01`: enforced `ALLOWED_UI_MODES = frozenset({"none", "core", "transition-sidecar", "transition-mcp", "mcp-app"})` on `config/module.json` `ui.mode`.

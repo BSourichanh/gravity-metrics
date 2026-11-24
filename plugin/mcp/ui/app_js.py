@@ -73,7 +73,6 @@ APP_JS = r"""
     confirmDeleteTarget: "",
     confirmPurge: true,
     archivingCid: "",
-    confirmForceArchiveCid: "",
     toast: null,
     loading: true,
     pollInFlight: false,
@@ -692,10 +691,9 @@ APP_JS = r"""
     render();
   }
 
-  async function submitArchiveDrawer(cid, force) {
+  async function submitArchiveDrawer(cid) {
     if (!cid || !state.hostCaps.serverTools || state.archivingCid) return;
     state.archivingCid = cid;
-    if (force) state.confirmForceArchiveCid = "";
     const form = state.archiveForm || {};
     render();
     try {
@@ -705,17 +703,13 @@ APP_JS = r"""
         project: String(form.project || "").trim(),
         note: String(form.note || "").trim(),
         full: Boolean(form.full),
-        force: Boolean(force)
+        force: false
       });
       if (res && res.isError) {
         const errMsg = (res.content && res.content[0] && res.content[0].text) || "Archivage refusé";
-        if (!force && errMsg.indexOf("--force") >= 0) {
-          state.confirmForceArchiveCid = cid;
-        }
         throw new Error(errMsg);
       }
       const sc = extractStructured(res);
-      state.confirmForceArchiveCid = "";
       state.archiveDrawerCid = "";
       if (sc) {
         hydrateFromStatePayload(sc, false);
@@ -1046,15 +1040,6 @@ APP_JS = r"""
         '<button type="button" class="btn sm" data-action="cancel-delete">Annuler</button>' +
         '</div></div>';
     }
-    if (state.confirmForceArchiveCid) {
-      html += '<div class="confirm-bar">' +
-        '<div><strong>Jobs Bridge encore actifs pour <span class="mono">' + esc(state.confirmForceArchiveCid.slice(0, 8)) + '</span>.</strong> ' +
-        'Forcer l’archivage immuable maintenant ?</div>' +
-        '<div class="confirm-actions">' +
-        '<button type="button" class="btn sm danger" data-action="confirm-force-archive" data-cid="' + esc(state.confirmForceArchiveCid) + '">Forcer l’archivage</button>' +
-        '<button type="button" class="btn sm" data-action="cancel-force-archive">Annuler</button>' +
-        '</div></div>';
-    }
     return html;
   }
 
@@ -1189,8 +1174,8 @@ APP_JS = r"""
       return topBar + '<div class="panel"><div class="share-list">' + rows + '</div></div>';
     }
 
-    const inProgress = activeList.filter((p) => p.is_active || p.has_pending_bridge_jobs);
-    const finished = activeList.filter((p) => !p.is_active && !p.has_pending_bridge_jobs);
+    const inProgress = activeList.filter((p) => p.is_active);
+    const finished = activeList.filter((p) => !p.is_active);
 
     const renderGroup = (title, items, badgeTone) => {
       if (!items.length) return "";
@@ -1198,14 +1183,11 @@ APP_JS = r"""
       items.forEach((p) => {
         const cid = String(p.conversation_id || "");
         const bCnt = Number(p.bridge_children_count) || 0;
-        const pJobs = Number(p.bridge_pending_jobs_count) || 0;
         const isBusy = state.archivingCid === cid;
         const isDrawerOpen = state.archiveDrawerCid === cid;
         const phasePill = p.current_phase ? '<span class="pill ' + badgeTone + '">' + esc(p.current_phase) + '</span>' : '';
         const capPill = p.active_capture ? '<span class="pill info">capture active</span>' : '';
-        const bridgePill = pJobs > 0
-          ? '<span class="pill warn">Bridge:' + bCnt + ' · actif(' + pJobs + ')</span>'
-          : (bCnt > 0 ? '<span class="pill bridge">Bridge:' + bCnt + '</span>' : '');
+        const bridgePill = bCnt > 0 ? '<span class="pill bridge">bridge:' + bCnt + '</span>' : '';
 
         const actions = state.hostCaps.serverTools
           ? '<div class="controls">' +
@@ -1410,7 +1392,7 @@ APP_JS = r"""
     const bridgeCount = Number(bridgeMeta.children_count) || 0;
     const subtabs = [
       { id: "summary", label: "Synthèse" },
-      { id: "agents", label: "Agents & Bridge (" + ((d.agents || []).length) + ")" },
+      { id: "agents", label: (bridgeCount > 0 ? "Agents & Bridge (" : "Agents (") + ((d.agents || []).length) + ")" },
       { id: "diag", label: "Diagnostic" }
     ];
     let subHtml = '<div class="subtabs">';
@@ -2016,15 +1998,9 @@ APP_JS = r"""
     if (action === "cancel-archive-drawer") { state.archiveDrawerCid = ""; render(); return; }
     if (action === "submit-archive-drawer") {
       const cid = target.getAttribute("data-cid") || "";
-      if (cid) submitArchiveDrawer(cid, false);
+      if (cid) submitArchiveDrawer(cid);
       return;
     }
-    if (action === "confirm-force-archive") {
-      const cid = target.getAttribute("data-cid") || "";
-      if (cid) submitArchiveDrawer(cid, true);
-      return;
-    }
-    if (action === "cancel-force-archive") { state.confirmForceArchiveCid = ""; render(); return; }
     if (action === "ignore-pending") {
       const cid = target.getAttribute("data-cid") || "";
       if (cid) ignorePendingSession(cid);
