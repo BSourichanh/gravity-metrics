@@ -86,6 +86,7 @@ agy plugin install ./plugin
 - **`SessionStart` hook (`session_start_metrics.py`)**: records `(conversation_id → cwd, project)` into `session_meta.json`, complemented by `bridge.db` RO (`from_workspace` + `canonical_path` matching).
 - **Auto-archive on `/gravity-architect archive <slug>`**: derives a unique label from `<slug>` and archives immediately while respecting `PendingBridgeJobsError`.
 - **4 automatic milestones (0 tokens)**: `Conception` → `Production` → `Vérification & Push` → `Clôture / Archivé` (2-milestone fallback `Production → Clôture` in single-repo sessions), with per-phase cost/token breakdown.
+- **Pricing, Reliability & Cold-Cache Observability**: catalog aliases for `gemini-pro-orchestrator-neon*` and `gemini-flash-worker-agy*` (`2026_nov_standard` & `2027_standard`), `[fallback]` / `unmatched_models` warnings in `cli.py inspect`, separated anomaly counters (`total_error_steps`, `total_invalid_steps`, `total_shell_nonzero_steps`, `total_anomalies`), and `efficiency_and_waste.cold_cache_waste` tracking in CLI & Markdown reports.
 
 ### Sober 3-Space MCP App Widget (`transition-mcp` → `gravity`)
 

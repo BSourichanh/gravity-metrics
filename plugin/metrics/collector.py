@@ -1604,6 +1604,24 @@ def _percentile_sorted(sorted_vals: List[int], pct: float) -> int:
     return int(sorted_vals[idx])
 
 
+_SHELL_EXIT_RE = re.compile(r"^Command exited with code (-?\d+)\b", re.MULTILINE)
+
+
+def _extract_shell_nonzero_code(content: Any) -> Optional[int]:
+    """Retourne le code de sortie non nul d'un step GENERIC (hors corps Command output/Showing lines)."""
+    if not isinstance(content, str) or "Command exited with code " not in content:
+        return None
+    header = content.split("\nCommand output:", 1)[0]
+    header = header.split("\nShowing lines ", 1)[0]
+    if header.lstrip().startswith("Showing lines "):
+        return None
+    for m in _SHELL_EXIT_RE.finditer(header):
+        code = int(m.group(1))
+        if code != 0:
+            return code
+    return None
+
+
 def _has_finish_tool_call(step_obj: Optional[Dict[str, Any]]) -> bool:
     """Vérifie si un step PLANNER_RESPONSE invoque l'outil terminal `finish`."""
     if not isinstance(step_obj, dict) or step_obj.get("type") != "PLANNER_RESPONSE":
@@ -1636,6 +1654,8 @@ def parse_agent_transcript(
     user_inputs = 0
     system_messages = 0
     error_steps = 0
+    invalid_steps = 0
+    shell_nonzero_steps = 0
     running_status_steps = 0
     tool_calls_total = 0
     tool_calls_by_name: Counter = Counter()
@@ -1660,6 +1680,9 @@ def parse_agent_transcript(
     rewind_cache = 0
     rewind_out = 0
     rewind_cost_raw = 0.0
+    cold_cache_calls = 0
+    cold_cache_input_tokens = 0
+    cold_cache_cost_raw = 0.0
 
     timestamps: List[datetime] = []
     prev_non_sys: Optional[Dict[str, Any]] = None
@@ -1707,8 +1730,19 @@ def parse_agent_transcript(
                     err_txt = str(obj.get("error") or obj.get("content") or "unknown").strip()
                     err_short = err_txt.splitlines()[0][:120] if err_txt else "unknown"
                     error_reasons[err_short] += 1
+                elif status == "INVALID":
+                    invalid_steps += 1
+                    err_txt = str(obj.get("error") or obj.get("content") or "INVALID").strip()
+                    err_short = err_txt.splitlines()[0][:120] if err_txt else "INVALID"
+                    error_reasons[f"[INVALID] {err_short}"[:120]] += 1
                 elif status == "RUNNING":
                     running_status_steps += 1
+
+                if step_type == "GENERIC" and status not in ("ERROR", "INVALID"):
+                    shell_code = _extract_shell_nonzero_code(obj.get("content"))
+                    if shell_code is not None:
+                        shell_nonzero_steps += 1
+                        error_reasons[f"[shell exit={shell_code}] Command exited with code {shell_code}"[:120]] += 1
 
                 for tc in obj.get("tool_calls") or []:
                     if isinstance(tc, dict):
@@ -1740,6 +1774,13 @@ def parse_agent_transcript(
                         unmatched_models.add(model_name)
                     call_cost = compute_call_cost(in_t, cache_t, out_t, pricing)
                     _add_cost(cost_acc, call_cost)
+
+                    if (cache_t == 0 and in_t > 10_000) or (
+                        in_t > 50_000 and (in_t + cache_t) > 0 and (cache_t / (in_t + cache_t)) < 0.25
+                    ):
+                        cold_cache_calls += 1
+                        cold_cache_input_tokens += in_t
+                        cold_cache_cost_raw += float(call_cost["total_usd"])
 
                     if has_secondary and secondary_profile:
                         p2, _ = resolve_model_pricing(model_name, catalog, secondary_profile)
@@ -1847,6 +1888,9 @@ def parse_agent_transcript(
         "user_inputs": user_inputs,
         "system_messages": system_messages,
         "error_steps": error_steps,
+        "invalid_steps": invalid_steps,
+        "shell_nonzero_steps": shell_nonzero_steps,
+        "total_anomalies": error_steps + invalid_steps + shell_nonzero_steps,
         "running_status_steps": running_status_steps,
         "tool_calls_total": tool_calls_total,
         "tool_calls_by_name": dict(tool_calls_by_name.most_common()),
@@ -1875,6 +1919,10 @@ def parse_agent_transcript(
         "rewind_output_tokens": rewind_out,
         "rewind_cost_usd": round(rewind_cost_raw, 6),
         "_raw_rewind_cost_usd": rewind_cost_raw,
+        "cold_cache_calls": cold_cache_calls,
+        "cold_cache_input_tokens": cold_cache_input_tokens,
+        "cold_cache_cost_usd": round(cold_cache_cost_raw, 6),
+        "_raw_cold_cache_cost_usd": cold_cache_cost_raw,
         "clean_termination": clean_term,
         "last_non_system_type": last_non_sys_type,
         "first_ts": _fmt_iso_utc(first_dt),
@@ -1977,7 +2025,7 @@ def _collect_subtree_ids(
 def _aggregate_bucket(agents_subset: List[Dict[str, Any]]) -> Dict[str, Any]:
     raw_cost = _empty_cost_acc()
     raw_proj = _empty_cost_acc()
-    in_tok = cache_tok = out_tok = calls = tools = errs = 0
+    in_tok = cache_tok = out_tok = calls = tools = errs = invs = shell_nz = 0
     ts_starts: List[str] = []
     ts_ends: List[str] = []
     for ag in agents_subset:
@@ -1989,6 +2037,8 @@ def _aggregate_bucket(agents_subset: List[Dict[str, Any]]) -> Dict[str, Any]:
         calls += ag["llm_calls"]
         tools += ag["tool_calls_total"]
         errs += ag["error_steps"]
+        invs += ag["invalid_steps"]
+        shell_nz += ag["shell_nonzero_steps"]
         if ag["first_ts"]:
             ts_starts.append(ag["first_ts"])
         if ag["last_ts"]:
@@ -2007,6 +2057,9 @@ def _aggregate_bucket(agents_subset: List[Dict[str, Any]]) -> Dict[str, Any]:
         "llm_calls": calls,
         "tool_calls": tools,
         "error_steps": errs,
+        "invalid_steps": invs,
+        "shell_nonzero_steps": shell_nz,
+        "total_anomalies": errs + invs + shell_nz,
         "input_tokens": in_tok,
         "cache_read_tokens": cache_tok,
         "output_tokens": out_tok,
@@ -2352,6 +2405,7 @@ def collect_run_metrics(
     sum_proj = _empty_cost_acc()
     total_in = total_cache = total_out = 0
     total_llm_calls = total_tool_calls = total_user_inputs = total_error_steps = total_steps = 0
+    total_invalid_steps = total_shell_nonzero_steps = 0
     sum_lifespans = sum_active = 0.0
     max_depth = 0
     all_t0: List[str] = []
@@ -2370,6 +2424,8 @@ def collect_run_metrics(
         total_tool_calls += ag["tool_calls_total"]
         total_user_inputs += ag["user_inputs"]
         total_error_steps += ag["error_steps"]
+        total_invalid_steps += ag["invalid_steps"]
+        total_shell_nonzero_steps += ag["shell_nonzero_steps"]
         total_steps += ag["total_steps"]
         sum_lifespans += ag["lifespan_s"]
         sum_active += ag["active_s"]
@@ -2557,6 +2613,14 @@ def collect_run_metrics(
 
     rewind_calls_total = sum(a["rewind_calls"] for a in enriched_agents)
     rewind_cost_total = sum(a["_raw_rewind_cost_usd"] for a in enriched_agents)
+    cold_cache_calls_total = sum(a["cold_cache_calls"] for a in enriched_agents)
+    cold_cache_in_total = sum(a["cold_cache_input_tokens"] for a in enriched_agents)
+    cold_cache_cost_total = sum(a["_raw_cold_cache_cost_usd"] for a in enriched_agents)
+    cold_cache_share_pct = (
+        round((cold_cache_cost_total / total_cost_float) * 100.0, 2)
+        if total_cost_float > 0
+        else 0.0
+    )
     interrupted = [a for a in enriched_agents if not a["clean_termination"]]
     interrupted_cost = sum(a["_raw_cost"]["total_usd"] for a in interrupted)
     interrupted_calls = sum(a["llm_calls"] for a in interrupted)
@@ -2631,6 +2695,9 @@ def collect_run_metrics(
             "total_tool_calls": total_tool_calls,
             "total_user_inputs": total_user_inputs,
             "total_error_steps": total_error_steps,
+            "total_invalid_steps": total_invalid_steps,
+            "total_shell_nonzero_steps": total_shell_nonzero_steps,
+            "total_anomalies": total_error_steps + total_invalid_steps + total_shell_nonzero_steps,
             "error_rate_pct": error_rate_pct,
             "input_tokens": total_in,
             "cache_read_tokens": total_cache,
@@ -2678,6 +2745,12 @@ def collect_run_metrics(
             "rewind_waste": {
                 "rewind_calls": rewind_calls_total,
                 "rewind_cost_usd": round(rewind_cost_total, 6),
+            },
+            "cold_cache_waste": {
+                "calls": cold_cache_calls_total,
+                "input_tokens": cold_cache_in_total,
+                "cost_usd": round(cold_cache_cost_total, 6),
+                "share_of_total_cost_pct": cold_cache_share_pct,
             },
             "interrupted_agents": {
                 "count": len(interrupted),

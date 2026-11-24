@@ -25,6 +25,7 @@ Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque s
 - **Hook `SessionStart` (`hooks/session_start_metrics.py`) :** enregistre la provenance `(conversation_id → cwd, project)` dans `session_meta.json`, complétée par `bridge.db` RO (`from_workspace` + `canonical_path`).
 - **Archivage automatique sur `/gravity-architect archive <slug>` :** archive la session avec label dérivé du slug et `project` résolu, tout en respectant le garde-fou `PendingBridgeJobsError`.
 - **4 jalons automatiques (0 token) :** `Conception` → `Production` → `Vérification & Push` → `Clôture / Archivé` (repli 2 jalons `Production → Clôture` en mono-dépôt), avec ventilation coûts/tokens par phase.
+- **Tarifs Neon/Flash, anomalies & cache froid :** alias `gemini-pro-orchestrator-neon*` et `gemini-flash-worker-agy*` (`2026_nov_standard` / `2027_standard`), marquage `[fallback]` / `unmatched_models` dans `cli.py inspect`, ventilation `ERROR` / `INVALID` / `shell!=0` (`total_anomalies`) et suivi `cold_cache_waste` dans les rapports CLI et Markdown.
 
 ## Widget MCP App sobre en 3 espaces (`open_metrics_dashboard`)
 

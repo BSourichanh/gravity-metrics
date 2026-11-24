@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Neon/Flash Pricing Aliases (`plugin/config/pricing_catalog.json`):**
+  - Added `gemini-pro-orchestrator-neon*` (`$3.00 / $0.15 / $15.00`) and `gemini-flash-worker-agy*` (`$0.75 / $0.075 / $3.75` in `2026_nov_standard`, `$1.50 / $0.15 / $7.50` in `2027_standard`) while preserving `_fallback` (`is_fallback: true`) for unknown models.
+- **Detailed Anomaly Counters & Cold-Cache Telemetry (`plugin/metrics/collector.py`, `tests/test_neon_errors_cold_cache.py`):**
+  - Preserved `error_steps` / `total_error_steps` (`status == "ERROR"`) and `error_rate_pct`, and added `invalid_steps` (`status == "INVALID"`), `shell_nonzero_steps` (`GENERIC` steps with line-anchored `Command exited with code <N>` where `N != 0`, ignoring `Command output:`/`Showing lines ` bodies), and `total_anomalies` per agent, bucket, and `summary`.
+  - Added `efficiency_and_waste["cold_cache_waste"]` (`calls`, `input_tokens`, `cost_usd`, `share_of_total_cost_pct`) classifying cold/near-cold `PLANNER_RESPONSE` calls (`(cache == 0 and in > 10k)` or `(in > 50k and cache / (in + cache) < 0.25)`).
+
+### Changed
+- **CLI Inspect & Session Detail Reports (`plugin/metrics/markdown_report.py`, `README.md`, `plugin/README.md`):**
+  - Updated `render_inspect_text()` to display `invalid=<N> | shell!=0=<M>` when present, `coldCache=<N> ($<usd>, <pct>%)` in `Alertes`, `[fallback]` suffixes in `--- Par modèle ---`, and a warning line when `unmatched_models` is non-empty.
+  - Updated `render_session_detail_markdown()` to surface `ERROR / INVALID / shell!=0` counts and `cold_cache_waste` in `## 6. Diagnostic & Gaspillages` with full backward compatibility on legacy payloads.
+
 ## [0.5.1] - 2026-11-24
 
 ### Added

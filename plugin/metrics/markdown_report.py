@@ -290,9 +290,16 @@ def render_inspect_text(metrics: Dict[str, Any]) -> str:
     eff = metrics["efficiency_and_waste"]
     dup = eff["duplicate_role_spawns"]
     rw = eff["rewind_waste"]
+    cc = eff.get("cold_cache_waste") or {}
+    cc_calls = int(cc.get("calls") or 0)
+    cc_cost = float(cc.get("cost_usd") or 0.0)
+    cc_pct = float(cc.get("share_of_total_cost_pct") or 0.0)
     intr = eff["interrupted_agents"]
     cb = eff["context_bloat"]
     win = metrics.get("window") or {}
+    inv_steps = int(s.get("total_invalid_steps") or 0)
+    shell_nz = int(s.get("total_shell_nonzero_steps") or 0)
+    extra_err = f" | invalid={inv_steps} | shell!=0={shell_nz}" if (inv_steps > 0 or shell_nz > 0) else ""
 
     lines = [
         f"=== Inspection Gravity [{metrics['label']}] ({metrics['root_conversation_id']}) ===",
@@ -305,11 +312,11 @@ def render_inspect_text(metrics: Dict[str, Any]) -> str:
         [
             f"Mode      : {s.get('execution_mode', 'single')} (features: {', '.join(s.get('features_used') or ['single'])})",
             f"Fenêtre   : {s['first_ts']} -> {s['last_ts']} ({_fmt_dur(s['wall_clock_s'])}, parallélisme {s['parallelism_factor']:.2f}x) [{_window_desc(win)}]",
-            f"Activité  : {s['total_agents']} agents (prof. {s['max_tree_depth']}) | {s['total_llm_calls']:,} appels LLM | {s['total_tool_calls']:,} outils | {s['total_error_steps']} erreurs ({s['error_rate_pct']:.2f}%)",
+            f"Activité  : {s['total_agents']} agents (prof. {s['max_tree_depth']}) | {s['total_llm_calls']:,} appels LLM | {s['total_tool_calls']:,} outils | {s['total_error_steps']} erreurs ({s['error_rate_pct']:.2f}%){extra_err}",
             f"Tokens    : in={s['input_tokens']:,} | cache={s['cache_read_tokens']:,} ({s['cache_hit_rate_pct']:.2f}%) | out={s['output_tokens']:,}",
             f"Coût      : ${c['total_usd']:.4f} (in ${c['input_usd']:.4f} + cache ${c['cache_read_usd']:.4f} + out ${c['output_usd']:.4f}) | économie cache ${c['cache_savings_usd']:.4f}",
             f"Proj 2027 : ${p.get('total_usd', 0.0):.4f}",
-            f"Alertes   : doublons={dup['duplicate_agent_count']} (${dup['duplicate_cost_usd']:.4f}) | rewinds={rw['rewind_calls']} (${rw['rewind_cost_usd']:.4f}) | interrompus={intr['count']} (${intr['total_cost_usd']:.4f}) | maxCtx={cb['max_context_tokens_overall']:,}",
+            f"Alertes   : doublons={dup['duplicate_agent_count']} (${dup['duplicate_cost_usd']:.4f}) | rewinds={rw['rewind_calls']} (${rw['rewind_cost_usd']:.4f}) | interrompus={intr['count']} (${intr['total_cost_usd']:.4f}) | maxCtx={cb['max_context_tokens_overall']:,} | coldCache={cc_calls} (${cc_cost:.4f}, {cc_pct:.1f}%)",
             "",
             "--- Par catégorie ---",
         ]
@@ -347,10 +354,14 @@ def render_inspect_text(metrics: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("--- Par modèle ---")
     for m_name, m_data in metrics["by_model"].items():
+        fb_tag = " [fallback]" if m_data.get("is_fallback") else ""
         lines.append(
             f"  {m_name:32s} : {m_data['calls']:4d} calls | "
-            f"${m_data['cost_usd']['total_usd']:7.4f} ({m_data['cost_share_pct']:5.1f}%)"
+            f"${m_data['cost_usd']['total_usd']:7.4f} ({m_data['cost_share_pct']:5.1f}%){fb_tag}"
         )
+    unmatched = (metrics.get("data_quality") or {}).get("unmatched_models") or []
+    if unmatched:
+        lines.append(f"  [!] Modèles non catalogués (tarif fallback) : {', '.join(unmatched)}")
 
     lines.append("")
     lines.append("--- Top 10 agents par coût ---")
@@ -399,6 +410,12 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
         if lifespans_s is not None
         else f"actif : {_fmt_dur(s['sum_agent_active_s'])}"
     )
+    inv_steps = int(s.get("total_invalid_steps") or 0)
+    shell_nz = int(s.get("total_shell_nonzero_steps") or 0)
+    total_anom = int(s.get("total_anomalies") if s.get("total_anomalies") is not None else (int(s["total_error_steps"]) + inv_steps + shell_nz))
+    err_detail = f"Erreurs : {s['total_error_steps']} ({s['error_rate_pct']:.2f}%)"
+    if inv_steps > 0 or shell_nz > 0:
+        err_detail += f" · Invalid : {inv_steps} · Shell!=0 : {shell_nz}"
     lines.extend(
         [
             f"- **Fenêtre mesurée** : {_window_desc(win)}",
@@ -413,7 +430,7 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
             f"| **Projection ({metrics.get('secondary_pricing_profile') or '2027_standard'})** | **${proj_total:.4f}** | Écart : **{delta_sign}${abs(proj_delta):.4f}** |",
             f"| **Économie grâce au cache** | **${c['cache_savings_usd']:.4f}** | Sans cache : ${c['without_cache_usd']:.4f} (Cache Hit : **{s['cache_hit_rate_pct']:.2f}%**) |",
             f"| **Agents / Profondeur max** | **{s['total_agents']}** / {s['max_tree_depth']} | Parallélisme : **{s['parallelism_factor']:.2f}x** ({dur_detail}) |",
-            f"| **Appels LLM / Appels outils** | **{_fmt_int(s['total_llm_calls'])}** / **{_fmt_int(s['total_tool_calls'])}** | Erreurs : {s['total_error_steps']} ({s['error_rate_pct']:.2f}%) · Inputs utilisateur : {s['total_user_inputs']} |",
+            f"| **Appels LLM / Appels outils** | **{_fmt_int(s['total_llm_calls'])}** / **{_fmt_int(s['total_tool_calls'])}** | {err_detail} · Inputs utilisateur : {s['total_user_inputs']} |",
             f"| **Tokens (In / Cache / Out)** | **{_fmt_int(s['total_tokens'])}** | {_fmt_int(s['input_tokens'])} / {_fmt_int(s['cache_read_tokens'])} / {_fmt_int(s['output_tokens'])} |",
             "",
             "## 2. Répartition par Catégorie",
@@ -494,6 +511,11 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
 
     dup = eff["duplicate_role_spawns"]
     rw = eff["rewind_waste"]
+    cc = eff.get("cold_cache_waste") or {}
+    cc_calls = int(cc.get("calls") or 0)
+    cc_in = int(cc.get("input_tokens") or 0)
+    cc_cost = float(cc.get("cost_usd") or 0.0)
+    cc_pct = float(cc.get("share_of_total_cost_pct") or 0.0)
     intr = eff["interrupted_agents"]
     cb = eff["context_bloat"]
     v_ratio = eff.get("verification_to_build_cost_ratio")
@@ -504,8 +526,10 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
             "## 6. Diagnostic & Gaspillages",
             "",
             f"- **Ratio Vérification / (Build + Test)** : **{v_ratio_str}**",
+            f"- **Anomalies (ERROR / INVALID / shell!=0)** : **{total_anom}** ({s['total_error_steps']} / {inv_steps} / {shell_nz})",
             f"- **Doublons de rôles** : **{dup['duplicate_agent_count']}** ({dup['duplicate_calls']} appels, **${dup['duplicate_cost_usd']:.4f}**)",
             f"- **Rewinds / reprises quota** : **{rw['rewind_calls']}** appels (**${rw['rewind_cost_usd']:.4f}**)",
+            f"- **Cache froid / quasi-froid** : **{cc_calls}** appel(s) ({_fmt_int(cc_in)} in, **${cc_cost:.4f}**, **{cc_pct:.1f}%** du coût)",
             f"- **Agents interrompus** : **{intr['count']}** ({intr['total_llm_calls']} appels, **${intr['total_cost_usd']:.4f}**)",
             f"- **Contexte max / >100k / >128k / >200k** : **{_fmt_int(cb['max_context_tokens_overall'])}** / {cb.get('calls_over_100k_ctx', 0)} / {cb.get('calls_over_128k_ctx', 0)} / {cb.get('calls_over_200k_ctx', 0)}",
         ]
