@@ -21,9 +21,9 @@ Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque s
 - `/gravity-metrics start [label]` : démarre une fenêtre explicite dans `active_captures.json` à **0 token LLM** (terminaison avant tour modèle).
 - `/gravity-metrics stop [label]` *(alias `finish`, ou `/gravity-metrics <label>` / `--full` / `--force`)* : scelle la fenêtre `[start_step .. courant]`, archive de façon immuable (`schema_version 2.1.0`, bloqué sauf `--force` si un job Bridge est actif) et ouvre la vue détail.
 - `/gravity-metrics archive <uuid_ou_prefixe> [label] [-n "note"] [--full] [--force]` : analyse et archive *a posteriori* une session existante.
-- `/gravity-metrics pending [--project <nom>]` : affiche la file des sessions Gravity racines non encore archivées et ouvre `Sessions → À archiver`.
-- **Hook `SessionStart` (`hooks/session_start_metrics.py`) :** enregistre la provenance `(conversation_id → cwd, project)` dans `session_meta.json`, complétée par `bridge.db` RO (`from_workspace` + `canonical_path`).
-- **Archivage automatique sur `/gravity-architect archive <slug>` :** archive la session avec label dérivé du slug et `project` résolu, tout en respectant le garde-fou `PendingBridgeJobsError`.
+- `/gravity-metrics pending [--project <nom>]` : affiche la file des sessions Gravity racines avec activité de travail non encore archivées (filtre anti-bruit actif par défaut ; `cli.py pending --all` réaffiche tout) et ouvre `Sessions → À archiver`.
+- **Hook `SessionStart` (`hooks/session_start_metrics.py`) :** enregistre la provenance `(conversation_id → cwd, project)` dans `session_meta.json` (hors worktrees sous-agents `/.gemini/antigravity/worktrees/`), complétée par `bridge.db` RO (`from_workspace` + `canonical_path`).
+- **Clôture fin de cycle & `--update-sealed` :** `cli.py archive <uuid> --update-sealed` (ou `cli.py add ... --update-sealed`) met à jour une fenêtre déjà scellée lors d'un `git push` ultérieur tout en conservant le garde-fou `PendingBridgeJobsError` (sauf `--force`). `/gravity-architect archive <slug>` reste un signal passif pour le jalon `Clôture / Archivé` sans archivage prématuré en `PreInvocation`.
 - **4 jalons automatiques (0 token) :** `Conception` → `Production` → `Vérification & Push` → `Clôture / Archivé` (repli 2 jalons `Production → Clôture` en mono-dépôt), avec ventilation coûts/tokens par phase.
 - **Tarifs Neon/Flash, anomalies & cache froid :** alias `gemini-pro-orchestrator-neon*` et `gemini-flash-worker-agy*` (`2026_nov_standard` / `2027_standard`), marquage `[fallback]` / `unmatched_models` dans `cli.py inspect`, ventilation `ERROR` / `INVALID` / `shell!=0` (`total_anomalies`) et suivi `cold_cache_waste` dans les rapports CLI et Markdown.
 
@@ -45,9 +45,9 @@ Toutes les données vivent sous **`$GRAVITY_METRICS_HOME` > `$GRAVITY_HOME/metri
 
 ```bash
 python scripts/cli.py list [--regen]
-python scripts/cli.py pending [--bridge-db <chemin>] [--json]
-python scripts/cli.py add --latest -l "mon-run" -n "Note" [--force]
-python scripts/cli.py archive <uuid_ou_prefixe> -l "mon-run" [--bridge-db <chemin>] [--force]
+python scripts/cli.py pending [--all] [--bridge-db <chemin>] [--json]
+python scripts/cli.py add --latest -l "mon-run" -n "Note" [--update-sealed] [--force]
+python scripts/cli.py archive <uuid_ou_prefixe> -l "mon-run" [--bridge-db <chemin>] [--update-sealed] [--force]
 python scripts/cli.py inspect <label_ou_uuid> [--bridge-db <chemin>]
 python scripts/cli.py remove <label_ou_uuid> --purge-reports
 python scripts/validate.py --strict       # Contrôles stdlib, contrat module et seuils D4 (rules <= 600/1000 o, SKILL <= 6000 o, LF sans BOM)

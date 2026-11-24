@@ -68,6 +68,18 @@ _WORKFLOW_AGENT_LINE_RE = re.compile(
     r"\(([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)"
 )
 _TASK_STEP_RE = re.compile(r"^task-(\d+)\.log$", re.IGNORECASE)
+_WORK_TOOL_NAMES = frozenset(
+    {
+        "write_file",
+        "write_to_file",
+        "edit_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "run_workflow",
+        "invoke_subagent",
+        "swarm",
+    }
+)
 _STOPWORDS = {
     "a",
     "an",
@@ -712,6 +724,7 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                 )
                 tool_names: List[str] = []
                 has_push_or_verif = False
+                has_work_activity = False
                 if step_type == "PLANNER_RESPONSE":
                     for tc in obj.get("tool_calls") or []:
                         if not isinstance(tc, dict):
@@ -719,6 +732,8 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                         tname = str(tc.get("name") or "").strip()
                         if tname:
                             tool_names.append(tname)
+                            if tname in _WORK_TOOL_NAMES:
+                                has_work_activity = True
                         if tname in ("run_command", "execute_command", "bash", "shell"):
                             args_obj = tc.get("args") if isinstance(tc.get("args"), dict) else {}
                             cmd_str = str(args_obj.get("CommandLine") or args_obj.get("command") or "").lower()
@@ -742,6 +757,7 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                         "has_marker": has_marker,
                         "has_open_marker": has_open_marker,
                         "has_push_or_verif": has_push_or_verif,
+                        "has_work_activity": has_work_activity,
                         "tool_names": tool_names,
                         "clean_prompt": clean_prompt,
                     }
@@ -2880,6 +2896,7 @@ def list_pending_sessions(
     runs_jsonl_paths: Optional[List[Path]] = None,
     store_dir: Optional[Union[Path, str]] = None,
     include_ignored: bool = False,
+    include_noise: bool = False,
 ) -> List[Dict[str, Any]]:
     """Liste les sessions Gravity racines ayant de l'activité LLM non encore archivée."""
     base = Path(brain_dir)
@@ -2953,6 +2970,7 @@ def list_pending_sessions(
         end_idx = win.get("end_line_idx")
         entries: List[Dict[str, Any]] = tx["entries"]
         llm_calls = 0
+        has_work_activity = False
         last_ts: Optional[str] = None
         last_status = ""
         for e in entries:
@@ -2967,6 +2985,8 @@ def list_pending_sessions(
                 last_status = str(e["status"])
             if e.get("is_planner"):
                 llm_calls += 1
+            if e.get("has_work_activity"):
+                has_work_activity = True
 
         if llm_calls == 0:
             continue
@@ -2985,6 +3005,16 @@ def list_pending_sessions(
             {str(lnk.get("to_workspace") or "").strip() for lnk in active_links if lnk.get("to_workspace")}
         )
         wf_children = discover_workflow_children(cdir.name, base)
+        if (
+            not include_noise
+            and not active_links
+            and not bridge_children
+            and not pending_jobs
+            and not wf_children
+            and cap_entry is None
+            and not has_work_activity
+        ):
+            continue
         milestones = _compute_pending_milestones(
             entries,
             start_idx,

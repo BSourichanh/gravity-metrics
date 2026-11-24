@@ -162,7 +162,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
 
             win_steps_2 = win_steps_1 + [
                 {"step_index": 4, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-23T11:05:00Z", "content": "/gravity-workflow phase 2"},
-                {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-23T11:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 15_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": []},
+                {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-23T11:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 15_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "edit_file"}]},
             ]
             tpath_win_2 = _write_transcript(brain / cid_win, win_steps_2)
 
@@ -328,7 +328,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(out_blocked, {})
             self.assertEqual(load_history(store / "data" / "history.jsonl"), [])
 
-            # Clôture job Bridge -> /gravity-architect archive <slug> archive automatiquement avec 4 jalons
+            # Clôture job Bridge -> /gravity-architect archive <slug> reste un passthrough (pas d'archivage prématuré)
             con = sqlite3.connect(str(db_path))
             con.execute("UPDATE jobs SET status = 'completed' WHERE id = 'job-arch'")
             con.commit()
@@ -341,12 +341,25 @@ class TestLifecycleAndUxV050(unittest.TestCase):
                 extra_env={"GRAVITY_BRIDGE_HOME": str(bridge_home)},
             )
             self.assertEqual(out_ok, {})
-            recs = load_history(store / "data" / "history.jsonl")
+            self.assertEqual(load_history(store / "data" / "history.jsonl"), [])
+            self.assertFalse((store / "reports").exists())
+
+            # Archivage explicite en fin de cycle conserve les 4 jalons dont Clôture / Archivé
+            saved_rec, recs, _ = archive_conversation(
+                cid,
+                store_dir=store,
+                history_path=store / "data" / "history.jsonl",
+                brain_dir=brain,
+                catalog_path=CATALOG_PATH,
+                label="mon-lot",
+                project="Atelier",
+                bridge_db_path=db_path,
+            )
             self.assertEqual(len(recs), 1)
-            self.assertEqual(recs[0]["label"], "mon-lot")
-            self.assertEqual(recs[0]["project"], "Atelier")
-            self.assertEqual([m["id"] for m in recs[0]["milestones"]["phases"]], ["conception", "production", "verification", "cloture"])
-            self.assertEqual(recs[0]["current_phase"], "Clôture / Archivé")
+            self.assertEqual(saved_rec["label"], "mon-lot")
+            self.assertEqual(saved_rec["project"], "Atelier")
+            self.assertEqual([m["id"] for m in saved_rec["milestones"]["phases"]], ["conception", "production", "verification", "cloture"])
+            self.assertEqual(saved_rec["current_phase"], "Clôture / Archivé")
 
     def test_mcp_ignore_meta_edit_and_fast_unchanged_poll(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -369,7 +382,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
                 brain / cid_pend,
                 [
                     {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-23T09:00:00Z", "content": "/gravity other"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-23T09:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 8_000, "cache_read_tokens": 0, "output_tokens": 150, "tool_calls": []},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-23T09:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 8_000, "cache_read_tokens": 0, "output_tokens": 150, "tool_calls": [{"name": "edit_file"}]},
                 ],
             )
             archive_conversation(

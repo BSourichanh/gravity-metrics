@@ -98,7 +98,7 @@ def _print_archived_summary(
     if saved_rec.get("already_archived"):
         print(
             f"[INFO] Session déjà archivée (immuable) : {saved_rec['label']} ({cid[:8]}) "
-            "— utilisez --force pour écraser"
+            "— utilisez --update-sealed ou --force pour mettre à jour"
         )
     else:
         print(f"[OK] Session archivée : {saved_rec['label']} ({cid[:8]})")
@@ -159,6 +159,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
             print(f"[ERREUR] {exc}", file=sys.stderr)
             return 1
 
+    explicit_label = label
     if not label:
         label = f"session-{cid[:8]}"
 
@@ -183,10 +184,11 @@ def _cmd_add(args: argparse.Namespace) -> int:
             metrics,
             store_dir=store_dir,
             history_path=history_path,
-            label=label,
+            label=explicit_label if args.update_sealed else label,
             note=note,
             summary_only=args.summary_only,
             force=bool(args.force),
+            update_sealed=bool(args.update_sealed),
         )
     except PendingBridgeJobsError as exc:
         print(f"[ERREUR] {exc}", file=sys.stderr)
@@ -223,6 +225,7 @@ def _cmd_archive(args: argparse.Namespace) -> int:
             gravity_profile=gravity_profile,
             summary_only=args.summary_only,
             force=bool(args.force),
+            update_sealed=bool(args.update_sealed),
             bridge_db_path=bridge_db_path,
         )
     except (PendingBridgeJobsError, FileNotFoundError, ValueError) as exc:
@@ -246,6 +249,7 @@ def _cmd_pending(args: argparse.Namespace) -> int:
         brain_dir,
         history_path,
         bridge_db_path=bridge_db_path,
+        include_noise=bool(args.all),
     )
     if args.json:
         print(json.dumps(pending, indent=2, ensure_ascii=False))
@@ -327,6 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_add.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_add.add_argument("--summary-only", action="store_true", help="N'écrit que dans l'historique global (sans fichiers reports/).")
+    p_add.add_argument("--update-sealed", action="store_true", help="Met à jour une fenêtre déjà archivée sans contourner les jobs Bridge actifs.")
     p_add.add_argument("--force", action="store_true", help="Autorise l'écrasement d'une archive existante ou le contournement d'un job Bridge actif.")
     p_add.set_defaults(func=_cmd_add)
 
@@ -344,6 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_arch.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
     p_arch.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_arch.add_argument("--summary-only", action="store_true", help="N'écrit que dans l'historique global.")
+    p_arch.add_argument("--update-sealed", action="store_true", help="Met à jour une fenêtre déjà archivée sans contourner les jobs Bridge actifs.")
     p_arch.add_argument("--force", action="store_true", help="Autorise le ré-archivage ou l'archivage avec job Bridge actif.")
     p_arch.set_defaults(func=_cmd_archive)
 
@@ -352,6 +358,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pend.add_argument("--bridge-db", type=Path, default=None, help="Chemin explicite vers bridge.db (lecture seule).")
     p_pend.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
     p_pend.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_pend.add_argument("--all", action="store_true", help="Inclut aussi les sessions consultatives sans outil de travail.")
     p_pend.add_argument("--json", action="store_true", help="Affiche la liste au format JSON.")
     p_pend.set_defaults(func=_cmd_pending)
 

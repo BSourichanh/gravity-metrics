@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hook PreInvocation Gravity Metrics : cycle hybride /gravity-metrics & archivage auto /gravity-architect archive."""
+"""Hook PreInvocation Gravity Metrics : cycle hybride /gravity-metrics."""
 
 import json
 from pathlib import Path
@@ -33,10 +33,6 @@ _STRIP_META_RE = re.compile(
 _METRICS_CMD_RE = re.compile(
     r"^/gravity-metrics(?::gravity-metrics)?(?:\s+(.*))?$",
     re.IGNORECASE | re.DOTALL,
-)
-_ARCHITECT_ARCHIVE_CMD_RE = re.compile(
-    r"^/gravity-architect(?::gravity-architect)?\s+archive\s+([^\s]+)",
-    re.IGNORECASE,
 )
 
 
@@ -157,94 +153,6 @@ def _build_handoff_system_message(
         + ".",
     ]
     return "\n".join(lines)
-
-
-def _handle_architect_archive_passthrough(payload: Dict[str, Any], cleaned_prompt: str) -> None:
-    """Archive automatiquement la session sur `/gravity-architect archive <slug>` en respectant Bridge."""
-    inv_num = payload.get("invocationNum")
-    if isinstance(inv_num, int) and inv_num > 0:
-        return
-
-    m = _ARCHITECT_ARCHIVE_CMD_RE.match(cleaned_prompt)
-    if not m:
-        return
-    raw_slug = m.group(1).strip("`'\",.;:()[]<>")
-    if not raw_slug:
-        return
-
-    if str(PLUGIN_ROOT) not in sys.path:
-        sys.path.insert(0, str(PLUGIN_ROOT))
-
-    try:
-        from metrics import (
-            PendingBridgeJobsError,
-            collect_run_metrics,
-            default_brain_dir,
-            find_archived_session,
-            load_active_captures,
-            load_history,
-            read_gravity_profile_summary,
-            record_session_metrics,
-            resolve_store_paths,
-            slugify_label,
-        )
-
-        store_dir, history_path = resolve_store_paths()
-        brain_dir = resolve_brain_dir(payload) or default_brain_dir()
-        cid = resolve_conversation_id(payload)
-        if not cid or not (brain_dir / cid).is_dir():
-            return
-
-        ws_root = resolve_workspace_root(payload)
-        project = ws_root.name if ws_root else ""
-        gravity_profile = read_gravity_profile_summary(ws_root)
-
-        active_cap = load_active_captures(store_dir).get(cid)
-        from_step = active_cap.get("start_step") if isinstance(active_cap, dict) else None
-        if not project and isinstance(active_cap, dict) and active_cap.get("project"):
-            project = str(active_cap["project"]).strip()
-
-        metrics = collect_run_metrics(
-            root_id=cid,
-            brain_dir=brain_dir,
-            pricing_catalog_path=PLUGIN_ROOT / "config" / "pricing_catalog.json",
-            gravity_window=True,
-            from_step=from_step if isinstance(from_step, int) else None,
-            project=project,
-            gravity_profile=gravity_profile,
-            store_dir=store_dir,
-        )
-        if metrics["summary"]["total_llm_calls"] == 0:
-            return
-
-        records = load_history(history_path)
-        w_start = (metrics.get("window") or {}).get("start_step_index")
-        if find_archived_session(records, cid, w_start) is not None:
-            return
-
-        base_label = slugify_label(raw_slug, fallback=f"architect-{cid[:8]}", max_len=52)
-        used_labels = {str(r.get("label") or "").strip().lower() for r in records}
-        derived_label = base_label
-        if derived_label.lower() in used_labels:
-            derived_label = f"{base_label[:42]}-{cid[:8]}"
-            idx = 2
-            while derived_label.lower() in used_labels:
-                derived_label = f"{base_label[:38]}-{cid[:8]}-{idx}"
-                idx += 1
-
-        record_session_metrics(
-            metrics,
-            store_dir=store_dir,
-            history_path=history_path,
-            label=derived_label,
-            note=f"Archivage auto (/gravity-architect archive {raw_slug})",
-            auto_label=False,
-            force=False,
-        )
-    except PendingBridgeJobsError:
-        return
-    except Exception:
-        return
 
 
 def _run_metrics_command(
@@ -554,8 +462,6 @@ def main() -> int:
     cleaned = re.sub(r"\s+", " ", _STRIP_META_RE.sub("", raw_input)).strip()
     match = _METRICS_CMD_RE.match(cleaned)
     if match is None:
-        if _ARCHITECT_ARCHIVE_CMD_RE.match(cleaned):
-            _handle_architect_archive_passthrough(payload, cleaned)
         emit_passthrough()
         return 0
 

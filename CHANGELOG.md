@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **End-of-Cycle `--update-sealed` Flag (`plugin/metrics/store.py`, `plugin/scripts/cli.py`):**
+  - Added `update_sealed: bool = False` to `record_session_metrics()` and `archive_conversation()` (default `False` preserves strict immutability) and exposed `--update-sealed` on `cli.py archive` and `cli.py add` to refresh an already-sealed window (e.g., after a final `git push`) while still enforcing `PendingBridgeJobsError` unless `--force` is passed.
+- **Anti-Noise Pending Filter & `--all` CLI Flag (`plugin/metrics/collector.py`, `plugin/scripts/cli.py`):**
+  - Tracked `has_work_activity` on `PLANNER_RESPONSE` tool calls (`write_file`, `write_to_file`, `edit_file`, `replace_file_content`, `multi_replace_file_content`, `run_workflow`, `invoke_subagent`, `swarm`) in `_get_transcript_index()` and added `include_noise: bool = False` to `list_pending_sessions()` (default hides consultative sessions lacking links, children, active captures, and work tools; exposed via `cli.py pending --all`).
 - **Neon/Flash Pricing Aliases (`plugin/config/pricing_catalog.json`):**
   - Added `gemini-pro-orchestrator-neon*` (`$3.00 / $0.15 / $15.00`) and `gemini-flash-worker-agy*` (`$0.75 / $0.075 / $3.75` in `2026_nov_standard`, `$1.50 / $0.15 / $7.50` in `2027_standard`) while preserving `_fallback` (`is_fallback: true`) for unknown models.
 - **Detailed Anomaly Counters & Cold-Cache Telemetry (`plugin/metrics/collector.py`, `tests/test_neon_errors_cold_cache.py`):**
@@ -17,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Inspected `params.capabilities` and `params.clientInfo` during `initialize` (`MIN_ANTIGRAVITY_MCP_APP_VERSION = (2, 34, 0)`) and appended a non-fatal `[WARN UI]` notice to `open_metrics_dashboard` text output only when the client is identified without MCP Apps support (`isError: false`, zero false positives on minimal/uninitialized calls).
 
 ### Changed
+- **End-of-Cycle Archival & Worktree Exclusion (`plugin/hooks/pre_invocation_metrics.py`, `plugin/hooks/session_start_metrics.py`, `plugin/rules/AGENTS.md`, `plugin/skills/gravity-metrics/SKILL.md`, `README.md`, `plugin/README.md`):**
+  - Removed premature auto-archiving on `/gravity-architect archive <slug>` from `PreInvocation` (`_ARCHITECT_ARCHIVE_CMD_RE`, `_handle_architect_archive_passthrough()`), retaining `parse_architect_archive_prompt()` / `is_architect_archive` in `collector.py` solely for the passive `Clôture / Archivé` milestone.
+  - Updated `session_start_metrics.py` to skip subagent worktree paths containing `/.gemini/antigravity/worktrees/` or `\worktrees\` without writing to `session_meta.json`.
 - **CLI Inspect & Session Detail Reports (`plugin/metrics/markdown_report.py`, `README.md`, `plugin/README.md`):**
   - Updated `render_inspect_text()` to display `invalid=<N> | shell!=0=<M>` when present, `coldCache=<N> ($<usd>, <pct>%)` in `Alertes`, `[fallback]` suffixes in `--- Par modèle ---`, and a warning line when `unmatched_models` is non-empty.
   - Updated `render_session_detail_markdown()` to surface `ERROR / INVALID / shell!=0` counts and `cold_cache_waste` in `## 6. Diagnostic & Gaspillages` with full backward compatibility on legacy payloads.

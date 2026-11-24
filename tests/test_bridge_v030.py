@@ -502,7 +502,7 @@ class TestEntrypointsExclusionSlugAndLifecycle(unittest.TestCase):
                 brain / cid_cli,
                 [
                     {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-22T16:00:00Z", "content": "/gravity-architect init"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T16:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T16:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "write_file"}]},
                 ],
             )
             p_pend = subprocess.run(

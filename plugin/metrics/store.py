@@ -124,6 +124,7 @@ def record_session_metrics(
     summary_only: bool = False,
     auto_label: bool = False,
     force: bool = False,
+    update_sealed: bool = False,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Enregistre/archive une session de manière immuable sous verrou dans `history.jsonl`."""
     explicit_label = label.strip()
@@ -135,7 +136,7 @@ def record_session_metrics(
         win = metrics_to_write.get("window") or {}
         w_start = win.get("start_step_index")
         existing = find_archived_session(records, cid, w_start)
-        if existing is not None and not force:
+        if existing is not None and not (force or update_sealed):
             ret = dict(existing)
             ret["already_archived"] = True
             return ret, records
@@ -145,6 +146,8 @@ def record_session_metrics(
             raise PendingBridgeJobsError(pending_jobs)
 
         harmonized_proj = _harmonize_project_name(str(metrics_to_write.get("project") or ""), records)
+        if not harmonized_proj and existing is not None and existing.get("project"):
+            harmonized_proj = _harmonize_project_name(str(existing["project"]), records)
         metrics_to_write["project"] = harmonized_proj
         metrics["project"] = harmonized_proj
         if explicit_label:
@@ -160,6 +163,10 @@ def record_session_metrics(
             )
         else:
             resolved_label = str(metrics_to_write.get("label") or "").strip()
+
+        resolved_note = note.strip()
+        if not resolved_note and existing is not None and update_sealed and existing.get("note"):
+            resolved_note = str(existing["note"]).strip()
 
         if resolved_label:
             metrics_to_write["label"] = resolved_label
@@ -180,7 +187,7 @@ def record_session_metrics(
             }
             metrics["milestones"] = metrics_to_write["milestones"]
 
-        rec = to_session_record(metrics_to_write, label=resolved_label, note=note)
+        rec = to_session_record(metrics_to_write, label=resolved_label, note=resolved_note)
         updated = upsert_session(records, rec)
         save_history(history_path, updated)
         regenerate_views(store_dir, updated)
@@ -219,6 +226,7 @@ def archive_conversation(
     gravity_profile: str = "",
     summary_only: bool = False,
     force: bool = False,
+    update_sealed: bool = False,
     bridge_db_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     """Résout un UUID ou préfixe, collecte la session et l'archive avec garde-fous."""
@@ -259,6 +267,7 @@ def archive_conversation(
         summary_only=summary_only,
         auto_label=not bool(eff_label.strip()),
         force=force,
+        update_sealed=update_sealed,
     )
     return saved_rec, records, metrics
 

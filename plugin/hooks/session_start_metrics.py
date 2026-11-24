@@ -12,6 +12,13 @@ for _p in (str(HOOKS_DIR), str(PLUGIN_ROOT)):
         sys.path.insert(0, _p)
 
 
+def _is_subagent_worktree(ws_path_str: str) -> bool:
+    """Retourne True si le chemin résolu correspond à un worktree de sous-agent Antigravity."""
+    norm_raw = ws_path_str.lower()
+    norm_posix = (ws_path_str.replace("\\", "/").rstrip("/") + "/").lower()
+    return "/.gemini/antigravity/worktrees/" in norm_posix or "\\worktrees\\" in (norm_raw + "\\")
+
+
 def main() -> int:
     try:
         from hook_runtime import (
@@ -50,14 +57,15 @@ def main() -> int:
                 cwd_str = str(ws_root.resolve())
             except OSError:
                 cwd_str = str(ws_root)
-            proj_name = ws_root.name or Path(cwd_str).name
-            store_dir, _ = resolve_store_paths()
-            record_session_meta(
-                cid,
-                cwd=cwd_str,
-                project=proj_name,
-                store_dir=store_dir,
-            )
+            if not _is_subagent_worktree(cwd_str):
+                proj_name = ws_root.name or Path(cwd_str).name
+                store_dir, _ = resolve_store_paths()
+                record_session_meta(
+                    cid,
+                    cwd=cwd_str,
+                    project=proj_name,
+                    store_dir=store_dir,
+                )
         emit_passthrough()
     except Exception:
         try:

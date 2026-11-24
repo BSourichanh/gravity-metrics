@@ -76,15 +76,15 @@ agy plugin install ./plugin
 
 ## 2. Hybrid Capture Lifecycle & 3-Space Widget
 
-### Commands (`/gravity-metrics` & auto-archive on `/gravity-architect archive`)
+### Commands (`/gravity-metrics` & CLI)
 
 - **`/gravity-metrics`** *(bare)*: opens the interactive dashboard in **read-only** mode (`view="overview"`, zero history mutation).
 - **`/gravity-metrics start [label]`**: starts an explicit capture window in `active_captures.json` (**0 LLM tokens**, terminates before model turn).
 - **`/gravity-metrics stop [label]`** *(alias `finish`, or `/gravity-metrics <label> [-n "note"] [--full] [--force]`)*: seals `[start_step .. current]`, archives immutably (`--full` deduplicated, blocked on active Bridge jobs unless `--force`), and opens `detail`.
 - **`/gravity-metrics archive <uuid_or_prefix> [label] [--full] [--force]`**: archives a specific session.
-- **`/gravity-metrics pending [--project <name>]`**: lists unarchived root Gravity sessions (`view="pending"`).
-- **`SessionStart` hook (`session_start_metrics.py`)**: records `(conversation_id → cwd, project)` into `session_meta.json`, complemented by `bridge.db` RO (`from_workspace` + `canonical_path` matching).
-- **Auto-archive on `/gravity-architect archive <slug>`**: derives a unique label from `<slug>` and archives immediately while respecting `PendingBridgeJobsError`.
+- **`/gravity-metrics pending [--project <name>]`**: lists unarchived root Gravity sessions with work activity (`view="pending"`, hiding consultative noise by default; use `cli.py pending --all` to include all sessions).
+- **`SessionStart` hook (`session_start_metrics.py`)**: records `(conversation_id → cwd, project)` into `session_meta.json` (ignoring subagent worktrees under `/.gemini/antigravity/worktrees/`), complemented by `bridge.db` RO (`from_workspace` + `canonical_path` matching).
+- **End-of-cycle archival & `--update-sealed`**: `cli.py archive <uuid_or_prefix> --update-sealed` / `cli.py add <uuid_or_prefix> --update-sealed` refreshes an already-sealed window (e.g. after a final `git push`) while still blocking on active Bridge jobs (`PendingBridgeJobsError`) unless `--force` is passed. (`/gravity-architect archive <slug>` remains a passive milestone signal without premature `PreInvocation` archival.)
 - **4 automatic milestones (0 tokens)**: `Conception` → `Production` → `Vérification & Push` → `Clôture / Archivé` (2-milestone fallback `Production → Clôture` in single-repo sessions), with per-phase cost/token breakdown.
 - **Pricing, Reliability & Cold-Cache Observability**: catalog aliases for `gemini-pro-orchestrator-neon*` and `gemini-flash-worker-agy*` (`2026_nov_standard` & `2027_standard`), `[fallback]` / `unmatched_models` warnings in `cli.py inspect`, separated anomaly counters (`total_error_steps`, `total_invalid_steps`, `total_shell_nonzero_steps`, `total_anomalies`), and `efficiency_and_waste.cold_cache_waste` tracking in CLI & Markdown reports.
 
@@ -133,9 +133,9 @@ Workflow profile lookup reads `$GRAVITY_HOME/workflow/workspaces/<hash>/profile.
 
 ```powershell
 python plugin/scripts/cli.py list
-python plugin/scripts/cli.py pending
-python plugin/scripts/cli.py add --latest -l "my-run" -n "Short note"
-python plugin/scripts/cli.py archive <uuid_or_prefix> -l "my-run"
+python plugin/scripts/cli.py pending [--all]
+python plugin/scripts/cli.py add --latest -l "my-run" -n "Short note" [--update-sealed]
+python plugin/scripts/cli.py archive <uuid_or_prefix> -l "my-run" [--update-sealed]
 python plugin/scripts/cli.py inspect <label_or_uuid>
 python plugin/scripts/cli.py remove <label_or_uuid> --purge-reports
 

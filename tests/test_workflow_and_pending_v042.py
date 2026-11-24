@@ -554,7 +554,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                         "created_at": "2026-11-22T12:01:00Z",
                         "content": "Implémenter feature run",
                     },
-                    _planner_step(1, "2026-11-22T12:01:10Z"),
+                    _planner_step(1, "2026-11-22T12:01:10Z", tool_calls=[{"name": "write_file"}]),
                 ],
             )
 
