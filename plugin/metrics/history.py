@@ -186,6 +186,30 @@ def to_session_record(
         "rewind_calls": eff["rewind_waste"]["rewind_calls"],
         "interrupted_agents": eff["interrupted_agents"]["count"],
     }
+    root_ag = next(
+        (a for a in agents_list if isinstance(a, dict) and a.get("conversation_id") == cid),
+        None,
+    )
+    root_last_step = metrics.get("root_last_step_index")
+    if not isinstance(root_last_step, int) or isinstance(root_last_step, bool):
+        cand_step = root_ag.get("last_step_index") if isinstance(root_ag, dict) else None
+        root_last_step = (
+            cand_step
+            if isinstance(cand_step, int) and not isinstance(cand_step, bool)
+            else None
+        )
+    root_llm_calls = metrics.get("root_llm_calls")
+    if not isinstance(root_llm_calls, int) or isinstance(root_llm_calls, bool):
+        cand_calls = root_ag.get("llm_calls") if isinstance(root_ag, dict) else None
+        root_llm_calls = (
+            int(cand_calls)
+            if isinstance(cand_calls, int) and not isinstance(cand_calls, bool)
+            else None
+        )
+    if root_last_step is not None:
+        rec_out["root_last_step_index"] = root_last_step
+    if root_llm_calls is not None:
+        rec_out["root_llm_calls"] = root_llm_calls
     if ms_compact is not None:
         rec_out["current_phase"] = ms_compact["current_phase"]
         rec_out["milestones"] = ms_compact
@@ -213,13 +237,19 @@ def load_history(history_path: Union[Path, str]) -> List[Dict[str, Any]]:
     return records
 
 
+def _is_int_step(val: Any) -> bool:
+    return isinstance(val, int) and not isinstance(val, bool)
+
+
 def find_archived_session(
     records: List[Dict[str, Any]],
     conversation_id: str,
     window_start_step: Optional[int],
 ) -> Optional[Dict[str, Any]]:
-    """Retourne l'enregistrement archivé correspondant à `(conversation_id, window_start_step)` ou couvert par `--full`."""
+    """Retourne l'enregistrement archivé correspondant à `(conversation_id, window_start_step)` (tolérance ±2 steps) ou couvert par `--full`."""
     exact_match: Optional[Dict[str, Any]] = None
+    tolerant_match: Optional[Dict[str, Any]] = None
+    tolerant_dist = 3
     full_match: Optional[Dict[str, Any]] = None
     any_match: Optional[Dict[str, Any]] = None
 
@@ -233,6 +263,11 @@ def find_archived_session(
         if rec_wstep == window_start_step:
             exact_match = dict(rec)
             break
+        if _is_int_step(window_start_step) and _is_int_step(rec_wstep):
+            dist = abs(rec_wstep - window_start_step)
+            if dist <= 2 and dist < tolerant_dist:
+                tolerant_dist = dist
+                tolerant_match = dict(rec)
         if rec_wstep is None and full_match is None:
             full_match = dict(rec)
         if any_match is None:
@@ -240,6 +275,8 @@ def find_archived_session(
 
     if exact_match is not None:
         return exact_match
+    if tolerant_match is not None:
+        return tolerant_match
     if full_match is not None:
         return full_match
     if window_start_step is None and any_match is not None:
@@ -282,7 +319,7 @@ def resolve_session_index(records: List[Dict[str, Any]], key: str) -> int:
 
 
 def upsert_session(records: List[Dict[str, Any]], record: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Ajoute ou met à jour une session dans la liste historique."""
+    """Ajoute ou met à jour une session dans la liste historique (tolérance ±2 steps sans doublon)."""
     updated = [dict(r) for r in records]
     new_rec = dict(record)
     new_cid = new_rec.get("conversation_id")
@@ -293,6 +330,17 @@ def upsert_session(records: List[Dict[str, Any]], record: Dict[str, Any]) -> Lis
         if r.get("conversation_id") == new_cid and r.get("window_start_step") == new_wstep:
             match_idx = idx
             break
+    if match_idx is None and _is_int_step(new_wstep):
+        best_dist = 3
+        for idx, r in enumerate(updated):
+            if r.get("conversation_id") != new_cid:
+                continue
+            r_wstep = r.get("window_start_step")
+            if _is_int_step(r_wstep):
+                dist = abs(r_wstep - new_wstep)
+                if dist <= 2 and dist < best_dist:
+                    best_dist = dist
+                    match_idx = idx
     if match_idx is None and new_rec.get("label"):
         for idx, r in enumerate(updated):
             if r.get("label") == new_rec.get("label"):

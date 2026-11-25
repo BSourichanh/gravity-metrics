@@ -97,7 +97,7 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
             self.assertEqual(parse_architect_archive_prompt("/gravity-architect archive lot-x"), "lot-x")
 
             m = collect_run_metrics(cid, brain, CATALOG_PATH, gravity_window=True, store_dir=store)
-            self.assertEqual(m["milestones"]["current_phase"], "Clôture / Archivé")
+            self.assertEqual(m["milestones"]["current_phase"], "Clôture / Enregistrée")
             self.assertEqual(m["milestones"]["phases"][-1]["status"], "active")
 
     def test_update_sealed_cli_and_immutability(self) -> None:
@@ -311,6 +311,95 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
             meta = load_session_meta(store)
             self.assertIn("real-cid-1", meta)
             self.assertEqual(meta["real-cid-1"]["project"], "RealProject")
+
+    def test_pending_no_phantom_within_two_steps_and_update_sealed_reuses_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            hist_path = store / "data" / "history.jsonl"
+
+            cid = "r2000001-1111-2222-3333-444455556666"
+            steps = [
+                {"step_index": 70, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:00:00Z", "content": "Chat libre"},
+                {"step_index": 71, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:00:10Z", "model": "gemini-4-neon", "input_tokens": 50_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
+                {"step_index": 72, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:01:00Z", "content": "/gravity-architect spec r2-lot"},
+                {"step_index": 73, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T10:01:01Z", "content": "hook msg"},
+                {"step_index": 74, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:01:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 12_000, "cache_read_tokens": 0, "output_tokens": 300, "tool_calls": [{"name": "edit_file", "args": {"Path": "plugin/metrics/store.py"}}]},
+            ]
+            _write_transcript(brain / cid, steps)
+
+            # Enregistré avec ancien off-by-one window_start_step=73 (capture active purgée ensuite)
+            saved1, _, _ = archive_conversation(
+                cid,
+                store_dir=store,
+                history_path=hist_path,
+                brain_dir=brain,
+                catalog_path=CATALOG_PATH,
+                label="r2-old-label",
+                note="Note R2",
+                project="ProjR2",
+                from_step=73,
+            )
+            self.assertEqual(saved1["window_start_step"], 73)
+            self.assertTrue((store / "reports" / "r2-old-label.json").is_file())
+
+            # list_pending_sessions ré-ancre à step 72 -> abs(73 - 72) == 1 <= 2 -> zéro fantôme !
+            self.assertEqual(list_pending_sessions(brain, hist_path, store_dir=store), [])
+
+            # Suite de la session (step 75) + update_sealed=True sans active_capture ni label explicite :
+            # réutilise la fenêtre existante (73), préserve label/project/note, zéro doublon !
+            steps_more = steps + [
+                {"step_index": 75, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:02:00Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 8_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "run_command", "args": {"CommandLine": "git -C ../gravity-metrics push origin dev"}}]},
+            ]
+            _write_transcript(brain / cid, steps_more)
+
+            saved2, recs2, _ = archive_conversation(
+                cid,
+                store_dir=store,
+                history_path=hist_path,
+                brain_dir=brain,
+                catalog_path=CATALOG_PATH,
+                update_sealed=True,
+            )
+            self.assertEqual(len(recs2), 1)
+            self.assertEqual(saved2["label"], "r2-old-label")
+            self.assertEqual(saved2["project"], "ProjR2")
+            self.assertEqual(saved2["note"], "Note R2")
+            self.assertEqual(saved2["window_start_step"], 73)
+            self.assertEqual(saved2["input_tokens"], 20_000)
+
+            # Renommage lors d'un update_sealed=True purge l'ancien slug orphelin
+            saved3, recs3, _ = archive_conversation(
+                cid,
+                store_dir=store,
+                history_path=hist_path,
+                brain_dir=brain,
+                catalog_path=CATALOG_PATH,
+                label="r2-new-label",
+                update_sealed=True,
+                from_step=72,
+            )
+            self.assertEqual(len(recs3), 1)
+            self.assertEqual(saved3["label"], "r2-new-label")
+            self.assertEqual(saved3["note"], "Note R2")
+            self.assertFalse((store / "reports" / "r2-old-label.json").exists())
+            self.assertFalse((store / "reports" / "r2-old-label.md").exists())
+            self.assertTrue((store / "reports" / "r2-new-label.json").is_file())
+
+            # Une nouvelle phase distante (après marqueur clôture phase 1, step 78, abs(72 - 78) == 6 > 2) DOIT apparaître dans pending
+            from metrics import METRICS_MARKER
+
+            steps_next_phase = steps_more + [
+                {"step_index": 76, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:03:00Z", "content": "/gravity-metrics stop r2-new-label"},
+                {"step_index": 77, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T10:03:01Z", "content": METRICS_MARKER},
+                {"step_index": 78, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:10:00Z", "content": "/gravity-workflow phase suivante"},
+                {"step_index": 79, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:10:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 4_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "edit_file", "args": {"Path": "plugin/metrics/history.py"}}]},
+            ]
+            _write_transcript(brain / cid, steps_next_phase)
+            pend_next = list_pending_sessions(brain, hist_path, store_dir=store)
+            self.assertEqual([p["conversation_id"] for p in pend_next], [cid])
+            self.assertEqual(pend_next[0]["window_start_step"], 78)
 
 
 if __name__ == "__main__":

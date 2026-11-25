@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
-from typing import Any, Dict, Iterator, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 from .pricing import default_store_dir
 
@@ -174,6 +174,49 @@ def next_step_index_in_transcript(
                         max_step = step_val
     except OSError:
         return 0
+    return max_step + 1
+
+
+def current_turn_start_step_in_transcript(
+    transcript_path: Optional[Union[Path, str]],
+) -> int:
+    """Retourne le `step_index` du dernier `USER_INPUT` non suivi d'un `PLANNER_RESPONSE` (repli `next_step_index_in_transcript`)."""
+    if transcript_path is None:
+        return 0
+    tpath = Path(transcript_path).expanduser()
+    if not tpath.is_file():
+        return 0
+    entries: List[Dict[str, Any]] = []
+    max_step = -1
+    try:
+        for raw_line in tpath.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                entries.append(obj)
+                step_val = obj.get("step_index")
+                if isinstance(step_val, int) and not isinstance(step_val, bool):
+                    if step_val > max_step:
+                        max_step = step_val
+    except OSError:
+        return 0
+
+    for obj in reversed(entries):
+        stype = obj.get("type")
+        if stype == "SYSTEM_MESSAGE":
+            continue
+        if stype == "PLANNER_RESPONSE":
+            break
+        if stype == "USER_INPUT":
+            step_val = obj.get("step_index")
+            if isinstance(step_val, int) and not isinstance(step_val, bool):
+                return max(0, step_val)
+            break
     return max_step + 1
 
 

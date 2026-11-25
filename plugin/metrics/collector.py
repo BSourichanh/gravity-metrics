@@ -48,7 +48,19 @@ _GRAVITY_METRICS_CMD_RE = re.compile(
 _GRAVITY_METRICS_ARGS_RE = re.compile(
     r"^/gravity-metrics(?::gravity-metrics)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL
 )
-_NON_CAPTURE_METRICS_SUBCOMMANDS: Tuple[str, ...] = ("archive", "pending")
+_SWARM_CMD_RE = re.compile(r"^/swarm(?::swarm)?(?:\s|$)", re.IGNORECASE)
+_GIT_PUSH_RE = re.compile(r"\bgit\b[^\n;|&]*\bpush\b", re.IGNORECASE)
+_ATELIER_DOC_PATH_RE = re.compile(r"(?:^|/)(?:specs|tasks|tracking)/", re.IGNORECASE)
+_DIRECT_EDIT_TOOL_NAMES = frozenset(
+    {
+        "write_file",
+        "write_to_file",
+        "edit_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+    }
+)
+_CONCEPTION_SUBAGENT_TYPES = frozenset({"research", "planner", "discovery"})
 _GRAVITY_CMD_RE = re.compile(
     r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity-architect(?::gravity-architect)?|gravity-bridge(?::gravity-bridge)?|gravity(?::gravity)?)(?:\s|$)",
     re.IGNORECASE,
@@ -193,6 +205,7 @@ def _parse_metrics_flags(tokens: List[str]) -> Tuple[Dict[str, Any], List[str], 
     project = ""
     full = False
     force = False
+    update = False
     has_explicit_label = False
     has_capture_flags = False
     positionals: List[str] = []
@@ -232,6 +245,10 @@ def _parse_metrics_flags(tokens: List[str]) -> Tuple[Dict[str, Any], List[str], 
             force = True
             has_capture_flags = True
             i += 1
+        elif tok in ("--update", "--update-sealed"):
+            update = True
+            has_capture_flags = True
+            i += 1
         elif tok.startswith("-"):
             raise ValueError(f"Option inconnue : `{tok}`.")
         else:
@@ -246,6 +263,7 @@ def _parse_metrics_flags(tokens: List[str]) -> Tuple[Dict[str, Any], List[str], 
             "project": project.strip(),
             "full": full,
             "force": force,
+            "update": update,
         },
         positionals,
         has_explicit_label,
@@ -264,7 +282,7 @@ def parse_architect_archive_prompt(raw: str) -> Optional[str]:
 
 
 def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
-    """Analyse un prompt `/gravity-metrics` : passthrough, open, start, stop, capture, archive, pending ou error."""
+    """Analyse un prompt `/gravity-metrics` : passthrough, open, start, stop, capture, record/archive, pending ou error."""
     txt = extract_user_request_text(raw)
     if not _GRAVITY_METRICS_CMD_RE.match(txt):
         return {"action": "passthrough"}
@@ -331,10 +349,11 @@ def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
             "project": opts["project"],
             "full": opts["full"],
             "force": opts["force"],
+            "update": opts["update"],
             "has_explicit_label": has_explicit_label,
         }
 
-    if head == "archive":
+    if head in ("record", "archive"):
         try:
             opts, positionals, has_explicit_label, _ = _parse_metrics_flags(tokens[1:])
         except ValueError as exc:
@@ -342,12 +361,12 @@ def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
         if not positionals:
             return {
                 "action": "error",
-                "error": 'Syntaxe : `/gravity-metrics archive <uuid_ou_prefixe> [label] [-n "note"] [--full] [--force]`',
+                "error": f'Syntaxe : `/gravity-metrics {head} <uuid_ou_prefixe> [label] [-n "note"] [--full] [--update] [--force]`',
             }
         target = positionals[0]
         label = opts["label"] or " ".join(positionals[1:]).strip()
         return {
-            "action": "archive",
+            "action": head,
             "target": target,
             "label": label,
             "note": opts["note"],
@@ -355,6 +374,7 @@ def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
             "project": opts["project"],
             "full": opts["full"],
             "force": opts["force"],
+            "update": opts["update"],
             "has_explicit_label": has_explicit_label,
         }
 
@@ -383,6 +403,7 @@ def classify_metrics_prompt(raw: str) -> Dict[str, Any]:
         "project": opts["project"],
         "full": opts["full"],
         "force": opts["force"],
+        "update": opts["update"],
         "has_explicit_label": has_explicit_label,
     }
 
@@ -663,15 +684,30 @@ def _parse_tool_call_args(tc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_shell_command_str(tc: Dict[str, Any]) -> str:
-    """Extrait la commande shell depuis un tool_call (`CommandLine`/`command`/`cmd`)."""
+    """Extrait la commande shell depuis un tool_call (`CommandLine`/`command`/`cmd`), y compris JSON doublement quoté."""
     args = _parse_tool_call_args(tc)
-    return str(
+    raw = (
         args.get("CommandLine")
         or args.get("command")
         or args.get("command_line")
         or args.get("cmd")
         or ""
     )
+    cmd = str(raw).strip()
+    if len(cmd) >= 2 and cmd[0] == '"' and cmd[-1] == '"':
+        try:
+            unwrapped = json.loads(cmd)
+            if isinstance(unwrapped, str):
+                cmd = unwrapped.strip()
+        except Exception:
+            pass
+    return cmd
+
+
+def _is_atelier_doc_path(raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    return bool(_ATELIER_DOC_PATH_RE.search(raw_path.replace("\\", "/").strip()))
 
 
 def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
@@ -684,6 +720,7 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
             "first_prompt_raw": None,
             "has_gravity_cmd": False,
             "last_ts": None,
+            "max_step_index": None,
             "entries": [],
         }
 
@@ -705,6 +742,7 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
     first_prompt_raw: Optional[str] = None
     has_gravity_cmd = False
     last_ts: Optional[str] = None
+    max_step_index: Optional[int] = None
     entries: List[Dict[str, Any]] = []
 
     try:
@@ -721,7 +759,13 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                     continue
                 step_type = str(obj.get("type") or "")
                 raw_step = obj.get("step_index")
-                step_idx = raw_step if isinstance(raw_step, int) else None
+                step_idx = (
+                    raw_step
+                    if isinstance(raw_step, int) and not isinstance(raw_step, bool)
+                    else None
+                )
+                if step_idx is not None and (max_step_index is None or step_idx > max_step_index):
+                    max_step_index = step_idx
                 created_at = obj.get("created_at")
                 if created_at:
                     last_ts = str(created_at)
@@ -732,6 +776,7 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                 is_gravity = False
                 is_architect = False
                 is_architect_archive = False
+                is_swarm = False
                 clean_prompt = ""
                 if is_user:
                     if first_prompt_raw is None:
@@ -748,6 +793,8 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                         is_architect = True
                     if parse_architect_archive_prompt(content) is not None:
                         is_architect_archive = True
+                    if _SWARM_CMD_RE.match(clean_prompt):
+                        is_swarm = True
 
                 meta_obj = obj.get("metadata")
                 has_marker = step_type == "SYSTEM_MESSAGE" and (
@@ -766,6 +813,9 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                 )
                 tool_names: List[str] = []
                 has_push_or_verif = False
+                has_cli_record_or_archive = False
+                has_swarm_or_subagent_tool = False
+                has_direct_edit_tool = False
                 has_work_activity = False
                 if step_type == "PLANNER_RESPONSE":
                     for tc in obj.get("tool_calls") or []:
@@ -776,10 +826,43 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                             tool_names.append(tname)
                             if tname in _WORK_TOOL_NAMES:
                                 has_work_activity = True
-                        if tname in ("run_command", "execute_command", "bash", "shell"):
-                            cmd_str = _extract_shell_command_str(tc).lower()
-                            if any(tok in cmd_str for tok in ("git push", "validate.py", "unittest", "pytest")):
+                            if tname in ("swarm", "invoke_subagent"):
+                                has_swarm_or_subagent_tool = True
+                            if tname in _DIRECT_EDIT_TOOL_NAMES:
+                                targs = _parse_tool_call_args(tc)
+                                tpath_arg = str(
+                                    targs.get("Path")
+                                    or targs.get("TargetFile")
+                                    or targs.get("path")
+                                    or targs.get("file_path")
+                                    or targs.get("target_file")
+                                    or ""
+                                ).strip()
+                                if not _is_atelier_doc_path(tpath_arg):
+                                    has_direct_edit_tool = True
+                        if tname.lower() in ("run_command", "execute_command", "bash", "shell"):
+                            cmd_raw = _extract_shell_command_str(tc)
+                            cmd_str = cmd_raw.lower()
+                            if (
+                                any(
+                                    tok in cmd_str
+                                    for tok in (
+                                        "git push",
+                                        "validate.py",
+                                        "unittest",
+                                        "pytest",
+                                        "audit_ecosystem.py",
+                                        "ecosystem_install.py",
+                                    )
+                                )
+                                or _GIT_PUSH_RE.search(cmd_raw)
+                            ):
                                 has_push_or_verif = True
+                            if "cli.py" in cmd_str and any(
+                                _segment_is_cli_record_or_archive(seg)
+                                for seg in _split_shell_segments(cmd_raw)
+                            ):
+                                has_cli_record_or_archive = True
 
                 entries.append(
                     {
@@ -794,10 +877,14 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                         "is_gravity": is_gravity,
                         "is_architect": is_architect,
                         "is_architect_archive": is_architect_archive,
+                        "is_swarm": is_swarm,
                         "is_planner": step_type == "PLANNER_RESPONSE",
                         "has_marker": has_marker,
                         "has_open_marker": has_open_marker,
                         "has_push_or_verif": has_push_or_verif,
+                        "has_cli_record_or_archive": has_cli_record_or_archive,
+                        "has_swarm_or_subagent_tool": has_swarm_or_subagent_tool,
+                        "has_direct_edit_tool": has_direct_edit_tool,
                         "has_work_activity": has_work_activity,
                         "tool_names": tool_names,
                         "clean_prompt": clean_prompt,
@@ -812,6 +899,7 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
         "first_prompt_raw": first_prompt_raw,
         "has_gravity_cmd": has_gravity_cmd,
         "last_ts": last_ts,
+        "max_step_index": max_step_index,
         "entries": entries,
     }
     if cache_key:
@@ -1496,6 +1584,43 @@ def _is_direct_child_in_window(
     )
 
 
+def _discover_direct_subagent_children(conv_dir: Path) -> List[Dict[str, Any]]:
+    """Lit les descripteurs `subagents/*.json` directs d'une conversation."""
+    sub_dir = conv_dir / ".system_generated" / "subagents"
+    if not sub_dir.is_dir():
+        return []
+    children: List[Dict[str, Any]] = []
+    try:
+        files = sorted(sub_dir.iterdir())
+    except OSError:
+        return []
+    for fn in files:
+        if not fn.is_file() or fn.suffix.lower() != ".json":
+            continue
+        try:
+            sd = json.loads(fn.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(sd, dict):
+            continue
+        scid = str(sd.get("conversationId") or "").strip()
+        if not scid:
+            continue
+        desc = sd.get("subagentDescriptor") or {}
+        if not isinstance(desc, dict):
+            desc = {}
+        children.append(
+            {
+                "conversation_id": scid,
+                "type_name": str(desc.get("typeName") or sd.get("type_name") or "unknown"),
+                "role": str(desc.get("role") or scid[:8]),
+                "state": sd.get("state"),
+                "spawn_step_index": sd.get("spawnStepIndex"),
+            }
+        )
+    return children
+
+
 def discover_agent_tree(
     root_id: str,
     brain_dir: Union[Path, str],
@@ -1532,44 +1657,35 @@ def discover_agent_tree(
         visited.add(cid)
 
         cdir = base / cid
-        sub_dir = cdir / ".system_generated" / "subagents"
         transcript_path = cdir / ".system_generated" / "logs" / "transcript.jsonl"
         children_ids: List[str] = []
         depth = item["depth"]
         cur_bridge_ws = item["bridge_workspace"]
 
-        if sub_dir.is_dir():
-            for fn in sorted(sub_dir.iterdir()):
-                if not fn.is_file() or fn.suffix.lower() != ".json":
-                    continue
-                try:
-                    sd = json.loads(fn.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                scid = sd.get("conversationId")
-                if not scid or scid in visited:
-                    continue
-                if scid not in children_ids:
-                    children_ids.append(scid)
-                if scid not in enqueued:
-                    enqueued.add(scid)
-                    desc = sd.get("subagentDescriptor") or {}
-                    queue.append(
-                        {
-                            "cid": scid,
-                            "parent_id": cid,
-                            "depth": depth + 1,
-                            "type_name": str(desc.get("typeName") or "unknown"),
-                            "role": str(desc.get("role") or scid[:8]),
-                            "state": sd.get("state"),
-                            "spawn_step": sd.get("spawnStepIndex"),
-                            "source": "subagent",
-                            "bridge_thread_id": None,
-                            "bridge_workspace": cur_bridge_ws,
-                            "bridge_job_status": None,
-                            "bridge_created_at": None,
-                        }
-                    )
+        for sub in _discover_direct_subagent_children(cdir):
+            scid = sub["conversation_id"]
+            if scid in visited:
+                continue
+            if scid not in children_ids:
+                children_ids.append(scid)
+            if scid not in enqueued:
+                enqueued.add(scid)
+                queue.append(
+                    {
+                        "cid": scid,
+                        "parent_id": cid,
+                        "depth": depth + 1,
+                        "type_name": sub["type_name"],
+                        "role": sub["role"],
+                        "state": sub["state"],
+                        "spawn_step": sub["spawn_step_index"],
+                        "source": "subagent",
+                        "bridge_thread_id": None,
+                        "bridge_workspace": cur_bridge_ws,
+                        "bridge_job_status": None,
+                        "bridge_created_at": None,
+                    }
+                )
 
         bridge_links: List[Dict[str, Any]] = []
 
@@ -1718,8 +1834,8 @@ def _split_shell_segments(cmd: str) -> List[str]:
     return segments
 
 
-def _segment_is_cli_self_archive(seg: str, current_cid: str) -> bool:
-    """Vérifie si un segment invoque directement `cli.py archive|add` pour `current_cid`."""
+def _parse_cli_segment(seg: str) -> Optional[Tuple[str, List[str], bool]]:
+    """Extrait `(subcmd, positionals, has_latest)` si `seg` appelle `cli.py record|archive|add`."""
     try:
         raw_tokens = shlex.split(seg, posix=False)
     except ValueError:
@@ -1730,18 +1846,18 @@ def _segment_is_cli_self_archive(seg: str, current_cid: str) -> bool:
         if t
     ]
     if not tokens:
-        return False
+        return None
     if Path(tokens[0].replace("\\", "/")).name.lower() in ("git", "echo", "printf", "grep", "rg"):
-        return False
+        return None
     cli_idx = next(
         (idx for idx, tok in enumerate(tokens) if Path(tok.replace("\\", "/")).name.lower() == "cli.py"),
         None,
     )
     if cli_idx is None or cli_idx + 1 >= len(tokens):
-        return False
+        return None
     subcmd = tokens[cli_idx + 1].lower()
-    if subcmd not in ("archive", "add"):
-        return False
+    if subcmd not in ("record", "archive", "add"):
+        return None
 
     positionals: List[str] = []
     has_latest = False
@@ -1758,10 +1874,29 @@ def _segment_is_cli_self_archive(seg: str, current_cid: str) -> bool:
             continue
         positionals.append(tok)
         j += 1
+    return subcmd, positionals, has_latest
 
+
+def _segment_is_cli_record_or_archive(seg: str) -> bool:
+    """Retourne True si un segment shell invoque `cli.py record|archive|add`."""
+    parsed = _parse_cli_segment(seg)
+    if parsed is None:
+        return False
+    subcmd, positionals, has_latest = parsed
+    if subcmd in ("record", "archive"):
+        return bool(positionals)
+    return bool(positionals) or has_latest
+
+
+def _segment_is_cli_self_archive(seg: str, current_cid: str) -> bool:
+    """Vérifie si un segment invoque directement `cli.py record|archive|add` pour `current_cid`."""
+    parsed = _parse_cli_segment(seg)
+    if parsed is None:
+        return False
+    subcmd, positionals, has_latest = parsed
     target = positionals[0] if positionals else ""
     cid_low = current_cid.strip().lower()
-    if subcmd == "archive":
+    if subcmd in ("record", "archive"):
         if not target:
             return False
         if cid_low and not cid_low.startswith(target.lower()):
@@ -1930,6 +2065,7 @@ def parse_agent_transcript(
     prev_non_sys: Optional[Dict[str, Any]] = None
     last_non_sys: Optional[Dict[str, Any]] = None
     last_planner_resp: Optional[Dict[str, Any]] = None
+    last_step_index: Optional[int] = None
     user_prompt_texts: List[str] = []
     step_costs: List[Dict[str, Any]] = []
 
@@ -1953,6 +2089,10 @@ def parse_agent_transcript(
                     continue
 
                 total_steps += 1
+                raw_step_idx = obj.get("step_index")
+                if isinstance(raw_step_idx, int) and not isinstance(raw_step_idx, bool):
+                    if last_step_index is None or raw_step_idx > last_step_index:
+                        last_step_index = raw_step_idx
                 step_type = obj.get("type")
                 status = obj.get("status")
                 dt = _parse_iso_ts(obj.get("created_at"))
@@ -2196,6 +2336,7 @@ def parse_agent_transcript(
         "_raw_cold_cache_cost_usd": cold_cache_cost_raw,
         "clean_termination": clean_term,
         "last_non_system_type": last_non_sys_type,
+        "last_step_index": last_step_index,
         "first_ts": _fmt_iso_utc(first_dt),
         "last_ts": _fmt_iso_utc(last_dt),
         "lifespan_s": lifespan_s,
@@ -2345,6 +2486,113 @@ def _aggregate_bucket(agents_subset: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _is_prod_subagent(ag: Dict[str, Any]) -> bool:
+    """Retourne True si un sous-agent n'est pas un rôle d'exploration (`research`/`planner`/`discovery`)."""
+    tn = str(ag.get("type_name") or "").strip().lower()
+    rl = str(ag.get("role") or "").strip().lower()
+    if tn in _CONCEPTION_SUBAGENT_TYPES or rl in _CONCEPTION_SUBAGENT_TYPES:
+        return False
+    return classify_agent(tn, rl) != "discovery"
+
+
+def _analyze_milestones_window(
+    win_entries: List[Dict[str, Any]],
+    *,
+    root_links: List[Dict[str, Any]],
+    bridge_agents: List[Dict[str, Any]],
+    wf_agents: List[Dict[str, Any]],
+    prod_subagents: List[Dict[str, Any]],
+    pending_jobs: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Analyse les signaux de jalons d'une fenêtre (partagé entre collecte et pending)."""
+    has_architect = any(e.get("is_architect") for e in win_entries)
+    has_bridge = bool(bridge_agents or root_links)
+    has_swarm = any(
+        e.get("is_swarm") or "swarm" in (e.get("tool_names") or [])
+        for e in win_entries
+    )
+    has_wf = bool(wf_agents) or any(
+        "run_workflow" in (e.get("tool_names") or [])
+        for e in win_entries
+    )
+    has_direct_edit = any(e.get("has_direct_edit_tool") for e in win_entries)
+    is_4_phases = has_bridge or has_architect or has_swarm or bool(prod_subagents) or has_wf
+
+    link_steps = [
+        int(lnk["spawn_step_index"])
+        for lnk in root_links
+        if isinstance(lnk.get("spawn_step_index"), int)
+    ]
+    child_steps = [
+        int(a["spawn_step_index"])
+        for a in bridge_agents + wf_agents + prod_subagents
+        if isinstance(a.get("spawn_step_index"), int)
+    ]
+    tool_prod_steps = [
+        int(e["step_index"])
+        for e in win_entries
+        if isinstance(e.get("step_index"), int)
+        and (
+            e.get("is_swarm")
+            or "swarm" in (e.get("tool_names") or [])
+            or "run_workflow" in (e.get("tool_names") or [])
+            or e.get("has_direct_edit_tool")
+        )
+    ]
+    all_prod_steps = link_steps + child_steps + tool_prod_steps
+    first_prod_step = min(all_prod_steps) if all_prod_steps else None
+    last_prod_step = max(all_prod_steps) if all_prod_steps else None
+
+    verif_step: Optional[int] = None
+    archive_step: Optional[int] = None
+    for e in win_entries:
+        st_i = e.get("step_index")
+        if (
+            (e.get("is_architect_archive") or e.get("has_cli_record_or_archive"))
+            and archive_step is None
+            and isinstance(st_i, int)
+        ):
+            archive_step = st_i
+        if not pending_jobs and isinstance(st_i, int):
+            after_prod = (
+                (last_prod_step is not None and st_i > last_prod_step)
+                or (last_prod_step is None and bool(prod_subagents) and bool(e.get("has_push_or_verif")))
+            )
+            if after_prod:
+                if e.get("has_push_or_verif") and verif_step is None:
+                    verif_step = st_i
+                elif e.get("is_user") and "[GRAVITY-BRIDGE" in str(e.get("clean_prompt") or ""):
+                    if verif_step is None:
+                        verif_step = st_i
+                elif has_bridge and e.get("is_planner") and verif_step is None:
+                    verif_step = st_i
+
+    has_close_cmd = any(
+        e.get("is_architect_archive") or e.get("has_cli_record_or_archive")
+        for e in win_entries
+    )
+    has_prod_activity = bool(
+        first_prod_step is not None
+        or bridge_agents
+        or wf_agents
+        or prod_subagents
+        or has_swarm
+        or has_wf
+        or has_direct_edit
+        or pending_jobs
+    )
+    return {
+        "is_4_phases": is_4_phases,
+        "has_bridge": has_bridge,
+        "first_prod_step": first_prod_step,
+        "last_prod_step": last_prod_step,
+        "verif_step": verif_step,
+        "archive_step": archive_step,
+        "has_close_cmd": has_close_cmd,
+        "has_prod_activity": has_prod_activity,
+    }
+
+
 def _compute_session_milestones(
     *,
     root_id: str,
@@ -2355,7 +2603,7 @@ def _compute_session_milestones(
     total_cost_float: float,
     is_archived: bool = False,
 ) -> Dict[str, Any]:
-    """Déduit les 4 jalons automatiques (0 token) ou repli 2 jalons en mono-dépôt sans Bridge."""
+    """Déduit les 4 jalons automatiques (0 token) ou repli 2 jalons en mono-dépôt sans orchestration multi-phases."""
     tx = _get_transcript_index(root_transcript_path)
     entries = tx.get("entries") or []
     s_line = int(window_info.get("start_line_idx") or 0)
@@ -2369,9 +2617,9 @@ def _compute_session_milestones(
     root_agent = next((a for a in enriched_agents if a["conversation_id"] == root_id), None)
     bridge_agents = [a for a in enriched_agents if a.get("source") == "bridge"]
     wf_agents = [a for a in enriched_agents if a.get("source") == "workflow"]
+    subagent_agents = [a for a in enriched_agents if a.get("source") == "subagent"]
+    prod_subagents = [a for a in subagent_agents if _is_prod_subagent(a)]
     root_links = (root_agent.get("_bridge_links") or []) if root_agent else []
-    has_architect = any(e.get("is_architect") for e in win_entries)
-    has_bridge = bool(bridge_agents or root_links)
 
     def _empty_phase(pid: str, plabel: str) -> Dict[str, Any]:
         return {
@@ -2393,12 +2641,19 @@ def _compute_session_milestones(
         phase["cost_usd"] += float((ag.get("_raw_cost") or {}).get("total_usd") or 0.0)
         phase["cost_2027_usd"] += float((ag.get("_raw_proj") or {}).get("total_usd") or 0.0)
 
-    has_arch_archive = any(e.get("is_architect_archive") for e in win_entries)
+    sig = _analyze_milestones_window(
+        win_entries,
+        root_links=root_links,
+        bridge_agents=bridge_agents,
+        wf_agents=wf_agents,
+        prod_subagents=prod_subagents,
+        pending_jobs=bridge_pending_jobs,
+    )
 
-    if not has_bridge and not has_architect:
-        # Repli 2 jalons : Production -> Clôture / Archivé
+    if not sig["is_4_phases"]:
+        # Repli 2 jalons : Production -> Clôture / Enregistrée
         p_prod = _empty_phase("production", "Production")
-        p_close = _empty_phase("cloture", "Clôture / Archivé")
+        p_close = _empty_phase("cloture", "Clôture / Enregistrée")
         for ag in enriched_agents:
             _add_agent_to_phase(p_prod, ag)
         p_prod["status"] = "done" if is_archived else "active"
@@ -2410,48 +2665,16 @@ def _compute_session_milestones(
         p_conc = _empty_phase("conception", "Conception")
         p_prod = _empty_phase("production", "Production")
         p_verif = _empty_phase("verification", "Vérification & Push")
-        p_close = _empty_phase("cloture", "Clôture / Archivé")
+        p_close = _empty_phase("cloture", "Clôture / Enregistrée")
 
-        link_steps = [
-            int(lnk["spawn_step_index"])
-            for lnk in root_links
-            if isinstance(lnk.get("spawn_step_index"), int)
-        ]
-        child_steps = [
-            int(a["spawn_step_index"])
-            for a in bridge_agents + wf_agents
-            if isinstance(a.get("spawn_step_index"), int)
-        ]
-        all_prod_steps = link_steps + child_steps
-        first_prod_step = min(all_prod_steps) if all_prod_steps else None
-        last_prod_step = max(all_prod_steps) if all_prod_steps else None
-
-        # Détecter début Vérification & Push uniquement après la dernière vague et sans job Bridge actif
-        verif_step: Optional[int] = None
-        archive_step: Optional[int] = None
-        for e in win_entries:
-            st_i = e.get("step_index")
-            if e.get("is_architect_archive") and archive_step is None and isinstance(st_i, int):
-                archive_step = st_i
-            if (
-                not bridge_pending_jobs
-                and last_prod_step is not None
-                and isinstance(st_i, int)
-                and st_i > last_prod_step
-            ):
-                if e.get("has_push_or_verif") and verif_step is None:
-                    verif_step = st_i
-                elif e.get("is_user") and "[GRAVITY-BRIDGE" in str(e.get("clean_prompt") or ""):
-                    if verif_step is None:
-                        verif_step = st_i
-                elif e.get("is_planner") and verif_step is None:
-                    # Premier tour planner racine post-bridge sans jobs actifs restants
-                    verif_step = st_i
+        first_prod_step = sig["first_prod_step"]
+        verif_step = sig["verif_step"]
+        archive_step = sig["archive_step"]
 
         # Statuts des 4 jalons
-        if is_archived or has_arch_archive:
+        if is_archived or sig["has_close_cmd"]:
             p_conc["status"] = "done"
-            p_prod["status"] = "done" if (has_bridge or wf_agents or verif_step is not None) else "done"
+            p_prod["status"] = "done"
             p_verif["status"] = "done"
             p_close["status"] = "done" if is_archived else "active"
             current_phase = p_close["label"]
@@ -2461,7 +2684,7 @@ def _compute_session_milestones(
             p_verif["status"] = "active"
             p_close["status"] = "pending"
             current_phase = p_verif["label"]
-        elif first_prod_step is not None or bridge_agents or wf_agents or bridge_pending_jobs:
+        elif sig["has_prod_activity"]:
             p_conc["status"] = "done"
             p_prod["status"] = "active"
             p_verif["status"] = "pending"
@@ -2507,11 +2730,15 @@ def _compute_session_milestones(
             sp = ag.get("spawn_step_index")
             if src in ("bridge", "workflow"):
                 _add_agent_to_phase(p_prod, ag)
+            elif src == "subagent" and not _is_prod_subagent(ag):
+                _add_agent_to_phase(p_conc, ag)
             elif archive_step is not None and isinstance(sp, int) and sp >= archive_step:
                 _add_agent_to_phase(p_close, ag)
             elif verif_step is not None and isinstance(sp, int) and sp >= verif_step:
                 _add_agent_to_phase(p_verif, ag)
             elif first_prod_step is not None and isinstance(sp, int) and sp >= first_prod_step:
+                _add_agent_to_phase(p_prod, ag)
+            elif src == "subagent" and _is_prod_subagent(ag):
                 _add_agent_to_phase(p_prod, ag)
             else:
                 _add_agent_to_phase(p_conc, ag)
@@ -3044,13 +3271,14 @@ def collect_run_metrics(
     }
 
 
-def _load_archived_keys(history_path: Optional[Union[Path, str]]) -> Set[Tuple[str, Optional[int]]]:
-    keys: Set[Tuple[str, Optional[int]]] = set()
+def _load_archived_keys(history_path: Optional[Union[Path, str]]) -> Dict[str, Set[Optional[int]]]:
+    """Charge les `window_start_step` enregistrés par `conversation_id` (matching tolérant)."""
+    by_cid: Dict[str, Set[Optional[int]]] = {}
     if history_path is None:
-        return keys
+        return by_cid
     hpath = Path(history_path)
     if not hpath.is_file():
-        return keys
+        return by_cid
     for raw_line in hpath.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw_line.strip()
         if not line:
@@ -3064,8 +3292,41 @@ def _load_archived_keys(history_path: Optional[Union[Path, str]]) -> Set[Tuple[s
         cid = str(obj.get("conversation_id") or "").strip()
         status = str(obj.get("status") or "archived").strip().lower()
         if cid and status == "archived":
-            keys.add((cid, obj.get("window_start_step")))
-    return keys
+            wstep = obj.get("window_start_step")
+            norm_wstep = (
+                wstep
+                if isinstance(wstep, int) and not isinstance(wstep, bool)
+                else None
+            )
+            by_cid.setdefault(cid, set()).add(norm_wstep)
+    return by_cid
+
+
+def _is_window_archived(
+    cid: str,
+    win_wstep: Optional[int],
+    win_mode: str,
+    archived_by_cid: Dict[str, Set[Optional[int]]],
+) -> bool:
+    """Retourne True si la fenêtre `(cid, win_wstep)` est déjà enregistrée (tolérance ±2 steps)."""
+    rec_steps = archived_by_cid.get(cid)
+    if not rec_steps:
+        return False
+    if None in rec_steps:
+        return True
+    if win_wstep in rec_steps:
+        return True
+    if win_mode == "full_conversation" and None in rec_steps:
+        return True
+    if isinstance(win_wstep, int) and not isinstance(win_wstep, bool):
+        for rec_wstep in rec_steps:
+            if (
+                isinstance(rec_wstep, int)
+                and not isinstance(rec_wstep, bool)
+                and abs(rec_wstep - win_wstep) <= 2
+            ):
+                return True
+    return False
 
 
 def _resolve_store_dir_from_history(history_path: Optional[Union[Path, str]]) -> Optional[Path]:
@@ -3083,53 +3344,42 @@ def _compute_pending_milestones(
     pending_jobs: List[Dict[str, Any]],
     has_workflow_children: bool,
     wf_children: Optional[List[Dict[str, Any]]] = None,
+    subagent_children: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     win_entries = [
         e
         for e in entries
         if e["line_idx"] >= start_line_idx and (end_line_idx is None or e["line_idx"] < end_line_idx)
     ]
-    has_architect = any(e.get("is_architect") for e in win_entries)
-    has_bridge = bool(active_links)
-    if not has_bridge and not has_architect:
+    prod_subagents = [a for a in (subagent_children or []) if _is_prod_subagent(a)]
+    wf_list = list(wf_children or [])
+    if has_workflow_children and not wf_list:
+        wf_list = [{"spawn_step_index": None}]
+    sig = _analyze_milestones_window(
+        win_entries,
+        root_links=active_links,
+        bridge_agents=[],
+        wf_agents=wf_list,
+        prod_subagents=prod_subagents,
+        pending_jobs=pending_jobs,
+    )
+    if not sig["is_4_phases"]:
         return {
             "mode": "2_phases",
             "current_phase": "Production",
             "phases": [
                 {"id": "production", "label": "Production", "status": "active"},
-                {"id": "cloture", "label": "Clôture / Archivé", "status": "pending"},
+                {"id": "cloture", "label": "Clôture / Enregistrée", "status": "pending"},
             ],
         }
-    link_steps = [int(lnk["spawn_step_index"]) for lnk in active_links if isinstance(lnk.get("spawn_step_index"), int)]
-    child_steps = [
-        int(c["spawn_step_index"])
-        for c in (wf_children or [])
-        if isinstance(c.get("spawn_step_index"), int)
-    ]
-    all_prod_steps = link_steps + child_steps
-    first_prod = min(all_prod_steps) if all_prod_steps else None
-    last_prod = max(all_prod_steps) if all_prod_steps else None
-    has_verif = False
-    if not pending_jobs and last_prod is not None:
-        has_verif = any(
-            isinstance(e.get("step_index"), int)
-            and e["step_index"] > last_prod
-            and (
-                e.get("has_push_or_verif")
-                or (e.get("is_user") and "[GRAVITY-BRIDGE" in str(e.get("clean_prompt") or ""))
-                or (has_bridge and e.get("is_planner"))
-            )
-            for e in win_entries
-        )
-    has_arch_close = any(e.get("is_architect_archive") for e in win_entries)
 
-    if has_arch_close:
+    if sig["has_close_cmd"]:
         statuses = ("done", "done", "done", "active")
-        cur = "Clôture / Archivé"
-    elif has_verif:
+        cur = "Clôture / Enregistrée"
+    elif sig["verif_step"] is not None:
         statuses = ("done", "done", "active", "pending")
         cur = "Vérification & Push"
-    elif first_prod is not None or has_bridge or has_workflow_children or pending_jobs:
+    elif sig["has_prod_activity"]:
         statuses = ("done", "active", "pending", "pending")
         cur = "Production"
     else:
@@ -3140,7 +3390,7 @@ def _compute_pending_milestones(
         ("conception", "Conception"),
         ("production", "Production"),
         ("verification", "Vérification & Push"),
-        ("cloture", "Clôture / Archivé"),
+        ("cloture", "Clôture / Enregistrée"),
     )
     return {
         "mode": "4_phases",
@@ -3170,7 +3420,7 @@ def list_pending_sessions(
 
     eff_store = Path(store_dir).expanduser() if store_dir is not None else _resolve_store_dir_from_history(history_path)
     archived_keys = _load_archived_keys(history_path)
-    full_archived_cids = {cid for cid, wstep in archived_keys if wstep is None}
+    full_archived_cids = {cid for cid, steps in archived_keys.items() if None in steps}
     session_meta = load_session_meta(eff_store)
     active_captures = load_active_captures(eff_store)
     ignored_map = load_ignored_sessions(eff_store)
@@ -3222,9 +3472,12 @@ def list_pending_sessions(
         )
         if win.get("window_empty"):
             continue
-        if (cdir.name, win.get("start_step_index")) in archived_keys:
-            continue
-        if win.get("mode") == "full_conversation" and (cdir.name, None) in archived_keys:
+        if _is_window_archived(
+            cdir.name,
+            win.get("start_step_index"),
+            str(win.get("mode") or ""),
+            archived_keys,
+        ):
             continue
 
         start_idx = int(win.get("start_line_idx") or 0)
@@ -3258,9 +3511,22 @@ def list_pending_sessions(
         bridge_children: List[Dict[str, Any]] = []
         bridge_workspaces: List[str] = []
         wf_children = discover_workflow_children(cdir.name, base)
+        subagent_children = _discover_direct_subagent_children(cdir)
+        active_subagents = [
+            s
+            for s in subagent_children
+            if not apply_win
+            or _is_spawn_in_window(
+                s.get("spawn_step_index"),
+                None,
+                str(base / s["conversation_id"] / ".system_generated" / "logs" / "transcript.jsonl"),
+                win,
+            )
+        ]
         if (
             not include_noise
             and not wf_children
+            and not any(_is_prod_subagent(s) for s in active_subagents)
             and cap_entry is None
             and not has_work_activity
         ):
@@ -3278,6 +3544,7 @@ def list_pending_sessions(
             pending_jobs,
             bool(wf_children),
             wf_children=active_wf,
+            subagent_children=active_subagents,
         )
 
         meta_entry = session_meta.get(cdir.name) or {}

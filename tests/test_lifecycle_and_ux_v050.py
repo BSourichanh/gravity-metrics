@@ -275,7 +275,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(recs[0]["label"], "mon-jalon")
             self.assertEqual(recs[0]["input_tokens"], 25_000)
             self.assertEqual(recs[0]["project"], "ProjetHybrid")
-            self.assertEqual(recs[0]["current_phase"], "Clôture / Archivé")
+            self.assertEqual(recs[0]["current_phase"], "Clôture / Enregistrée")
             self.assertEqual([m["id"] for m in recs[0]["milestones"]["phases"]], ["production", "cloture"])
 
     def test_architect_archive_auto_archive_and_bridge_milestones(self) -> None:
@@ -308,7 +308,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(load_history(store / "data" / "history.jsonl"), [])
             self.assertFalse((store / "reports").exists())
 
-            # Archivage explicite en fin de cycle conserve les 4 jalons dont Clôture / Archivé
+            # Archivage explicite en fin de cycle conserve les 4 jalons dont Clôture / Enregistrée
             saved_rec, recs, _ = archive_conversation(
                 cid,
                 store_dir=store,
@@ -322,7 +322,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(saved_rec["label"], "mon-lot")
             self.assertEqual(saved_rec["project"], "Atelier")
             self.assertEqual([m["id"] for m in saved_rec["milestones"]["phases"]], ["conception", "production", "verification", "cloture"])
-            self.assertEqual(saved_rec["current_phase"], "Clôture / Archivé")
+            self.assertEqual(saved_rec["current_phase"], "Clôture / Enregistrée")
 
     def test_mcp_ignore_meta_edit_and_fast_unchanged_poll(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -433,6 +433,80 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_current_turn_start_step_and_tolerant_history_upsert(self) -> None:
+        from metrics.history import to_session_record, upsert_session
+        from metrics.lifecycle import (
+            current_turn_start_step_in_transcript,
+            next_step_index_in_transcript,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = Path(tmp) / "brain"
+            self.assertEqual(current_turn_start_step_in_transcript(None), 0)
+            self.assertEqual(current_turn_start_step_in_transcript(brain / "missing.jsonl"), 0)
+
+            # Nouveau tour déjà flushé suivi d'un SYSTEM_MESSAGE -> retourne 0 (et next_step=2 intact)
+            t1 = _write_transcript(
+                brain / "t1",
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "/gravity-architect spec s1"},
+                    {"step_index": 1, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "caveman"},
+                ],
+            )
+            self.assertEqual(current_turn_start_step_in_transcript(t1), 0)
+            self.assertEqual(next_step_index_in_transcript(t1), 2)
+
+            # Reprise de conversation : USER_INPUT 72 non suivi d'un PLANNER_RESPONSE + SYSTEM_MESSAGE 73 -> 72
+            t2 = _write_transcript(
+                brain / "t2",
+                [
+                    {"step_index": 70, "type": "USER_INPUT", "status": "DONE", "content": "Avant"},
+                    {"step_index": 71, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                    {"step_index": 72, "type": "USER_INPUT", "status": "DONE", "content": "/gravity-architect handoff"},
+                    {"step_index": 73, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "hook"},
+                ],
+            )
+            self.assertEqual(current_turn_start_step_in_transcript(t2), 72)
+
+            # Tour déjà suivi d'un PLANNER_RESPONSE -> repli sur next_step_index_in_transcript
+            t3 = _write_transcript(
+                brain / "t3",
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Tour 1"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                    {"step_index": 2, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "post"},
+                ],
+            )
+            self.assertEqual(current_turn_start_step_in_transcript(t3), 3)
+
+            # find_archived_session & upsert_session tolérance ±2 steps + champs root_last_step_index/root_llm_calls
+            cid_h = "h0001111-2222-3333-4444-555566667777"
+            _write_transcript(
+                brain / cid_h,
+                [
+                    {"step_index": 72, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:00:00Z", "content": "/gravity-architect spec x"},
+                    {"step_index": 73, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                    {"step_index": 74, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:00:20Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 3000, "cache_read_tokens": 0, "output_tokens": 150, "tool_calls": []},
+                ],
+            )
+            m_h = collect_run_metrics(cid_h, brain, CATALOG_PATH, gravity_window=True)
+            rec_new = to_session_record(m_h, label="new-lbl")
+            self.assertEqual(rec_new["status"], "archived")
+            self.assertTrue(rec_new["archived_at"])
+            self.assertEqual(rec_new["window_start_step"], 72)
+            self.assertEqual(rec_new["root_last_step_index"], 74)
+            self.assertEqual(rec_new["root_llm_calls"], 2)
+
+            old_rec = dict(rec_new)
+            old_rec["label"] = "old-lbl"
+            old_rec["window_start_step"] = 73
+            self.assertIsNotNone(find_archived_session([old_rec], cid_h, 72))
+            self.assertIsNone(find_archived_session([old_rec], cid_h, 76))
+            merged = upsert_session([old_rec], rec_new)
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["label"], "new-lbl")
+            self.assertEqual(merged[0]["window_start_step"], 72)
 
 
 if __name__ == "__main__":

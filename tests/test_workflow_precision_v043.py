@@ -481,6 +481,91 @@ class TestWorkflowPrecisionV043(unittest.TestCase):
             self.assertEqual(metrics["efficiency_and_waste"]["interrupted_agents"]["count"], 0)
             self.assertTrue(all(ag["clean_termination"] for ag in metrics["agents"]))
 
+    def test_r3_native_swarm_subagents_and_direct_edits_phases(self) -> None:
+        from metrics import list_pending_sessions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = Path(tmp) / "brain"
+
+            # 1) Conception seule : research + édition docs atelier (`specs/`, `tasks/`, `tracking/`) -> reste Conception
+            cid_conc = "r3000001-1111-4111-8111-111111111111"
+            sub_res = "r3sub001-1111-4111-8111-111111111111"
+            _write_transcript(
+                brain / cid_conc,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T11:00:00Z", "content": "/gravity-architect spec r3"},
+                    _planner_step(1, "2026-11-25T11:00:05Z", tool_calls=[{"name": "invoke_subagent"}]),
+                    _planner_step(
+                        2,
+                        "2026-11-25T11:00:10Z",
+                        tool_calls=[
+                            {"name": "write_file", "args": {"Path": "/repo/gravity-studio/specs/2026-11-25-r3.md"}},
+                            {"name": "edit_file", "args": {"Path": "tasks/2026-11-25-w1.md"}},
+                            {"name": "replace_file_content", "args": {"TargetFile": "tracking/IMPACT.md"}},
+                        ],
+                    ),
+                ],
+            )
+            _write_subagent(brain / cid_conc, sub_res, "research", "Researcher", spawn_step=1)
+            _write_transcript(brain / sub_res, [_planner_step(0, "2026-11-25T11:00:06Z", tool_calls=[])])
+
+            m_conc = collect_run_metrics(cid_conc, brain, CATALOG_PATH, gravity_window=True)
+            self.assertEqual(m_conc["milestones"]["mode"], "4_phases")
+            self.assertEqual(m_conc["milestones"]["current_phase"], "Conception")
+            pend_map = {p["conversation_id"]: p for p in list_pending_sessions(brain)}
+            self.assertEqual(pend_map[cid_conc]["milestones"]["current_phase"], "Conception")
+
+            # 2) /swarm + subagent builder -> Production -> Vérification & Push -> Clôture / Enregistrée
+            cid_swarm = "r3000002-1111-4111-8111-111111111111"
+            sub_bld = "r3sub002-1111-4111-8111-111111111111"
+            steps_swarm = [
+                {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T11:10:00Z", "content": "/gravity-architect handoff r3"},
+                _planner_step(1, "2026-11-25T11:10:05Z", tool_calls=[{"name": "write_file", "args": {"Path": "specs/r3.md"}}], in_tok=2_000, out_tok=100),
+                {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T11:11:00Z", "content": "/swarm lancer build"},
+                _planner_step(3, "2026-11-25T11:11:05Z", tool_calls=[{"name": "swarm"}], in_tok=4_000, out_tok=200),
+            ]
+            _write_transcript(brain / cid_swarm, steps_swarm)
+            _write_subagent(brain / cid_swarm, sub_bld, "teamwork_worker", "Builder", spawn_step=3)
+            _write_transcript(brain / sub_bld, [_planner_step(0, "2026-11-25T11:11:08Z", tool_calls=[{"name": "finish"}], in_tok=6_000, out_tok=300)])
+
+            m_swarm_prod = collect_run_metrics(cid_swarm, brain, CATALOG_PATH, gravity_window=True)
+            self.assertEqual(m_swarm_prod["milestones"]["current_phase"], "Production")
+            pend_swarm = {p["conversation_id"]: p for p in list_pending_sessions(brain)}
+            self.assertEqual(pend_swarm[cid_swarm]["milestones"]["current_phase"], "Production")
+
+            steps_verif = steps_swarm + [
+                _planner_step(4, "2026-11-25T11:12:00Z", tool_calls=[{"name": "run_command", "args": {"CommandLine": '"python3 scripts/audit_ecosystem.py --strict"'}}], in_tok=1_500, out_tok=50),
+            ]
+            _write_transcript(brain / cid_swarm, steps_verif)
+            m_swarm_verif = collect_run_metrics(cid_swarm, brain, CATALOG_PATH, gravity_window=True)
+            self.assertEqual(m_swarm_verif["milestones"]["current_phase"], "Vérification & Push")
+            pend_verif = {p["conversation_id"]: p for p in list_pending_sessions(brain)}
+            self.assertEqual(pend_verif[cid_swarm]["milestones"]["current_phase"], "Vérification & Push")
+
+            steps_close = steps_verif + [
+                _planner_step(5, "2026-11-25T11:13:00Z", tool_calls=[{"name": "run_command", "args": {"CommandLine": f'"python3 plugin/scripts/cli.py record {cid_swarm[:8]} --update"'}}], in_tok=500, out_tok=20),
+            ]
+            _write_transcript(brain / cid_swarm, steps_close)
+            m_swarm_close = collect_run_metrics(cid_swarm, brain, CATALOG_PATH, gravity_window=True)
+            self.assertEqual(m_swarm_close["milestones"]["current_phase"], "Clôture / Enregistrée")
+            by_id = {ph["id"]: ph for ph in m_swarm_close["milestones"]["phases"]}
+            self.assertEqual(by_id["conception"]["tokens"], 2100)
+            self.assertEqual(by_id["production"]["tokens"], 10500)
+            self.assertEqual(by_id["verification"]["tokens"], 1550)
+            self.assertEqual(by_id["cloture"]["tokens"], 520)
+
+            # 3) Édition directe hors docs atelier -> déclenche Production
+            cid_edit = "r3000003-1111-4111-8111-111111111111"
+            _write_transcript(
+                brain / cid_edit,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T11:20:00Z", "content": "/gravity-architect fix"},
+                    _planner_step(1, "2026-11-25T11:20:05Z", tool_calls=[{"name": "edit_file", "args": {"Path": "plugin/metrics/collector.py"}}]),
+                ],
+            )
+            m_edit = collect_run_metrics(cid_edit, brain, CATALOG_PATH, gravity_window=True)
+            self.assertEqual(m_edit["milestones"]["current_phase"], "Production")
+
 
 if __name__ == "__main__":
     unittest.main()

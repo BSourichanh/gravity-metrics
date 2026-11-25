@@ -168,6 +168,7 @@ def _run_metrics_command(
         resolve_store_paths,
         start_active_capture,
     )
+    from metrics.store import resolve_sealed_update_target
 
     parsed = classify_metrics_prompt(raw_input)
     action = parsed.get("action")
@@ -197,20 +198,20 @@ def _run_metrics_command(
         cap_info = ""
         if isinstance(active_cap, dict):
             cap_lbl = active_cap.get("label") or "capture en cours"
-            cap_info = f"\n- **Capture active :** `{cap_lbl}` (depuis step `{active_cap.get('start_step', 0)}`) — utilisez `/gravity-metrics stop` pour archiver."
+            cap_info = f"\n- **Capture active :** `{cap_lbl}` (depuis step `{active_cap.get('start_step', 0)}`) — utilisez `/gravity-metrics stop` pour enregistrer."
         scope_txt = f" · Projet : `{project}`" if project else ""
         md_out = (
             f"{METRICS_OPEN_MARKER}\n"
             "### Gravity Metrics — Tableau de bord (lecture seule)\n\n"
-            f"- **Sessions archivées :** `{len(records)}` · **À archiver :** `{len(pending)}`{scope_txt}"
+            f"- **Sessions enregistrées :** `{len(records)}` · **À enregistrer :** `{len(pending)}`{scope_txt}"
             f"{cap_info}\n"
-            "- Commandes capture : `/gravity-metrics start [label]` · `/gravity-metrics stop [label]` · `/gravity-metrics pending`"
+            "- Commandes capture : `/gravity-metrics start [label]` · `/gravity-metrics stop [label]` · `/gravity-metrics record <uuid>` · `/gravity-metrics pending`"
         )
         sys_msg = _build_handoff_system_message(
             METRICS_OPEN_MARKER,
             summary_line=(
                 f"Ouverture du tableau de bord Gravity Metrics en lecture seule "
-                f"({len(records)} archivée(s), {len(pending)} en attente)."
+                f"({len(records)} enregistrée(s), {len(pending)} à enregistrer)."
             ),
             tool_args=tool_args,
         )
@@ -247,13 +248,15 @@ def _run_metrics_command(
             tool_args["project"] = project
         sys_msg = _build_handoff_system_message(
             METRICS_OPEN_MARKER,
-            summary_line=f"{len(pending)} session(s) Gravity en attente d'archivage affichée(s).",
+            summary_line=f"{len(pending)} session(s) Gravity à enregistrer affichée(s).",
             tool_args=tool_args,
             repeat_warning="sans répéter le tableau déjà affiché",
         )
         return "handoff", md_out, sys_msg
 
-    if action == "archive":
+    update_sealed = bool(parsed.get("update"))
+
+    if action in ("record", "archive"):
         target_cid = resolve_conversation_id_in_brain(parsed["target"], brain_dir)
         same_conv = bool(cid and target_cid == cid)
         saved_rec, _, metrics = archive_conversation(
@@ -267,12 +270,14 @@ def _run_metrics_command(
             pricing_profile=parsed["profile"],
             gravity_window=not parsed["full"],
             full_conversation=parsed["full"],
-            project=parsed.get("project") or (project if same_conv else ""),
+            project=parsed.get("project") or (project if same_conv and not update_sealed else ""),
             gravity_profile=gravity_profile if same_conv else "",
             force=parsed["force"],
+            update_sealed=update_sealed,
             self_archiving=same_conv,
         )
         already = bool(saved_rec.get("already_archived"))
+        is_update = bool(update_sealed or parsed["force"])
         md_out = render_chat_summary_markdown(
             metrics,
             saved_rec,
@@ -285,13 +290,15 @@ def _run_metrics_command(
             tool_args["project"] = saved_rec["project"]
         elif project:
             tool_args["project"] = project
+        if already:
+            rec_summary = f"Session `{saved_rec['label']}` déjà enregistrée (immuable)."
+        elif is_update:
+            rec_summary = f"Session `{saved_rec['label']}` mise à jour et résumée à l'écran."
+        else:
+            rec_summary = f"Session `{saved_rec['label']}` enregistrée et résumée à l'écran."
         sys_msg = _build_handoff_system_message(
             METRICS_MARKER,
-            summary_line=(
-                f"Session `{saved_rec['label']}` déjà archivée (immuable)."
-                if already
-                else f"Session `{saved_rec['label']}` archivée et résumée à l'écran."
-            ),
+            summary_line=rec_summary,
             tool_args=tool_args,
             repeat_warning="sans répéter le tableau déjà affiché",
         )
@@ -317,14 +324,29 @@ def _run_metrics_command(
     active_cap = load_active_captures(store_dir).get(cid)
     from_step = None
     eff_label = str(parsed.get("label") or "").strip()
-    eff_project = project
+    eff_project = str(parsed.get("project") or "").strip()
+    eff_full = bool(parsed["full"])
     if isinstance(active_cap, dict):
-        if not parsed["full"] and isinstance(active_cap.get("start_step"), int):
+        if not eff_full and isinstance(active_cap.get("start_step"), int):
             from_step = active_cap["start_step"]
         if not eff_label and active_cap.get("label"):
             eff_label = str(active_cap["label"]).strip()
         if not eff_project and active_cap.get("project"):
             eff_project = str(active_cap["project"]).strip()
+
+    tpath = _resolve_transcript_path(payload, brain_dir, cid)
+    if update_sealed and not eff_full and from_step is None:
+        from_step, eff_full, eff_label, eff_project, _ = resolve_sealed_update_target(
+            history_path,
+            cid,
+            label=eff_label,
+            project=eff_project,
+            from_step=from_step,
+            full_conversation=eff_full,
+            transcript_path=tpath,
+        )
+    if not eff_project:
+        eff_project = project
 
     metrics = collect_run_metrics(
         root_id=cid,
@@ -332,10 +354,10 @@ def _run_metrics_command(
         pricing_catalog_path=PLUGIN_ROOT / "config" / "pricing_catalog.json",
         pricing_profile=parsed["profile"],
         label=eff_label,
-        gravity_window=not parsed["full"],
+        gravity_window=not eff_full,
         current_prompt_is_metrics=True,
         current_prompt=raw_input,
-        full_conversation=parsed["full"],
+        full_conversation=eff_full,
         from_step=from_step,
         project=eff_project,
         gravity_profile=gravity_profile,
@@ -359,13 +381,13 @@ def _run_metrics_command(
                 tool_args["project"] = eff_project
             md_out = (
                 f"{METRICS_OPEN_MARKER}\n"
-                "### Gravity Metrics — Session déjà archivée\n\n"
-                f"Aucune nouvelle activité LLM à capturer depuis l'archivage de `{last_lbl}` ; "
+                "### Gravity Metrics — Session déjà enregistrée\n\n"
+                f"Aucune nouvelle activité LLM à capturer depuis l'enregistrement de `{last_lbl}` ; "
                 "ouverture du tableau de bord."
             )
             sys_msg = _build_handoff_system_message(
                 METRICS_OPEN_MARKER,
-                summary_line=f"Session `{last_lbl}` déjà archivée sans nouvelle activité LLM.",
+                summary_line=f"Session `{last_lbl}` déjà enregistrée sans nouvelle activité LLM.",
                 tool_args=tool_args,
             )
             return "handoff", md_out, sys_msg
@@ -391,10 +413,12 @@ def _run_metrics_command(
         note=parsed["note"],
         auto_label=not bool(eff_label),
         force=parsed["force"],
+        update_sealed=update_sealed,
         self_archiving=True,
     )
 
     already = bool(saved_rec.get("already_archived"))
+    is_update = bool(update_sealed or parsed["force"])
     md_out = render_chat_summary_markdown(
         metrics,
         saved_rec,
@@ -407,13 +431,15 @@ def _run_metrics_command(
         tool_args["project"] = saved_rec["project"]
     elif eff_project:
         tool_args["project"] = eff_project
+    if already:
+        stop_summary = f"Session `{saved_rec['label']}` déjà enregistrée (immuable)."
+    elif is_update:
+        stop_summary = f"Session `{saved_rec['label']}` mise à jour et résumée à l'écran."
+    else:
+        stop_summary = f"Session `{saved_rec['label']}` enregistrée et résumée à l'écran."
     sys_msg = _build_handoff_system_message(
         METRICS_MARKER,
-        summary_line=(
-            f"Session `{saved_rec['label']}` déjà archivée (immuable)."
-            if already
-            else f"Session `{saved_rec['label']}` déjà capturée et résumée à l'écran."
-        ),
+        summary_line=stop_summary,
         tool_args=tool_args,
         repeat_warning="sans répéter le tableau déjà affiché",
     )
@@ -433,17 +459,17 @@ def _maybe_auto_start_architect_capture(payload: Dict[str, Any], cleaned: str) -
             sys.path.insert(0, str(PLUGIN_ROOT))
         from metrics import (
             default_brain_dir,
-            next_step_index_in_transcript,
             resolve_store_paths,
             slugify_label,
             start_active_capture,
         )
         from metrics.collector import _extract_label_keywords
+        from metrics.lifecycle import current_turn_start_step_in_transcript
 
         store_dir, _ = resolve_store_paths()
         brain_dir = resolve_brain_dir(payload) or default_brain_dir()
         tpath = _resolve_transcript_path(payload, brain_dir, cid)
-        start_step = next_step_index_in_transcript(tpath)
+        start_step = current_turn_start_step_in_transcript(tpath)
         ws_root = resolve_workspace_root(payload)
         project = ws_root.name if ws_root else ""
         kws = _extract_label_keywords(cleaned)[:5]
@@ -507,8 +533,8 @@ def main() -> int:
             f"### Gravity Metrics — Erreur\n\n"
             f"`{exc}`\n\n"
             'Syntaxe : `/gravity-metrics` · `/gravity-metrics start [label]` · '
-            '`/gravity-metrics stop [label] [-n "note"] [--full] [--force]` · '
-            '`/gravity-metrics archive <uuid> [label] [--full] [--force]` · '
+            '`/gravity-metrics stop [label] [-n "note"] [--full] [--update] [--force]` · '
+            '`/gravity-metrics record <uuid> [label] [--full] [--update] [--force]` · '
             '`/gravity-metrics pending`'
         )
         return 0

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .collector import (
     collect_run_metrics,
     resolve_conversation_id_in_brain,
+    resolve_gravity_window,
     slugify_label,
     suggest_auto_label,
 )
@@ -97,6 +98,95 @@ def _harmonize_project_name(project: str, records: List[Dict[str, Any]]) -> str:
     return min(counts.items(), key=lambda kv: (-kv[1], kv[0] != kv[0].lower(), kv[0]))[0]
 
 
+def find_existing_recorded_session(
+    records: List[Dict[str, Any]],
+    conversation_id: str,
+    *,
+    label: str = "",
+    from_step: Optional[int] = None,
+    candidate_step: Optional[int] = None,
+    allow_latest_fallback: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Résout une session enregistrée existante (priorité `label`, puis tolérance `±2` steps)."""
+    cid = str(conversation_id or "").strip()
+    if not cid or not records:
+        return None
+    clean_lbl = str(label or "").strip()
+    archived = [
+        r
+        for r in records
+        if r.get("conversation_id") == cid
+        and str(r.get("status") or "archived").lower() == "archived"
+    ]
+    if not archived:
+        return None
+    if clean_lbl:
+        for rec in archived:
+            if str(rec.get("label") or "").strip() == clean_lbl:
+                return dict(rec)
+        low_lbl = clean_lbl.lower()
+        for rec in archived:
+            if str(rec.get("label") or "").strip().lower() == low_lbl:
+                return dict(rec)
+    step_probe = (
+        from_step
+        if isinstance(from_step, int) and not isinstance(from_step, bool)
+        else candidate_step
+    )
+    if step_probe is not None:
+        matched = find_archived_session(archived, cid, step_probe)
+        if matched is not None:
+            return matched
+    if allow_latest_fallback:
+        return dict(archived[-1])
+    return None
+
+
+def resolve_sealed_update_target(
+    history_path: Path,
+    conversation_id: str,
+    *,
+    label: str = "",
+    project: str = "",
+    from_step: Optional[int] = None,
+    full_conversation: bool = False,
+    transcript_path: Optional[Path] = None,
+) -> Tuple[Optional[int], bool, str, str, Optional[Dict[str, Any]]]:
+    """Résout `(from_step, full_conversation, label, project, existing)` pour `update_sealed=True`."""
+    eff_from = from_step
+    eff_full = bool(full_conversation)
+    eff_label = str(label or "").strip()
+    eff_project = str(project or "").strip()
+    records = load_history(history_path)
+    candidate_step: Optional[int] = None
+    if not eff_full and eff_from is None and transcript_path is not None and transcript_path.is_file():
+        win_probe = resolve_gravity_window(transcript_path, current_prompt_is_metrics=False)
+        cand = win_probe.get("start_step_index")
+        if isinstance(cand, int) and not isinstance(cand, bool):
+            candidate_step = cand
+    existing = find_existing_recorded_session(
+        records,
+        conversation_id,
+        label=eff_label,
+        from_step=eff_from,
+        candidate_step=candidate_step,
+        allow_latest_fallback=not eff_full,
+    )
+    if existing is None:
+        return eff_from, eff_full, eff_label, eff_project, None
+    if not eff_full and eff_from is None:
+        ex_wstep = existing.get("window_start_step")
+        if ex_wstep is None and existing.get("window_mode") == "full_conversation":
+            eff_full = True
+        elif isinstance(ex_wstep, int) and not isinstance(ex_wstep, bool):
+            eff_from = ex_wstep
+    if not eff_label and existing.get("label"):
+        eff_label = str(existing["label"]).strip()
+    if not eff_project and existing.get("project"):
+        eff_project = str(existing["project"]).strip()
+    return eff_from, eff_full, eff_label, eff_project, existing
+
+
 def record_session_metrics(
     metrics: Dict[str, Any],
     *,
@@ -120,7 +210,17 @@ def record_session_metrics(
         cid = str(metrics_to_write.get("root_conversation_id") or "").strip()
         win = metrics_to_write.get("window") or {}
         w_start = win.get("start_step_index")
-        existing = find_archived_session(records, cid, w_start)
+        existing = (
+            find_existing_recorded_session(
+                records,
+                cid,
+                label=explicit_label,
+                from_step=w_start,
+                allow_latest_fallback=False,
+            )
+            if (update_sealed or force) and explicit_label
+            else find_archived_session(records, cid, w_start)
+        )
         if existing is not None and not (force or update_sealed):
             ret = dict(existing)
             ret["already_archived"] = True
@@ -146,7 +246,7 @@ def record_session_metrics(
             resolved_label = str(metrics_to_write.get("label") or "").strip()
 
         resolved_note = note.strip()
-        if not resolved_note and existing is not None and update_sealed and existing.get("note"):
+        if not resolved_note and existing is not None and (update_sealed or force) and existing.get("note"):
             resolved_note = str(existing["note"]).strip()
 
         if resolved_label:
@@ -163,7 +263,7 @@ def record_session_metrics(
                     new_phases.append(p_copy)
             metrics_to_write["milestones"] = {
                 "mode": ms.get("mode") or "2_phases",
-                "current_phase": "Clôture / Archivé",
+                "current_phase": "Clôture / Enregistrée",
                 "phases": new_phases,
             }
             metrics["milestones"] = metrics_to_write["milestones"]
@@ -173,6 +273,13 @@ def record_session_metrics(
         save_history(history_path, updated)
         regenerate_views(store_dir, updated)
         if not summary_only:
+            if existing is not None:
+                old_slug = existing.get("detail_slug") or slugify_label(
+                    str(existing.get("label") or ""),
+                    f"session-{cid[:8]}",
+                )
+                if old_slug and old_slug != rec["detail_slug"]:
+                    purge_session_details(store_dir, existing)
             write_session_details(store_dir, rec["detail_slug"], metrics_to_write)
         if cid:
             pop_active_capture(cid, store_dir=store_dir)
@@ -210,12 +317,13 @@ def archive_conversation(
     update_sealed: bool = False,
     self_archiving: bool = False,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
-    """Résout un UUID ou préfixe, collecte la session et l'archive avec garde-fous."""
+    """Résout un UUID ou préfixe, collecte la session et l'enregistre avec garde-fous."""
     cid = resolve_conversation_id_in_brain(target, brain_dir)
     eff_from_step = from_step
+    eff_full = bool(full_conversation)
     eff_label = label
     eff_project = project
-    if not full_conversation and eff_from_step is None:
+    if not eff_full and eff_from_step is None:
         active_cap = load_active_captures(store_dir).get(cid)
         if isinstance(active_cap, dict):
             if isinstance(active_cap.get("start_step"), int):
@@ -225,15 +333,27 @@ def archive_conversation(
             if not eff_project.strip() and active_cap.get("project"):
                 eff_project = str(active_cap["project"]).strip()
 
+    if update_sealed and not eff_full and eff_from_step is None:
+        tpath = brain_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        eff_from_step, eff_full, eff_label, eff_project, _ = resolve_sealed_update_target(
+            history_path,
+            cid,
+            label=eff_label,
+            project=eff_project,
+            from_step=eff_from_step,
+            full_conversation=eff_full,
+            transcript_path=tpath,
+        )
+
     metrics = collect_run_metrics(
         root_id=cid,
         brain_dir=brain_dir,
         pricing_catalog_path=catalog_path,
         pricing_profile=pricing_profile,
         label=eff_label,
-        gravity_window=bool(gravity_window and not full_conversation),
-        full_conversation=bool(full_conversation),
-        from_step=eff_from_step if not full_conversation else None,
+        gravity_window=bool(gravity_window and not eff_full),
+        full_conversation=eff_full,
+        from_step=eff_from_step if not eff_full else None,
         project=eff_project,
         gravity_profile=gravity_profile,
         store_dir=store_dir,

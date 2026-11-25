@@ -1667,6 +1667,92 @@ class TestAudit0409Fixes(unittest.TestCase):
             self.assertEqual(dups_fail2["groups"][0]["duplicate_count"], 1)
             self.assertEqual(dups_fail2["groups"][0]["spawn_count"], 2)
 
+    def test_r4_shell_unwrapping_transcript_index_and_record_flags(self) -> None:
+        from metrics.collector import (
+            _extract_shell_command_str,
+            _get_transcript_index,
+            _segment_is_cli_self_archive,
+            classify_metrics_prompt,
+            load_pricing_catalog,
+            parse_agent_transcript,
+        )
+
+        # 1) Désencapsulation CommandLine JSON doublement quotée
+        tc_quoted = {
+            "name": "run_command",
+            "args": {"CommandLine": '"git -C ../gravity-metrics push origin dev"'},
+        }
+        self.assertEqual(
+            _extract_shell_command_str(tc_quoted),
+            "git -C ../gravity-metrics push origin dev",
+        )
+        tc_quoted_cli = {
+            "name": "run_command",
+            "args": {"CommandLine": '"python3 plugin/scripts/cli.py record abc123 --update"'},
+        }
+        self.assertEqual(
+            _extract_shell_command_str(tc_quoted_cli),
+            "python3 plugin/scripts/cli.py record abc123 --update",
+        )
+
+        # 2) classify_metrics_prompt : record/archive & --update/--update-sealed
+        p_rec = classify_metrics_prompt("/gravity-metrics record f80dab92 my-lbl --update")
+        self.assertEqual(p_rec["action"], "record")
+        self.assertEqual(p_rec["target"], "f80dab92")
+        self.assertEqual(p_rec["label"], "my-lbl")
+        self.assertTrue(p_rec["update"])
+
+        p_arch = classify_metrics_prompt("/gravity-metrics archive f80dab92 --update-sealed")
+        self.assertEqual(p_arch["action"], "archive")
+        self.assertTrue(p_arch["update"])
+
+        p_stop = classify_metrics_prompt("/gravity-metrics stop --update")
+        self.assertEqual(p_stop["action"], "stop")
+        self.assertTrue(p_stop["update"])
+
+        p_cap = classify_metrics_prompt("/gravity-metrics --update")
+        self.assertEqual(p_cap["action"], "capture")
+        self.assertTrue(p_cap["update"])
+
+        # 3) _segment_is_cli_self_archive & parse_agent_transcript acceptent `cli.py record`
+        cid = "d4000001-1111-4111-8111-111111111111"
+        self.assertTrue(_segment_is_cli_self_archive(f"python3 cli.py record {cid[:8]} --update", cid))
+        self.assertFalse(_segment_is_cli_self_archive("echo cli.py record d4000001", cid))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = Path(tmp) / "brain"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T12:00:00Z", "content": "/gravity-architect sync"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "write_file", "args": {"Path": "specs/s.md"}}, {"name": "swarm"}]},
+                    {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "edit_file", "args": {"Path": "plugin/metrics/collector.py"}}]},
+                    {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:15Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "run_command", "args": {"CommandLine": '"python3 ../gravity/scripts/ecosystem_install.py --update"'}}]},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:20Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [tc_quoted]},
+                    {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:25Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "run_command", "args": {"CommandLine": f'"python3 plugin/scripts/cli.py record {cid[:8]}"'}}]},
+                ],
+            )
+            tx = _get_transcript_index(tpath)
+            self.assertEqual(tx["max_step_index"], 5)
+            entries = tx["entries"]
+            self.assertTrue(entries[1]["has_swarm_or_subagent_tool"])
+            self.assertFalse(entries[1]["has_direct_edit_tool"])
+            self.assertTrue(entries[2]["has_direct_edit_tool"])
+            self.assertTrue(entries[3]["has_push_or_verif"])
+            self.assertTrue(entries[4]["has_push_or_verif"])
+            self.assertTrue(entries[5]["has_cli_record_or_archive"])
+
+            catalog = load_pricing_catalog(CATALOG_PATH)
+            parsed = parse_agent_transcript(
+                tpath,
+                catalog=catalog,
+                profile=catalog["default_profile"],
+                allow_cli_self_archive=True,
+                conversation_id=cid,
+            )
+            self.assertTrue(parsed["clean_termination"])
+            self.assertEqual(parsed["last_step_index"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

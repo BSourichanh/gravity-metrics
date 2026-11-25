@@ -695,6 +695,131 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertEqual(caps_explicit[cid]["start_step"], 4)
             self.assertEqual(caps_explicit[cid]["label"], "jalon-manuel")
 
+    def test_architect_auto_start_r1_and_slash_record_update_wording(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            ws = root / "ProjetR1"
+            ws.mkdir()
+
+            # 1) R1 : nouvelle session avec USER_INPUT(0) + SYSTEM_MESSAGE(1) déjà écrits -> start_step == 0
+            cid_new = "a1000001-1111-2222-3333-444455556666"
+            t_new = _write_transcript(
+                brain / cid_new,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:00:00Z", "content": "/gravity-architect spec r1-new"},
+                    {"step_index": 1, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:00:01Z", "content": "caveman"},
+                ],
+            )
+            out_r1_new = _run_hook(
+                json.dumps({
+                    "conversationId": cid_new,
+                    "transcriptPath": str(t_new),
+                    "cwd": str(ws),
+                    "invocationNum": 0,
+                    "lastUserInput": "/gravity-architect spec r1-new",
+                }),
+                store,
+                brain,
+            )
+            self.assertEqual(out_r1_new, {})
+            caps = load_active_captures(store)
+            self.assertEqual(caps[cid_new]["start_step"], 0)
+
+            # 2) R1 : reprise conversation avec USER_INPUT(72) + SYSTEM_MESSAGE(73) -> start_step == 72
+            cid_res = "a2000001-1111-2222-3333-444455556666"
+            t_res = _write_transcript(
+                brain / cid_res,
+                [
+                    {"step_index": 70, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T08:00:00Z", "content": "Chat"},
+                    {"step_index": 71, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T08:00:10Z", "model": "gemini-4-neon", "input_tokens": 50_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
+                    {"step_index": 72, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:05:00Z", "content": "/gravity-architect spec r1-res"},
+                    {"step_index": 73, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:05:01Z", "content": "caveman"},
+                ],
+            )
+            _run_hook(
+                json.dumps({
+                    "conversationId": cid_res,
+                    "transcriptPath": str(t_res),
+                    "cwd": str(ws),
+                    "invocationNum": 0,
+                    "lastUserInput": "/gravity-architect spec r1-res",
+                }),
+                store,
+                brain,
+            )
+            caps_res = load_active_captures(store)
+            self.assertEqual(caps_res[cid_res]["start_step"], 72)
+
+            # 3) Activité + `/gravity-metrics record` + `--update` post-clôture sans doublon
+            _write_transcript(
+                brain / cid_res,
+                [
+                    {"step_index": 70, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T08:00:00Z", "content": "Chat"},
+                    {"step_index": 71, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T08:00:10Z", "model": "gemini-4-neon", "input_tokens": 50_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
+                    {"step_index": 72, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:05:00Z", "content": "/gravity-architect spec r1-res"},
+                    {"step_index": 73, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:05:01Z", "content": "caveman"},
+                    {"step_index": 74, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T09:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "edit_file", "args": {"Path": "plugin/metrics/store.py"}}]},
+                ],
+            )
+            out_rec = _run_hook(
+                json.dumps({
+                    "conversationId": cid_res,
+                    "transcriptPath": str(t_res),
+                    "cwd": str(ws),
+                    "lastUserInput": f'/gravity-metrics record {cid_res[:8]} r1-run -n "note initiale"',
+                }),
+                store,
+                brain,
+            )
+            smsg_rec = out_rec["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("enregistrée", smsg_rec)
+            recs1 = load_history(store / "data" / "history.jsonl")
+            self.assertEqual(len(recs1), 1)
+            self.assertEqual(recs1[0]["window_start_step"], 72)
+            self.assertEqual(recs1[0]["input_tokens"], 10_000)
+
+            # Nouveaux steps + `/gravity-metrics --update` sans capture active -> mise à jour sans doublon
+            _write_transcript(
+                brain / cid_res,
+                [
+                    {"step_index": 70, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T08:00:00Z", "content": "Chat"},
+                    {"step_index": 71, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T08:00:10Z", "model": "gemini-4-neon", "input_tokens": 50_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
+                    {"step_index": 72, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:05:00Z", "content": "/gravity-architect spec r1-res"},
+                    {"step_index": 73, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:05:01Z", "content": "caveman"},
+                    {"step_index": 74, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T09:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "edit_file", "args": {"Path": "plugin/metrics/store.py"}}]},
+                    {"step_index": 75, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:06:00Z", "content": "/gravity-metrics record"},
+                    {"step_index": 76, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:06:01Z", "content": METRICS_MARKER},
+                    {"step_index": 77, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:07:00Z", "content": "Push final"},
+                    {"step_index": 78, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T09:07:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "run_command", "args": {"CommandLine": "git push origin dev"}}]},
+                ],
+            )
+            out_upd = _run_hook(
+                json.dumps({
+                    "conversationId": cid_res,
+                    "transcriptPath": str(t_res),
+                    "cwd": str(ws),
+                    "lastUserInput": "/gravity-metrics --update",
+                }),
+                store,
+                brain,
+            )
+            smsg_upd = out_upd["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("mise à jour", smsg_upd)
+            recs2 = load_history(store / "data" / "history.jsonl")
+            self.assertEqual(len(recs2), 1)
+            self.assertEqual(recs2[0]["label"], "r1-run")
+            self.assertEqual(recs2[0]["note"], "note initiale")
+            self.assertEqual(recs2[0]["input_tokens"], 15_000)
+
+            # 4) Aide erreur mentionne `record` et `--update`
+            out_err = _run_hook(json.dumps({"lastUserInput": "/gravity-metrics record"}), store, brain)
+            self.assertEqual(out_err["terminationBehavior"], "terminate")
+            err_md = out_err["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
+            self.assertIn("record", err_md)
+            self.assertIn("--update", err_md)
+
 
 if __name__ == "__main__":
     unittest.main()
