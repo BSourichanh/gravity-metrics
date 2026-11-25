@@ -463,12 +463,12 @@ class TestGravityWindowAndProfile(unittest.TestCase):
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
                     {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:01:00Z", "content": "/gravity-metrics"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T11:01:01Z", "content": METRICS_MARKER},
-                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_metrics_dashboard"}]},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_gravity_dashboard"}]},
                     {"step_index": 5, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-21T11:01:03Z", "content": "ok"},
                     {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:04Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 250, "cache_read_tokens": 0, "output_tokens": 20, "tool_calls": []},
                 ],
             )
-            # Un second /gravity-metrics immédiat ne doit PAS compter le tour open_metrics_dashboard
+            # Un second /gravity-metrics immédiat ne doit PAS compter le tour open_gravity_dashboard
             win_empty = resolve_gravity_window(
                 tpath,
                 current_prompt_is_metrics=True,
@@ -494,7 +494,7 @@ class TestGravityWindowAndProfile(unittest.TestCase):
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
                     {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:01:00Z", "content": "/gravity-metrics"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T11:01:01Z", "content": METRICS_MARKER},
-                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_metrics_dashboard"}]},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_gravity_dashboard"}]},
                     {"step_index": 5, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-21T11:01:03Z", "content": "ok"},
                     {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:04Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 250, "cache_read_tokens": 0, "output_tokens": 20, "tool_calls": []},
                     {"step_index": 7, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:05:00Z", "content": "Ajoute un test"},
@@ -1152,7 +1152,7 @@ class TestReconciliationAndCompliance(unittest.TestCase):
 
     def test_stdlib_only_and_no_forbidden_jargon(self) -> None:
         stdlib_names = set(getattr(sys, "stdlib_module_names", set()))
-        allowed = stdlib_names | {"metrics", "hook_runtime", "cli", "validate", "install", "mcp", "widget_html"}
+        allowed = stdlib_names | {"metrics", "hook_runtime", "cli", "validate", "install"}
         forbidden_re = re.compile(r"\bMod" + r"ule\s+0?\d\b", re.IGNORECASE)
         forbidden_term_re = re.compile(r"\bbench" + r"marks?\b", re.IGNORECASE)
 

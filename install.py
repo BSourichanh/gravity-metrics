@@ -20,7 +20,6 @@ PLUGIN_NAME = "gravity-metrics"
 EXEC_SCRIPTS: Tuple[str, ...] = (
     "hooks/pre_invocation_metrics.py",
     "hooks/session_start_metrics.py",
-    "mcp/server.py",
     "scripts/cli.py",
     "scripts/validate.py",
 )
@@ -177,8 +176,8 @@ def print_next_steps(target_dir: Optional[Path]) -> None:
         print(f"  - Installed plugin location : {target_dir}")
     print(f"  - Centralized metrics store : {store_dir}")
     print("  - Manage plugin in Antigravity : [Gravity Metrics](customization://gravity-metrics)")
-    print("  - Run /gravity-metrics at the end of a session to capture metrics and open the widget.")
-    print("  - Or open the global dashboard anytime from the left sidebar (Gravity Metrics) or the + menu in the right side pane (zero tokens).")
+    print("  - Run /gravity-metrics at the end of a session to capture metrics and open the Gravity Core dashboard.")
+    print("  - Or open the unified Gravity dashboard anytime from Gravity Core (left sidebar or + menu, zero tokens).")
 
 
 def check_environment(

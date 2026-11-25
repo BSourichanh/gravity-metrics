@@ -16,7 +16,7 @@
     "workflow-signals"
   ],
   "ui": {
-    "mode": "transition-mcp",
+    "mode": "none",
     "target": "gravity"
   },
   "signals": {

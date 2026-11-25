@@ -46,7 +46,7 @@ RULES_WARN_BYTES = 600
 RULES_MAX_BYTES = 1000
 SKILL_MAX_BYTES = 6000
 ROOT_AGENTS_MAX_BYTES = 2500
-ALLOWED_LOCAL_MODULES = {"metrics", "bridge_links", "hook_runtime", "cli", "validate", "mcp", "widget_html"}
+ALLOWED_LOCAL_MODULES = {"metrics", "bridge_links", "hook_runtime", "cli", "validate"}
 ALLOWED_UI_MODES = frozenset({"none", "core", "transition-sidecar", "transition-mcp", "mcp-app"})
 SUGGESTED_PROMPT_MAX_LEN = 100
 SUGGESTED_PROMPT_RE = re.compile(r"^/[a-z0-9:_-]+(?:\s+[^—\r\n]+?)?\s+—\s+\S")
@@ -125,7 +125,7 @@ def _extract_py_paths_from_cmd(cmd: str) -> List[str]:
 
 
 def fix_python_cmd(plugin_root: Path) -> int:
-    """Adapte 'python3' vers 'python' ou 'py -3' dans hooks.json et mcp_config.json sur une copie Windows."""
+    """Adapte 'python3' vers 'python' ou 'py -3' dans hooks.json sur une copie Windows."""
     if has_real_python3():
         print("[INFO]  Exécutable 'python3' réel détecté dans le PATH : aucune adaptation nécessaire.")
         return 0
@@ -162,31 +162,6 @@ def fix_python_cmd(plugin_root: Path) -> int:
                 (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
             )
             print(f"[FIXED] {hooks_json} -> '{py_cmd}'")
-            any_changed = True
-
-    mcp_json = plugin_root / "mcp_config.json"
-    if mcp_json.is_file():
-        mdata = json.loads(mcp_json.read_text(encoding="utf-8"))
-        mchanged = False
-        servers = mdata.get("mcpServers") if isinstance(mdata, dict) else None
-        if isinstance(servers, dict):
-            for scfg in servers.values():
-                if not isinstance(scfg, dict):
-                    continue
-                if scfg.get("command") == "python3":
-                    args = list(scfg.get("args") or [])
-                    if py_cmd == "py -3":
-                        scfg["command"] = "py"
-                        if not args or args[0] != "-3":
-                            scfg["args"] = ["-3", *args]
-                    else:
-                        scfg["command"] = py_cmd
-                    mchanged = True
-        if mchanged:
-            mcp_json.write_bytes(
-                (json.dumps(mdata, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-            )
-            print(f"[FIXED] {mcp_json} -> '{py_cmd}'")
             any_changed = True
 
     if not any_changed:
@@ -323,51 +298,6 @@ def _validate_skills(
         report.error("skills/gravity-metrics/SKILL.md : 'description' manquante ou vide.")
 
 
-def _validate_mcp_config(root: Path, report: Report) -> None:
-    mcp_json = root / "mcp_config.json"
-    if not mcp_json.is_file():
-        report.error("mcp_config.json introuvable à la racine du plugin.")
-        return
-
-    try:
-        mcp_raw = mcp_json.read_text(encoding="utf-8")
-        mcp_data = json.loads(mcp_raw)
-    except Exception as exc:
-        report.error(f"mcp_config.json invalide : {exc}")
-        return
-
-    if not isinstance(mcp_data, dict) or not isinstance(mcp_data.get("mcpServers"), dict):
-        report.error("mcp_config.json doit contenir un objet 'mcpServers'.")
-        return
-
-    servers = mcp_data["mcpServers"]
-    if "dashboard" not in servers or not isinstance(servers["dashboard"], dict):
-        report.error("mcp_config.json : serveur 'dashboard' manquant.")
-        return
-
-    for sname, scfg in servers.items():
-        if not isinstance(scfg, dict):
-            report.error(f"mcp_config.json ({sname}) doit être un objet.")
-            continue
-        cmd = scfg.get("command")
-        args = scfg.get("args")
-        if not isinstance(cmd, str) or not cmd.strip():
-            report.error(f"mcp_config.json ({sname}) : 'command' manquant.")
-        if not isinstance(args, list):
-            report.error(f"mcp_config.json ({sname}) : 'args' doit être une liste.")
-            continue
-        for arg in args:
-            if isinstance(arg, str) and arg.endswith(".py"):
-                rel = arg.replace("${PLUGIN_ROOT}/", "").replace("${PLUGIN_ROOT}\\", "").lstrip("/\\")
-                if not (root / rel).is_file():
-                    report.error(f"mcp_config.json ({sname}) : script introuvable {arg!r}")
-
-    if os.name == "nt" and '"command": "python3"' in mcp_raw and not has_real_python3():
-        report.info(
-            "mcp_config.json portable ('python3') détecté sous Windows : adapté automatiquement lors de install.py."
-        )
-
-
 def _run_hook_dry_runs(plugin_root: Path, report: Report) -> None:
     hook_script = plugin_root / "hooks" / "pre_invocation_metrics.py"
     if not hook_script.is_file():
@@ -460,7 +390,9 @@ def _run_hook_dry_runs(plugin_root: Path, report: Report) -> None:
                     "terminationBehavior" in out
                     or not open_proc.stdout.isascii()
                     or not umd.strip()
-                    or "open_metrics_dashboard" not in smsg
+                    or "open_gravity_dashboard" not in smsg
+                    or "gravity_dashboard" not in smsg
+                    or '"view": "metrics"' not in smsg
                 ):
                     report.error(f"Réponse '/gravity-metrics' non conforme : {out!r}")
             except Exception as exc:
@@ -489,93 +421,6 @@ def _run_hook_dry_runs(plugin_root: Path, report: Report) -> None:
                     report.error(f"Réponse flag invalide non conforme : {out!r}")
             except Exception as exc:
                 report.error(f"Sortie JSON invalide pour flag invalide : {exc}")
-
-
-def _run_mcp_dry_run(plugin_root: Path, report: Report) -> None:
-    server_script = plugin_root / "mcp" / "server.py"
-    if not server_script.is_file():
-        report.error(f"Serveur MCP introuvable : {server_script}")
-        return
-
-    with tempfile.TemporaryDirectory() as tmp:
-        brain_dir = Path(tmp) / "brain"
-        brain_dir.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ)
-        env["GRAVITY_METRICS_HOME"] = str(Path(tmp) / "store")
-        env["ANTIGRAVITY_BRAIN_DIR"] = str(brain_dir)
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-
-        requests = [
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "val", "version": "1.0"}},
-            },
-            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-            {"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}},
-            {"jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": {"uri": "ui://gravity-metrics/dashboard.html"}},
-            {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "open_metrics_dashboard", "arguments": {}}},
-        ]
-        stdin_payload = "\n".join(json.dumps(r) for r in requests) + "\n"
-        proc = subprocess.run(
-            [sys.executable, "-B", str(server_script)],
-            input=stdin_payload,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            cwd=str(plugin_root),
-            env=env,
-            timeout=8,
-            check=False,
-        )
-        if proc.returncode != 0:
-            report.error(f"Dry-run MCP échoué (rc={proc.returncode}): {proc.stderr}")
-            return
-
-        lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-        if len(lines) != 5:
-            report.error(f"Dry-run MCP : 5 réponses attendues, obtenu {len(lines)} ({proc.stderr})")
-            return
-
-        try:
-            resps = {obj["id"]: obj["result"] for obj in (json.loads(ln) for ln in lines)}
-        except Exception as exc:
-            report.error(f"Dry-run MCP : JSON-RPC invalide ({exc})")
-            return
-
-        tools = (resps.get(2) or {}).get("tools") or []
-        open_tool = next((t for t in tools if t.get("name") == "open_metrics_dashboard"), None)
-        if not open_tool:
-            report.error("MCP tools/list : 'open_metrics_dashboard' manquant.")
-        else:
-            meta = open_tool.get("_meta") or {}
-            ui_uri = (meta.get("ui") or {}).get("resourceUri")
-            eps = (meta.get("com.google.antigravity/ui") or {}).get("entrypoints") or []
-            ep_types = {e.get("type") for e in eps if isinstance(e, dict)}
-            if ui_uri != "ui://gravity-metrics/dashboard.html":
-                report.error(f"MCP resourceUri invalide : {ui_uri!r}")
-            if not {"aux_pane", "global"}.issubset(ep_types):
-                report.error(f"MCP entrypoints incomplets : {ep_types!r}")
-
-        contents = (resps.get(4) or {}).get("contents") or []
-        if not contents:
-            report.error("MCP resources/read : contenu vide.")
-        else:
-            c0 = contents[0]
-            html_txt = str(c0.get("text") or "")
-            if c0.get("mimeType") != "text/html;profile=mcp-app":
-                report.error(f"MCP mimeType invalide : {c0.get('mimeType')!r}")
-            if not html_txt or len(html_txt.encode("utf-8")) >= 10 * 1024 * 1024:
-                report.error("MCP HTML vide ou >= 10 MiB.")
-            if "window.confirm" in html_txt or "https://" in html_txt or "http://" in html_txt:
-                report.error("MCP HTML : dialogue natif ou URL externe détecté (CSP).")
-
-        call_res = resps.get(5) or {}
-        if call_res.get("isError") or not isinstance((call_res.get("structuredContent") or {}).get("records"), list):
-            report.error(f"MCP open_metrics_dashboard résultat invalide : {call_res!r}")
 
 
 def _read_json_no_bom(
@@ -699,7 +544,7 @@ def _validate_module_contract(
 
 
 def validate_plugin(root: Path, report: Report) -> None:
-    """Audite la structure, le manifeste, le contrat module, les règles, les hooks, le serveur MCP App et la conformité stdlib."""
+    """Audite la structure, le manifeste, le contrat module, les règles, les hooks et la conformité stdlib."""
     manifest_path = root / "plugin.json"
     if not manifest_path.is_file():
         report.error("plugin.json introuvable à la racine du plugin.")
@@ -773,7 +618,6 @@ def validate_plugin(root: Path, report: Report) -> None:
 
     _validate_module_contract(root, manifest, report, checked_paths=checked_utf8)
     _validate_skills(root, report, checked_paths=checked_utf8)
-    _validate_mcp_config(root, report)
 
     rules_file = root / "rules" / "AGENTS.md"
     if not rules_file.is_file():
@@ -854,7 +698,7 @@ def validate_plugin(root: Path, report: Report) -> None:
         except Exception as exc:
             report.error(f"config/pricing_catalog.json invalide : {exc}")
 
-    for sub in ("metrics", "hooks", "mcp", "scripts", "skills"):
+    for sub in ("metrics", "hooks", "scripts", "skills"):
         if not (root / sub).is_dir():
             report.error(f"Dossier requis manquant : {sub}/")
 
@@ -886,7 +730,6 @@ def validate_plugin(root: Path, report: Report) -> None:
                 report.error(f"URI locale interdite détectée dans {rel.as_posix()}")
 
     _run_hook_dry_runs(root, report)
-    _run_mcp_dry_run(root, report)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -902,7 +745,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--fix-python-cmd",
         action="store_true",
-        help="Adapte 'python3' vers 'python' ou 'py -3' dans hooks.json et mcp_config.json sous Windows.",
+        help="Adapte 'python3' vers 'python' ou 'py -3' dans hooks.json sous Windows.",
     )
     args = parser.parse_args(argv)
     plugin_root = args.plugin_root.expanduser().resolve()

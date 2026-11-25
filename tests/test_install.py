@@ -14,7 +14,6 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SCRIPT = PROJECT_ROOT / "install.py"
 SOURCE_HOOKS = PROJECT_ROOT / "plugin" / "hooks.json"
-SOURCE_MCP = PROJECT_ROOT / "plugin" / "mcp_config.json"
 VALIDATE_SCRIPT = PROJECT_ROOT / "plugin" / "scripts" / "validate.py"
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -108,9 +107,7 @@ class TestInstaller(unittest.TestCase):
 
     def test_copy_install_upgrade_workspace_and_uninstall(self) -> None:
         source_hooks_before = SOURCE_HOOKS.read_text(encoding="utf-8")
-        source_mcp_before = SOURCE_MCP.read_text(encoding="utf-8")
         self.assertIn("python3 hooks/pre_invocation_metrics.py", source_hooks_before)
-        self.assertIn('"command": "python3"', source_mcp_before)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -122,18 +119,15 @@ class TestInstaller(unittest.TestCase):
             self.assertTrue((target / "config" / "module.json").is_file())
             self.assertTrue((target / "hooks" / "pre_invocation_metrics.py").is_file())
             self.assertTrue((target / "hooks" / "session_start_metrics.py").is_file())
-            self.assertTrue((target / "mcp_config.json").is_file())
-            self.assertTrue((target / "mcp" / "server.py").is_file())
+            self.assertFalse((target / "mcp_config.json").exists())
+            self.assertFalse((target / "mcp").exists())
             self.assertTrue((target / "skills" / "gravity-metrics" / "SKILL.md").is_file())
 
             # Le dépôt source garde toujours 'python3' portable
             self.assertEqual(SOURCE_HOOKS.read_text(encoding="utf-8"), source_hooks_before)
-            self.assertEqual(SOURCE_MCP.read_text(encoding="utf-8"), source_mcp_before)
             if os.name == "nt" and not installer.has_real_python3():
                 installed_hooks = (target / "hooks.json").read_text(encoding="utf-8")
-                installed_mcp = (target / "mcp_config.json").read_text(encoding="utf-8")
                 self.assertNotIn('"python3 ', installed_hooks)
-                self.assertNotIn('"python3"', installed_mcp)
 
             # Refus sans --force
             r_dup = _run_install("--target", str(target))

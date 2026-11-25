@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **MCP Server & Widget Retirement into Unified Gravity Core (`plugin/config/module.json`, `plugin/hooks/pre_invocation_metrics.py`, `plugin/scripts/validate.py`, `install.py`, docs & tests):**
+  - Switched `plugin/config/module.json` `ui.mode` from `"transition-mcp"` to `"none"` (`ui.target: "gravity"`).
+  - Updated `plugin/hooks/pre_invocation_metrics.py` (`_build_handoff_system_message`, `_run_metrics_command`) to hand off `/gravity-metrics` commands to `open_gravity_dashboard` on server `gravity_dashboard` (`view="metrics"` with `metrics_sub` and `target` / `project` when applicable).
+  - Cleaned up `plugin/scripts/validate.py` (`_validate_mcp_config`, `_run_mcp_dry_run`, `"mcp"`/`"widget_html"` checks removed; hook dry-run updated for `open_gravity_dashboard`) and `install.py` (`mcp/server.py` removed from `EXEC_SCRIPTS`).
+  - Synchronized `plugin/rules/AGENTS.md` (`<= 600` B), `plugin/skills/gravity-metrics/SKILL.md` (`<= 6000` B), `AGENTS.md` (`<= 2500` B), `plugin/README.md`, `README.md`, `plugin/plugin.json`, and unit tests.
+
+### Removed
+- **Standalone MCP Server & UI (`plugin/mcp_config.json`, `plugin/mcp/`, `tests/test_mcp_server.py`):**
+  - Deleted `plugin/mcp_config.json`, the entire `plugin/mcp/` package (`server.py`, `widget_html.py`, `ui/*`), and `tests/test_mcp_server.py` now that Gravity Core hosts the unified dashboard.
+
 ### Added
 - **Canonical Workspace Resolution, Technical Signals & Full `--json` CLI (`plugin/metrics/workspace_resolver.py`, `plugin/metrics/technical_signals.py`, `plugin/metrics/collector.py`, `plugin/metrics/history.py`, `plugin/scripts/cli.py`, `tests/test_technical_and_workspace.py`):**
   - Added `workspace_resolver.py` (`resolve_agent_workspace`, `normalize_worktree_path`, `classify_workspace_kind`) with 5-tier priority resolution (`bridge_workspace` > write/shell `cd`/`git -C` > read outside `root_workspace` `specs/`/`tasks/` > non-inherit `workspaceUris` > `root_workspace`), worktree normalization (`gravity-worktrees/<repo>-wN`, `.gemini/antigravity/worktrees/<repo>-*`, `.worktrees/<repo>-*`), and `"atelier"` vs `"code"` classification.

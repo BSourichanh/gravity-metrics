@@ -284,10 +284,7 @@ class TestValidateHardening(unittest.TestCase):
 
     def _run_validate_fast(self, plugin_dir: Path) -> validate.Report:
         report = validate.Report()
-        with (
-            mock.patch.object(validate, "_run_hook_dry_runs"),
-            mock.patch.object(validate, "_run_mcp_dry_run"),
-        ):
+        with mock.patch.object(validate, "_run_hook_dry_runs"):
             validate.validate_plugin(plugin_dir, report)
         return report
 

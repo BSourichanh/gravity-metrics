@@ -136,7 +136,9 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertNotIn("terminationBehavior", out_ro)
             sys_ro = out_ro["injectSteps"][0]["systemMessage"]
             self.assertIn("lecture seule", sys_ro["metadata"]["user_markdown"])
-            self.assertIn("open_metrics_dashboard", sys_ro["systemMessage"])
+            self.assertIn("open_gravity_dashboard", sys_ro["systemMessage"])
+            self.assertIn("gravity_dashboard", sys_ro["systemMessage"])
+            self.assertIn('"view": "metrics"', sys_ro["systemMessage"])
             self.assertFalse((store / "data" / "history.jsonl").exists())
 
             # Cas (a) : /gravity-metrics stop capture même sans flush disque du prompt courant
@@ -153,7 +155,8 @@ class TestPreInvocationHook(unittest.TestCase):
             smsg_a = sys_a["systemMessage"]
             self.assertIn(METRICS_MARKER, md_a)
             self.assertIn(METRICS_MARKER, smsg_a)
-            self.assertIn("open_metrics_dashboard", smsg_a)
+            self.assertIn("open_gravity_dashboard", smsg_a)
+            self.assertIn('"metrics_sub": "sessions"', smsg_a)
             self.assertIn("ProjetAlpha", smsg_a)
             self.assertIn("METRICS.md", md_a)
             self.assertNotIn(".html", md_a)
@@ -232,7 +235,7 @@ class TestPreInvocationHook(unittest.TestCase):
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
                     {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T16:01:00Z", "content": "/gravity-metrics"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T16:01:01Z", "content": METRICS_MARKER},
-                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 500, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_metrics_dashboard"}]},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 500, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_gravity_dashboard"}]},
                 ],
             )
             out_mid = _run_hook(
@@ -285,7 +288,7 @@ class TestPreInvocationHook(unittest.TestCase):
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
                     {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T16:01:00Z", "content": "/gravity-metrics stop"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T16:01:01Z", "content": METRICS_MARKER},
-                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 500, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_metrics_dashboard"}]},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 500, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_gravity_dashboard"}]},
                     {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:03Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 400, "cache_read_tokens": 0, "output_tokens": 20, "tool_calls": []},
                 ],
             )
@@ -304,7 +307,7 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertNotIn("terminationBehavior", out_dup)
             sys_dup = out_dup["injectSteps"][0]["systemMessage"]
             self.assertIn("Aucune nouvelle activité", sys_dup["metadata"]["user_markdown"])
-            self.assertIn("open_metrics_dashboard", sys_dup["systemMessage"])
+            self.assertIn("open_gravity_dashboard", sys_dup["systemMessage"])
             self.assertIn("ProjetBeta", sys_dup["systemMessage"])
             self.assertEqual(load_history(store / "data" / "history.jsonl"), [])
 
@@ -366,7 +369,7 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertNotIn("terminationBehavior", out_cap)
             sys_msg_obj = out_cap["injectSteps"][0]["systemMessage"]
             self.assertIn(METRICS_MARKER, sys_msg_obj["systemMessage"])
-            self.assertIn("open_metrics_dashboard", sys_msg_obj["systemMessage"])
+            self.assertIn("open_gravity_dashboard", sys_msg_obj["systemMessage"])
             md_cap = sys_msg_obj["metadata"]["user_markdown"]
             self.assertIn("evo→medium · slow · safe", md_cap)
             self.assertIn("résumé-cp1252", md_cap)

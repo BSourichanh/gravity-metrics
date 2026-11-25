@@ -127,11 +127,11 @@ def _build_handoff_system_message(
         marker,
         summary_line,
         (
-            "Appelle immédiatement l'outil MCP `open_metrics_dashboard` du serveur "
-            f"`gravity-metrics_dashboard` avec exactement ces arguments JSON : {args_json} "
+            "Appelle immédiatement l'outil MCP `open_gravity_dashboard` du serveur "
+            f"`gravity_dashboard` avec exactement ces arguments JSON : {args_json} "
             "(sans lire `METRICS.md`, `history.jsonl` ni les scripts du hook au préalable)."
         ),
-        "Réponds ensuite en une seule phrase courte confirmant l'ouverture du widget"
+        "Réponds ensuite en une seule phrase courte confirmant l'ouverture du tableau de bord"
         + (f" ({repeat_warning})" if repeat_warning else "")
         + ".",
     ]
@@ -192,7 +192,7 @@ def _run_metrics_command(
         records = load_history(history_path)
         pending = list_pending_sessions(brain_dir, history_path, store_dir=store_dir)
         active_cap = load_active_captures(store_dir).get(cid) if cid else None
-        tool_args: Dict[str, Any] = {"view": "overview"}
+        tool_args: Dict[str, Any] = {"view": "metrics", "metrics_sub": "overview"}
         if project:
             tool_args["project"] = project
         cap_info = ""
@@ -243,7 +243,7 @@ def _run_metrics_command(
     if action == "pending":
         pending = list_pending_sessions(brain_dir, history_path, store_dir=store_dir)
         md_out = render_pending_markdown(pending)
-        tool_args = {"view": "pending"}
+        tool_args = {"view": "metrics", "metrics_sub": "pending"}
         if project:
             tool_args["project"] = project
         sys_msg = _build_handoff_system_message(
@@ -285,7 +285,7 @@ def _run_metrics_command(
             reports_written=not already,
             already_archived=already,
         )
-        tool_args = {"target": saved_rec["label"], "view": "detail"}
+        tool_args = {"view": "metrics", "metrics_sub": "sessions", "target": saved_rec["label"]}
         if saved_rec.get("project"):
             tool_args["project"] = saved_rec["project"]
         elif project:
@@ -306,12 +306,12 @@ def _run_metrics_command(
 
     # action == "stop" or action == "capture"
     if not cid:
-        tool_args = {"view": "overview"}
+        tool_args = {"view": "metrics", "metrics_sub": "overview"}
         if project:
             tool_args["project"] = project
         md_out = (
             f"{METRICS_OPEN_MARKER}\n"
-            "### Gravity Metrics — Ouverture du widget\n\n"
+            "### Gravity Metrics — Ouverture du tableau de bord\n\n"
             "Identifiant de conversation absent du contexte ; ouverture du tableau de bord."
         )
         sys_msg = _build_handoff_system_message(
@@ -368,7 +368,7 @@ def _run_metrics_command(
     if metrics["summary"]["total_llm_calls"] == 0:
         if action == "stop":
             pop_active_capture(cid, store_dir=store_dir)
-        tool_args = {"view": "overview"}
+        tool_args = {"view": "metrics", "metrics_sub": "overview"}
         if eff_project:
             tool_args["project"] = eff_project
         archived_for_cid = [
@@ -376,7 +376,7 @@ def _run_metrics_command(
         ]
         if archived_for_cid:
             last_lbl = archived_for_cid[-1].get("label") or cid[:8]
-            tool_args = {"target": last_lbl, "view": "detail"}
+            tool_args = {"view": "metrics", "metrics_sub": "sessions", "target": last_lbl}
             if eff_project:
                 tool_args["project"] = eff_project
             md_out = (
@@ -394,7 +394,7 @@ def _run_metrics_command(
         scope_note = f" sur le projet `{eff_project}`" if eff_project else ""
         md_out = (
             f"{METRICS_OPEN_MARKER}\n"
-            "### Gravity Metrics — Ouverture du widget\n\n"
+            "### Gravity Metrics — Ouverture du tableau de bord\n\n"
             f"Aucune nouvelle activité LLM à capturer depuis la dernière collecte ; "
             f"ouverture du tableau de bord{scope_note}."
         )
@@ -426,7 +426,7 @@ def _run_metrics_command(
         reports_written=not already,
         already_archived=already,
     )
-    tool_args = {"target": saved_rec["label"], "view": "detail"}
+    tool_args = {"view": "metrics", "metrics_sub": "sessions", "target": saved_rec["label"]}
     if saved_rec.get("project"):
         tool_args["project"] = saved_rec["project"]
     elif eff_project:

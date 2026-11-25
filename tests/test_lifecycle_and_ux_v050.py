@@ -5,11 +5,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from unittest import mock
 
@@ -18,7 +16,6 @@ PLUGIN_ROOT = PROJECT_ROOT / "plugin"
 CATALOG_PATH = PLUGIN_ROOT / "config" / "pricing_catalog.json"
 PRE_HOOK = PLUGIN_ROOT / "hooks" / "pre_invocation_metrics.py"
 START_HOOK = PLUGIN_ROOT / "hooks" / "session_start_metrics.py"
-SERVER_SCRIPT = PLUGIN_ROOT / "mcp" / "server.py"
 
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
@@ -39,7 +36,7 @@ from metrics import (  # noqa: E402
     resolve_gravity_window,
     unignore_session,
 )
-from mcp.ui.markdown_view import MARKDOWN_VIEW_JS  # noqa: E402
+from metrics.store import update_session_metadata  # noqa: E402
 
 
 def _write_transcript(conv_dir: Path, steps: list) -> Path:
@@ -72,41 +69,6 @@ def _run_py_hook(script: Path, stdin_text: str, *, store_dir: Path, brain_dir: P
     if proc.returncode != 0:
         raise AssertionError(f"Hook {script.name} rc={proc.returncode} stderr={proc.stderr}")
     return json.loads(proc.stdout)
-
-
-def _call_mcp_stdio(requests: list, store_dir: Path, brain_dir: Path, extra_env: dict = None) -> list:
-    env = os.environ.copy()
-    env["GRAVITY_METRICS_HOME"] = str(store_dir)
-    env["ANTIGRAVITY_BRAIN_DIR"] = str(brain_dir)
-    env["PYTHONUTF8"] = "1"
-    if extra_env:
-        env.update(extra_env)
-    init_reqs = [
-        {"jsonrpc": "2.0", "id": 1000, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
-    ]
-    payload = "\n".join(json.dumps(r, ensure_ascii=False) for r in init_reqs + requests) + "\n"
-    proc = subprocess.run(
-        [sys.executable, "-B", str(SERVER_SCRIPT)],
-        input=payload,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env=env,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise AssertionError(f"MCP server rc={proc.returncode} stderr={proc.stderr}")
-    out = []
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        obj = json.loads(line)
-        if obj.get("id") == 1000:
-            continue
-        out.append(obj)
-    return out
 
 
 class TestLifecycleAndUxV050(unittest.TestCase):
@@ -324,13 +286,12 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual([m["id"] for m in saved_rec["milestones"]["phases"]], ["conception", "production", "verification", "cloture"])
             self.assertEqual(saved_rec["current_phase"], "Clôture / Enregistrée")
 
-    def test_mcp_ignore_meta_edit_and_fast_unchanged_poll(self) -> None:
+    def test_ignore_unignore_and_update_session_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = root / "store"
             brain = root / "brain"
-            ws = root / "ProjMeta"
-            ws.mkdir()
+            hist_path = store / "data" / "history.jsonl"
             cid_arch = "m0001111-2222-3333-4444-555566667777"
             cid_pend = "m0002222-2222-3333-4444-555566667777"
 
@@ -352,87 +313,33 @@ class TestLifecycleAndUxV050(unittest.TestCase):
                 cid_arch,
                 brain_dir=brain,
                 store_dir=store,
-                history_path=store / "data" / "history.jsonl",
+                history_path=hist_path,
                 catalog_path=CATALOG_PATH,
                 label="init-run",
                 project="ProjAlpha",
                 note="initial note",
             )
-            cost_before = load_history(store / "data" / "history.jsonl")[0]["cost_usd"]
+            cost_before = load_history(hist_path)[0]["cost_usd"]
 
-            resps = _call_mcp_stdio(
-                [
-                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "metrics_get_state", "arguments": {}}},
-                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "metrics_ignore_session", "arguments": {"conversation_id": cid_pend, "reason": "bruit"}}},
-                    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "metrics_get_state", "arguments": {}}},
-                    {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "metrics_unignore_session", "arguments": {"conversation_id": cid_pend}}},
-                    {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "metrics_update_session_meta", "arguments": {"target": "init-run", "label": "renamed-run", "project": "ProjBeta", "note": "updated note"}}},
-                    {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "metrics_get_state", "arguments": {}}},
-                ],
-                store,
-                brain,
+            self.assertEqual(len(list_pending_sessions(brain, hist_path, store_dir=store)), 1)
+            ignore_session(cid_pend, reason="bruit", store_dir=store)
+            self.assertEqual(len(list_pending_sessions(brain, hist_path, store_dir=store)), 0)
+            self.assertEqual(load_ignored_sessions(store)[cid_pend]["reason"], "bruit")
+            unignore_session(cid_pend, store_dir=store)
+            self.assertEqual(len(list_pending_sessions(brain, hist_path, store_dir=store)), 1)
+
+            updated, _ = update_session_metadata(
+                "init-run",
+                label="renamed-run",
+                project="ProjBeta",
+                note="updated note",
+                store_dir=store,
+                history_path=hist_path,
             )
-            by_id = {r["id"]: r["result"]["structuredContent"] for r in resps}
-            self.assertEqual(len(by_id[1]["pending_sessions"]), 1)
-            self.assertEqual(len(by_id[2]["pending_sessions"]), 0)
-            self.assertEqual(len(by_id[2]["ignored_sessions"]), 1)
-            self.assertTrue(by_id[2]["ignored_sessions"][0]["ignored"])
-            self.assertEqual(by_id[2]["ignored_sessions"][0]["ignored_reason"], "bruit")
-            self.assertEqual(len(by_id[3]["pending_sessions"]), 0)
-            self.assertEqual(len(by_id[3]["ignored_sessions"]), 1)
-            self.assertEqual(len(by_id[4]["pending_sessions"]), 1)
-            self.assertEqual(len(by_id[4]["ignored_sessions"]), 0)
-            self.assertEqual(by_id[5]["updated"]["label"], "renamed-run")
-            self.assertEqual(by_id[5]["updated"]["project"], "ProjBeta")
-            self.assertEqual(by_id[5]["updated"]["note"], "updated note")
-            self.assertEqual(by_id[5]["updated"]["cost_usd"], cost_before)
-
-            sig = by_id[6]["signature"]
-            self.assertIn("hist_sig", by_id[6])
-            self.assertIn("pending_sig", by_id[6])
-            self.assertIn("audits_sig", by_id[6])
-
-            # Test in-process de _fast_unchanged_signature (< 5 ms sur poll inchangé)
-            import mcp.server as mcp_server  # noqa: E402
-
-            with mock.patch.dict(
-                os.environ,
-                {"GRAVITY_METRICS_HOME": str(store), "ANTIGRAVITY_BRAIN_DIR": str(brain)},
-                clear=False,
-            ):
-                mcp_server._handle_metrics_get_state({})
-                t0 = time.perf_counter()
-                fast_res = mcp_server._handle_metrics_get_state({"since_signature": sig})
-                dt_ms = (time.perf_counter() - t0) * 1000.0
-            self.assertFalse(fast_res["structuredContent"]["changed"])
-            self.assertEqual(fast_res["structuredContent"]["signature"], sig)
-            self.assertLess(dt_ms, 50.0)
-
-    def test_markdown_view_no_loop_on_gt_entities(self) -> None:
-        js = MARKDOWN_VIEW_JS
-        self.assertIn("isQuoteLine", js)
-        self.assertIn("stripQuotePrefix", js)
-        self.assertIn("md-callout", js)
-        node_bin = shutil.which("node")
-        if not node_bin:
-            return
-        harness = (
-            "function esc(val){return String(val==null?'':val).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;');}\n"
-            + js
-            + "\nconst out = renderSafeMarkdown('> citation simple\\n\\n> [!WARNING]\\n> Alerte critique\\n\\n# Titre 1\\n## Titre 2\\n- item 1\\n  - sub 1');\n"
-            + "if (!out.includes('blockquote') || !out.includes('md-callout-warning') || !out.includes('<h1>') || !out.includes('<ul>')) process.exit(2);\n"
-            + "const loopCheck = renderSafeMarkdown('&gt; deja echappe');\n"
-            + "if (!loopCheck.includes('blockquote') || loopCheck.includes('&amp;gt;')) process.exit(3);\n"
-        )
-        proc = subprocess.run(
-            [node_bin, "-e", harness],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=5,
-            check=False,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(updated["label"], "renamed-run")
+            self.assertEqual(updated["project"], "ProjBeta")
+            self.assertEqual(updated["note"], "updated note")
+            self.assertEqual(updated["cost_usd"], cost_before)
 
     def test_current_turn_start_step_and_tolerant_history_upsert(self) -> None:
         from metrics.history import to_session_record, upsert_session

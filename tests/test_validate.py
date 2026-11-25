@@ -41,10 +41,7 @@ class TestValidateD4(unittest.TestCase):
 
     def _run_validate_fast(self, plugin_dir: Path) -> validate.Report:
         report = validate.Report()
-        with (
-            mock.patch.object(validate, "_run_hook_dry_runs"),
-            mock.patch.object(validate, "_run_mcp_dry_run"),
-        ):
+        with mock.patch.object(validate, "_run_hook_dry_runs"):
             validate.validate_plugin(plugin_dir, report)
         return report
 
@@ -55,7 +52,6 @@ class TestValidateD4(unittest.TestCase):
         if mock_dry_runs:
             with (
                 mock.patch.object(validate, "_run_hook_dry_runs"),
-                mock.patch.object(validate, "_run_mcp_dry_run"),
                 contextlib.redirect_stdout(buf),
             ):
                 rc = validate.main(list(argv))
@@ -229,11 +225,10 @@ class TestValidateD4(unittest.TestCase):
             self.assertLessEqual(len(p), 100)
             self.assertRegex(p, validate.SUGGESTED_PROMPT_RE)
 
-        for ui_file in (PLUGIN_ROOT / "mcp" / "ui").glob("*.py"):
-            txt = ui_file.read_text(encoding="utf-8")
-            self.assertNotIn("window.confirm", txt)
-            self.assertNotIn("http://", txt)
-            self.assertNotIn("https://", txt)
+        self.assertFalse((PLUGIN_ROOT / "mcp").exists())
+        self.assertFalse((PLUGIN_ROOT / "mcp_config.json").exists())
+        mod = _json.loads((PLUGIN_ROOT / "config" / "module.json").read_text(encoding="utf-8"))
+        self.assertEqual(mod["ui"], {"mode": "none", "target": "gravity"})
 
 
 if __name__ == "__main__":

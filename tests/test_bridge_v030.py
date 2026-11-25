@@ -16,7 +16,6 @@ CLI_SCRIPT = PLUGIN_ROOT / "scripts" / "cli.py"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from mcp.widget_html import render_mcp_widget_html  # noqa: E402
 from metrics import (  # noqa: E402
     SCHEMA_VERSION,
     classify_agent,
@@ -199,14 +198,6 @@ class TestHistoricalBridgeReportsROCompat(unittest.TestCase):
             chat_md = render_chat_summary_markdown(loaded_det, rec, store)
             self.assertIn("audit-04-compat", chat_md)
             self.assertIn("Workspaces (Bridge)", chat_md)
-
-            # UI MCP App : badge RO historique bridge:N et Arbre Bridge conservés, modale/alerte live retirées
-            html_ui = render_mcp_widget_html()
-            self.assertIn("rec.bridge_children_count", html_ui)
-            self.assertIn("bridge:", html_ui)
-            self.assertIn("Arbre Bridge Inter-Workspaces", html_ui)
-            self.assertNotIn("confirmForceArchiveCid", html_ui)
-            self.assertNotIn("has_pending_bridge_jobs", html_ui)
 
 
 class TestEntrypointsExclusionSlugAndLegacySchema(unittest.TestCase):
