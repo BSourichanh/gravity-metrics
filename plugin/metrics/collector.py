@@ -3508,11 +3508,14 @@ def list_pending_sessions(
                 win,
             )
         ]
+        is_auto_or_uncaptured = cap_entry is None or (
+            isinstance(cap_entry, dict) and cap_entry.get("source") == "architect_auto"
+        )
         if (
             not include_noise
             and not wf_children
             and not any(_is_prod_subagent(s) for s in active_subagents)
-            and cap_entry is None
+            and is_auto_or_uncaptured
             and not has_work_activity
         ):
             continue

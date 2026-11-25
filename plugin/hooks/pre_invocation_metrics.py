@@ -38,6 +38,20 @@ _ARCHITECT_RUN_RE = re.compile(
     r"^/gravity-architect(?::gravity-architect)?\s+(?!(?:init|add|sync|status|archive|audit)\b)(.+)",
     re.IGNORECASE | re.DOTALL,
 )
+_ARCHITECT_CONSULT_HEAD_RE = re.compile(
+    r"^(?:pourquoi|comment|combien|explique(?:-moi)?|qu['’]est-ce|est-ce\s+que|"
+    r"quel(?:le)?s?|list(?:e|er)?|montre(?:-moi)?|affiche|r[eé]sume|"
+    r"what|why|how|explain|show|summarize)\b",
+    re.IGNORECASE,
+)
+_ARCHITECT_ACTION_OVERRIDE_RE = re.compile(
+    r"\b(?:specs?|tasks?|handoff|cr[eé]er|cr[eé]e|impl[eé]menter|impl[eé]mente|"
+    r"modifier|modifie|[eé]diter|[eé]dite|corriger|corrige|refactor(?:er|iser)?|"
+    r"ajouter|ajoute|supprimer|supprime|migrer|migre|d[eé]ployer|d[eé]ploie|"
+    r"construire|construis|[eé]crire|[eé]cris|create|implement|modify|edit|"
+    r"patch|fix|add|remove|delete|build|write|deploy)\b",
+    re.IGNORECASE,
+)
 
 
 def _resolve_transcript_path(
@@ -446,8 +460,21 @@ def _run_metrics_command(
     return "handoff", md_out, sys_msg
 
 
+def _is_consultative_architect_prompt(cleaned: str) -> bool:
+    """Retourne True si `/gravity-architect <texte>` est une simple question consultative."""
+    match = _ARCHITECT_RUN_RE.match(cleaned)
+    if match is None:
+        return False
+    arg_text = match.group(1).strip()
+    if not arg_text or _ARCHITECT_CONSULT_HEAD_RE.match(arg_text) is None:
+        return False
+    return _ARCHITECT_ACTION_OVERRIDE_RE.search(arg_text) is None
+
+
 def _maybe_auto_start_architect_capture(payload: Dict[str, Any], cleaned: str) -> None:
     """Auto-démarre une capture idempotente (0 token) sur `/gravity-architect <instruction>`."""
+    if _is_consultative_architect_prompt(cleaned):
+        return
     inv_num = payload.get("invocationNum")
     if not (isinstance(inv_num, int) and not isinstance(inv_num, bool) and inv_num == 0):
         return
@@ -483,6 +510,7 @@ def _maybe_auto_start_architect_capture(payload: Dict[str, Any], cleaned: str) -
             start_step=start_step,
             label=auto_lbl,
             project=project,
+            source="architect_auto",
             store_dir=store_dir,
             overwrite=False,
         )

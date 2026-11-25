@@ -655,6 +655,7 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertEqual(caps[cid]["start_step"], 2)
             self.assertEqual(caps[cid]["label"], "architect-creer-ecosysteme-w1")
             self.assertEqual(caps[cid]["project"], "ProjetArch")
+            self.assertEqual(caps[cid]["source"], "architect_auto")
 
             # 3) Non-écrasement d'une capture ouverte (overwrite=False) sur second /gravity-architect invocationNum=0
             _write_transcript(
@@ -697,6 +698,64 @@ class TestPreInvocationHook(unittest.TestCase):
             caps_explicit = load_active_captures(store)
             self.assertEqual(caps_explicit[cid]["start_step"], 4)
             self.assertEqual(caps_explicit[cid]["label"], "jalon-manuel")
+            self.assertEqual(caps_explicit[cid]["source"], "manual")
+
+    def test_architect_consultative_questions_skip_auto_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            ws = root / "ProjetConsult"
+            ws.mkdir()
+
+            cid = "c1000001-1111-2222-3333-444455556666"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Intro"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                ],
+            )
+            for consult_prompt in (
+                "/gravity-architect pourquoi ce module existe ?",
+                "/gravity-architect comment fonctionne le cache ?",
+                "/gravity-architect explique-moi ce code",
+                "/gravity-architect qu'est-ce que gravity-metrics ?",
+                "/gravity-architect liste les dépôts suivis",
+                "/gravity-architect why does this fail?",
+                "/gravity-architect how does sync work?",
+                "/gravity-architect explain the lifecycle",
+            ):
+                out = _run_hook(
+                    json.dumps({
+                        "conversationId": cid,
+                        "transcriptPath": str(tpath),
+                        "cwd": str(ws),
+                        "invocationNum": 0,
+                        "lastUserInput": consult_prompt,
+                    }),
+                    store,
+                    brain,
+                )
+                self.assertEqual(out, {})
+            self.assertEqual(load_active_captures(store), {})
+
+            # Une question contenant `spec` ou un verbe d'action reste auto-capturée (`architect_auto`)
+            out_action = _run_hook(
+                json.dumps({
+                    "conversationId": cid,
+                    "transcriptPath": str(tpath),
+                    "cwd": str(ws),
+                    "invocationNum": 0,
+                    "lastUserInput": "/gravity-architect comment créer une spec pour w1 ?",
+                }),
+                store,
+                brain,
+            )
+            self.assertEqual(out_action, {})
+            caps = load_active_captures(store)
+            self.assertIn(cid, caps)
+            self.assertEqual(caps[cid]["source"], "architect_auto")
 
     def test_architect_auto_start_r1_and_slash_record_update_wording(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

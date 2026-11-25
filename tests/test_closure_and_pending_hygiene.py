@@ -409,6 +409,82 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
             self.assertEqual([p["conversation_id"] for p in pend_next], [cid])
             self.assertEqual(pend_next[0]["window_start_step"], 78)
 
+    def test_retroactive_worktree_purge_and_architect_auto_noise_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            hist_path = store / "data" / "history.jsonl"
+            store.mkdir(parents=True, exist_ok=True)
+
+            # 1) Purge rétroactive à la lecture et à l'écriture dans session_meta.json
+            from metrics.lifecycle import record_session_meta
+
+            meta_path = store / "session_meta.json"
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sessions": {
+                            "wt-antigravity": {"cwd": "/home/user/.gemini/antigravity/worktrees/wt-1", "project": "wt-1"},
+                            "wt-gravity": {"cwd": "/tmp/gravity-worktrees/gravity-metrics-w1", "project": "gravity-metrics-w1"},
+                            "wt-dot": {"cwd": "/repo/.worktrees/w2", "project": "w2"},
+                            "wt-posix": {"cwd": "/repo/worktrees/w3", "project": "w3"},
+                            "wt-win": {"cwd": r"D:\repo\worktrees\wt-4", "project": "wt-4"},
+                            "real-keep": {"cwd": "/home/user/Github/gravity-studio", "project": "gravity-studio"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = load_session_meta(store)
+            self.assertEqual(list(loaded.keys()), ["real-keep"])
+
+            # Enregistrement d'un worktree ignoré ; enregistrement d'un vrai projet purge le disque
+            self.assertEqual(
+                record_session_meta("wt-new", cwd="/tmp/gravity-worktrees/sub-2", store_dir=store),
+                {},
+            )
+            record_session_meta("real-new", cwd="/home/user/Github/gravity", store_dir=store)
+            raw_on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(set(raw_on_disk["sessions"].keys()), {"real-keep", "real-new"})
+
+            # 2) architect_auto sans activité filtré de pending (hors include_noise=True),
+            #    tandis que manual et legacy (sans clé source) restent conservés
+            cid_auto_noise = "a3000001-1111-2222-3333-444455556666"
+            cid_manual_cap = "m3000001-1111-2222-3333-444455556666"
+            cid_legacy_cap = "l3000001-1111-2222-3333-444455556666"
+            for cid_item, prompt in (
+                (cid_auto_noise, "/gravity-architect pourquoi ?"),
+                (cid_manual_cap, "Capture manuelle"),
+                (cid_legacy_cap, "Capture legacy"),
+            ):
+                _write_transcript(
+                    brain / cid_item,
+                    [
+                        {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T11:00:00Z", "content": prompt},
+                        {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T11:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                    ],
+                )
+
+            start_active_capture(cid_auto_noise, start_step=0, label="arch-q", source="architect_auto", store_dir=store)
+            start_active_capture(cid_manual_cap, start_step=0, label="man-live", store_dir=store)
+            cap_path = store / "active_captures.json"
+            cap_payload = json.loads(cap_path.read_text(encoding="utf-8"))
+            cap_payload["captures"][cid_legacy_cap] = {
+                "start_step": 0,
+                "label": "legacy-live",
+                "project": "",
+                "started_at": "2026-11-25T11:00:00Z",
+                "updated_at": "2026-11-25T11:00:05Z",
+            }
+            cap_path.write_text(json.dumps(cap_payload), encoding="utf-8")
+
+            default_ids = {p["conversation_id"] for p in list_pending_sessions(brain, hist_path, store_dir=store)}
+            self.assertEqual(default_ids, {cid_manual_cap, cid_legacy_cap})
+            all_ids = {p["conversation_id"] for p in list_pending_sessions(brain, hist_path, store_dir=store, include_noise=True)}
+            self.assertEqual(all_ids, {cid_auto_noise, cid_manual_cap, cid_legacy_cap})
+
 
 if __name__ == "__main__":
     unittest.main()

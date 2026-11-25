@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Auto-Capture Hygiene & Retroactive Worktree Purge (`plugin/metrics/lifecycle.py`, `plugin/hooks/pre_invocation_metrics.py`, `plugin/metrics/collector.py`, tests):**
+  - Added `source` (`"manual"` by default, `"architect_auto"` from `/gravity-architect`) to `start_active_capture()` and guarded `_maybe_auto_start_architect_capture()` against purely consultative `/gravity-architect` questions while preserving `handoff`, `spec`, `task`, and action prompts.
+  - Updated `list_pending_sessions()` anti-noise filter to treat `source == "architect_auto"` without work activity as noise (while keeping explicit/manual captures intact).
+  - Added `_is_worktree_path()` and retroactive worktree filtering/purging in `load_session_meta()` and `record_session_meta()`.
+
 ### Changed
 - **MCP Server & Widget Retirement into Unified Gravity Core (`plugin/config/module.json`, `plugin/hooks/pre_invocation_metrics.py`, `plugin/scripts/validate.py`, `install.py`, docs & tests):**
   - Switched `plugin/config/module.json` `ui.mode` from `"transition-mcp"` to `"none"` (`ui.target: "gravity"`).

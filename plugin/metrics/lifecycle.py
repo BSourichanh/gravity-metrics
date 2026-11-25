@@ -93,6 +93,22 @@ def _resolve_dir(store_dir: Optional[Union[Path, str]]) -> Path:
     return Path(store_dir).expanduser() if store_dir is not None else default_store_dir()
 
 
+def _is_worktree_path(cwd: str) -> bool:
+    """Retourne True si `cwd` correspond à un répertoire worktree temporaire."""
+    raw = str(cwd or "").strip()
+    if not raw:
+        return False
+    norm_raw = raw.lower()
+    norm_posix = (raw.replace("\\", "/").rstrip("/") + "/").lower()
+    return (
+        "/.gemini/antigravity/worktrees/" in norm_posix
+        or "/gravity-worktrees/" in norm_posix
+        or "/.worktrees/" in norm_posix
+        or "/worktrees/" in norm_posix
+        or "\\worktrees\\" in (norm_raw + "\\")
+    )
+
+
 def load_session_meta(store_dir: Optional[Union[Path, str]] = None) -> Dict[str, Dict[str, Any]]:
     """Retourne la carte `{conversation_id: {cwd, project, started_at, updated_at}}`."""
     s_dir = _resolve_dir(store_dir)
@@ -103,7 +119,10 @@ def load_session_meta(store_dir: Optional[Union[Path, str]] = None) -> Dict[str,
     return {
         str(k): dict(v)
         for k, v in sessions.items()
-        if isinstance(k, str) and k.strip() and isinstance(v, dict)
+        if isinstance(k, str)
+        and k.strip()
+        and isinstance(v, dict)
+        and not _is_worktree_path(str(v.get("cwd") or ""))
     }
 
 
@@ -118,17 +137,27 @@ def record_session_meta(
     cid = str(conversation_id or "").strip()
     if not cid:
         return {}
+    clean_cwd = str(cwd or "").strip()
+    if _is_worktree_path(clean_cwd):
+        return {}
     s_dir = _resolve_dir(store_dir)
     meta_path = s_dir / "session_meta.json"
     now_iso = _now_iso_utc()
-    clean_cwd = str(cwd or "").strip()
     clean_proj = str(project or "").strip()
     if not clean_proj and clean_cwd:
         clean_proj = Path(clean_cwd).name
 
     with state_file_lock(meta_path):
         raw = _read_json_dict(meta_path)
-        sessions = raw.get("sessions") if isinstance(raw.get("sessions"), dict) else {}
+        raw_sessions = raw.get("sessions") if isinstance(raw.get("sessions"), dict) else {}
+        sessions = {
+            str(k): v
+            for k, v in raw_sessions.items()
+            if isinstance(k, str)
+            and k.strip()
+            and isinstance(v, dict)
+            and not _is_worktree_path(str(v.get("cwd") or ""))
+        }
         prev = sessions.get(cid) if isinstance(sessions.get(cid), dict) else {}
         entry = {
             "cwd": clean_cwd or str(prev.get("cwd") or ""),
@@ -240,6 +269,7 @@ def start_active_capture(
     start_step: int,
     label: str = "",
     project: str = "",
+    source: str = "manual",
     store_dir: Optional[Union[Path, str]] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
@@ -254,6 +284,7 @@ def start_active_capture(
         "start_step": max(0, int(start_step)),
         "label": str(label or "").strip(),
         "project": str(project or "").strip(),
+        "source": str(source or "manual").strip() or "manual",
         "started_at": now_iso,
         "updated_at": now_iso,
     }
