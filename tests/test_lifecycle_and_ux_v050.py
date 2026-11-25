@@ -426,6 +426,73 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertIn("cli.py record <id>", metrics_pkg.render_pending_table([{"conversation_id": cid_h, "updated_at": "2026-11-25T10:00:00Z", "llm_calls": 2, "window_mode": "gravity_session", "title": "t"}]))
             self.assertIn("tout est enregistré", metrics_pkg.render_pending_markdown([]))
 
+    def test_expected_prompt_anchoring_and_cli_from_step(self) -> None:
+        from metrics.lifecycle import current_turn_start_step_in_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            brain = root / "brain"
+            store = root / "store"
+            hist_path = store / "data" / "history.jsonl"
+            cid = "4de96631-1111-2222-3333-444455556666"
+            prompt_txt = "/gravity-architect wave-1 audit"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 52, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:00:00Z", "content": "Ancien tour"},
+                    {"step_index": 53, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:00:05Z", "model": "gemini-4-neon", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                    {
+                        "step_index": 54,
+                        "type": "USER_INPUT",
+                        "status": "DONE",
+                        "created_at": "2026-11-25T10:01:00Z",
+                        "content": f"<ADDITIONAL_METADATA>meta</ADDITIONAL_METADATA>\n<USER_REQUEST>\n{prompt_txt}\n</USER_REQUEST>",
+                    },
+                    {"step_index": 55, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:01:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 12_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": []},
+                    {"step_index": 132, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T10:02:00Z", "content": "reactive wakeup"},
+                ],
+            )
+            # Sans expected_prompt ou prompt absent -> repli exact sur max_step + 1 (133)
+            self.assertEqual(current_turn_start_step_in_transcript(tpath), 133)
+            self.assertEqual(current_turn_start_step_in_transcript(tpath, expected_prompt="/gravity-architect absent"), 133)
+            # Avec expected_prompt -> ancre sur step 54 malgré PLANNER_RESPONSE + SYSTEM_MESSAGE intermédiaires
+            self.assertEqual(current_turn_start_step_in_transcript(tpath, expected_prompt=prompt_txt), 54)
+
+            # CLI record --from-step 54 --force et rejet des combinaisons invalides
+            cli_script = PLUGIN_ROOT / "scripts" / "cli.py"
+            common = ["--brain-dir", str(brain), "--store", str(store), "--history", str(hist_path), "--json"]
+
+            proc_neg = subprocess.run(
+                [sys.executable, "-B", str(cli_script), "record", cid, "--from-step", "-1", *common],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertNotEqual(proc_neg.returncode, 0)
+
+            proc_both = subprocess.run(
+                [sys.executable, "-B", str(cli_script), "record", cid, "--from-step", "54", "--full", *common],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertNotEqual(proc_both.returncode, 0)
+
+            proc_ok = subprocess.run(
+                [sys.executable, "-B", str(cli_script), "record", cid, "--from-step", "54", "--force", *common],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(proc_ok.returncode, 0, msg=proc_ok.stderr or proc_ok.stdout)
+            payload_ok = json.loads(proc_ok.stdout)
+            self.assertTrue(payload_ok["ok"])
+            self.assertEqual(payload_ok["record"]["window_start_step"], 54)
+            self.assertEqual(payload_ok["record"]["input_tokens"], 12_000)
+
 
 if __name__ == "__main__":
     unittest.main()

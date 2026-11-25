@@ -8,10 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Targeted Re-Archiving (`plugin/scripts/cli.py`, tests):**
+  - Added `--from-step <N>` (`>= 0`, mutually exclusive with `--full`) to `cli.py record` / `archive` and forwarded `from_step` to `archive_conversation()`.
 - **Install Source Provenance (`install.py`, `tests/test_install.py`):**
   - Added atomic provenance recording (`_record_install_source`, `_atomic_write_json`, `_probe_git_metadata`, `resolve_gravity_home`) in `$GRAVITY_HOME/core/sources.json` (UTF-8 without BOM, LF, schema v1) upon successful real global installs (`rc == 0`, `not dry_run`, `scope == "global"`, `target is None`) while preserving existing module entries, tolerating missing `git`/`.git`, and keeping the installed plugin directory untouched.
 
 ### Fixed
+- **Capture Start-Step Anchoring on Reactive Wakeup (`plugin/metrics/lifecycle.py`, `plugin/hooks/pre_invocation_metrics.py`, tests):**
+  - Added keyword-only `expected_prompt` and `_normalize_user_prompt()` to `current_turn_start_step_in_transcript()` so `/gravity-architect` auto-capture (`_maybe_auto_start_architect_capture`) anchors on the matching `USER_INPUT` even across intermediate `PLANNER_RESPONSE`/`SYSTEM_MESSAGE` steps, while preserving exact fallback behavior when `expected_prompt` is omitted or absent.
 - **Auto-Capture Hygiene & Retroactive Worktree Purge (`plugin/metrics/lifecycle.py`, `plugin/hooks/pre_invocation_metrics.py`, `plugin/metrics/collector.py`, tests):**
   - Added `source` (`"manual"` by default, `"architect_auto"` from `/gravity-architect`) to `start_active_capture()` and guarded `_maybe_auto_start_architect_capture()` against purely consultative `/gravity-architect` questions while preserving `handoff`, `spec`, `task`, and action prompts.
   - Updated `list_pending_sessions()` anti-noise filter to treat `source == "architect_auto"` without work activity as noise (while keeping explicit/manual captures intact).

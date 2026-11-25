@@ -496,7 +496,7 @@ def _maybe_auto_start_architect_capture(payload: Dict[str, Any], cleaned: str) -
         store_dir, _ = resolve_store_paths()
         brain_dir = resolve_brain_dir(payload) or default_brain_dir()
         tpath = _resolve_transcript_path(payload, brain_dir, cid)
-        start_step = current_turn_start_step_in_transcript(tpath)
+        start_step = current_turn_start_step_in_transcript(tpath, expected_prompt=cleaned)
         ws_root = resolve_workspace_root(payload)
         project = ws_root.name if ws_root else ""
         kws = _extract_label_keywords(cleaned)[:5]

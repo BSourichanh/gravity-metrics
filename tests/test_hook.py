@@ -882,6 +882,41 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertIn("record", err_md)
             self.assertIn("--update", err_md)
 
+    def test_architect_auto_capture_reactive_wakeup_anchors_on_user_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            ws = root / "ProjetWakeup"
+            ws.mkdir(parents=True)
+
+            cid = "4de96631-aaaa-bbbb-cccc-ddddeeeeffff"
+            prompt_txt = "/gravity-architect wave-1 reactive wakeup"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 53, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T08:00:10Z", "model": "gemini-4-neon", "input_tokens": 50_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
+                    {"step_index": 54, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:05:00Z", "content": f"<USER_REQUEST>\n{prompt_txt}\n</USER_REQUEST>"},
+                    {"step_index": 55, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T09:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": []},
+                    {"step_index": 132, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:06:00Z", "content": "wakeup"},
+                ],
+            )
+            out = _run_hook(
+                json.dumps({
+                    "conversationId": cid,
+                    "transcriptPath": str(tpath),
+                    "cwd": str(ws),
+                    "invocationNum": 0,
+                    "lastUserInput": f"<ADDITIONAL_METADATA>m</ADDITIONAL_METADATA>\n{prompt_txt}",
+                }),
+                store,
+                brain,
+            )
+            self.assertEqual(out, {})
+            caps = load_active_captures(store)
+            self.assertIn(cid, caps)
+            self.assertEqual(caps[cid]["start_step"], 54)
+
 
 if __name__ == "__main__":
     unittest.main()

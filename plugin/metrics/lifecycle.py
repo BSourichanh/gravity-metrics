@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import time
 from typing import Any, Dict, Iterator, List, Optional, Union
@@ -206,10 +207,27 @@ def next_step_index_in_transcript(
     return max_step + 1
 
 
+_USER_PROMPT_META_RE = re.compile(
+    r"<ADDITIONAL_METADATA>.*?(?:</ADDITIONAL_METADATA>|$)"
+    r"|<USER_SETTINGS_CHANGE>.*?(?:</USER_SETTINGS_CHANGE>|$)"
+    r"|</?USER_REQUEST>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _normalize_user_prompt(text: Optional[str]) -> str:
+    """Normalise un prompt utilisateur en retirant métadonnées/balises et en compressant les espaces."""
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r"\s+", " ", _USER_PROMPT_META_RE.sub("", text)).strip()
+
+
 def current_turn_start_step_in_transcript(
     transcript_path: Optional[Union[Path, str]],
+    *,
+    expected_prompt: Optional[str] = None,
 ) -> int:
-    """Retourne le `step_index` du dernier `USER_INPUT` non suivi d'un `PLANNER_RESPONSE` (repli `next_step_index_in_transcript`)."""
+    """Retourne le `step_index` du `USER_INPUT` courant (ancré par `expected_prompt` si fourni, sinon dernier `USER_INPUT` non suivi d'un `PLANNER_RESPONSE`)."""
     if transcript_path is None:
         return 0
     tpath = Path(transcript_path).expanduser()
@@ -234,6 +252,15 @@ def current_turn_start_step_in_transcript(
                         max_step = step_val
     except OSError:
         return 0
+
+    norm_expected = _normalize_user_prompt(expected_prompt)
+    if norm_expected:
+        for obj in reversed(entries):
+            if obj.get("type") == "USER_INPUT":
+                if _normalize_user_prompt(obj.get("content")) == norm_expected:
+                    step_val = obj.get("step_index")
+                    if isinstance(step_val, int) and not isinstance(step_val, bool):
+                        return max(0, step_val)
 
     for obj in reversed(entries):
         stype = obj.get("type")

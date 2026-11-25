@@ -270,6 +270,13 @@ def _cmd_add(args: argparse.Namespace) -> int:
 
 
 def _cmd_archive(args: argparse.Namespace) -> int:
+    from_step: Optional[int] = getattr(args, "from_step", None)
+    if from_step is not None:
+        if from_step < 0:
+            return _emit_error(args, "--from-step doit être >= 0.")
+        if bool(args.full):
+            return _emit_error(args, "--from-step est incompatible avec --full.")
+
     store_dir, history_path = resolve_store_paths(args.history, args.store)
     ws_path: Optional[Path] = args.workspace.expanduser().resolve() if args.workspace else None
     brain_dir = args.brain_dir.expanduser()
@@ -296,6 +303,7 @@ def _cmd_archive(args: argparse.Namespace) -> int:
             pricing_profile=args.profile,
             gravity_window=use_gravity_win,
             full_conversation=bool(args.full),
+            from_step=from_step,
             project=project,
             gravity_profile=gravity_profile,
             summary_only=args.summary_only,
@@ -529,6 +537,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_arch.add_argument("-n", "--note", default="", help="Note libre sur le changement testé.")
     p_arch.add_argument("--gravity-window", action="store_true", default=True, help="Mesure la fenêtre Gravity (défaut).")
     p_arch.add_argument("--full", action="store_true", help="Mesure l'ensemble de la conversation.")
+    p_arch.add_argument(
+        "--from-step",
+        type=int,
+        default=None,
+        help="Borne inférieure explicite de step_index (>= 0, incompatible avec --full).",
+    )
     p_arch.add_argument("--workspace", type=Path, default=None, help="Workspace projet pour lire nom et profil Gravity.")
     p_arch.add_argument("--profile", default="2026_nov_standard", help="Profil tarifaire.")
     p_arch.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
