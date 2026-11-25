@@ -124,6 +124,7 @@ class TestMcpServer(unittest.TestCase):
                 "metrics_get_state",
                 "metrics_get_session",
                 "metrics_archive_session",
+                "metrics_record_session",
                 "metrics_update_session_meta",
                 "metrics_ignore_session",
                 "metrics_unignore_session",
@@ -132,6 +133,11 @@ class TestMcpServer(unittest.TestCase):
                 "metrics_read_audit",
             ):
                 self.assertEqual(tools[helper_name]["_meta"]["ui"]["visibility"], ["app"])
+            arch_props = tools["metrics_archive_session"]["inputSchema"]["properties"]
+            self.assertEqual(arch_props["update_sealed"]["type"], "boolean")
+            self.assertEqual(arch_props["update"]["type"], "boolean")
+            self.assertIn("Enregistrer", tools["metrics_archive_session"]["title"])
+            self.assertIn("Enregistrer", tools["metrics_record_session"]["title"])
             self.assertIn("Audits Agents", tools["metrics_list_audits"]["title"])
             self.assertIn("audits/agents/", tools["metrics_list_audits"]["description"])
             self.assertIn("Audit Agent", tools["metrics_read_audit"]["title"])
@@ -155,7 +161,14 @@ class TestMcpServer(unittest.TestCase):
                 "ui/message",
                 "Synthèse",
                 "Sessions",
-                "À archiver",
+                "Enregistrées",
+                "À enregistrer",
+                "Enregistrer…",
+                "Mettre à jour",
+                "update-recorded-session",
+                "updateRecordedSession",
+                "Aucun projet enregistré.",
+                "enregistrement 2.0.0 — repli projet",
                 "Audits Agents",
                 "audits/agents/",
                 "Comparer",
@@ -628,6 +641,161 @@ class TestMcpServer(unittest.TestCase):
                 self.assertNotIn("[WARN UI]", r_after_reset["result"]["content"][0]["text"])
             finally:
                 _reset_host_client_state()
+                if old_env is None:
+                    os.environ.pop("GRAVITY_METRICS_HOME", None)
+                else:
+                    os.environ["GRAVITY_METRICS_HOME"] = old_env
+                if old_brain is None:
+                    os.environ.pop("ANTIGRAVITY_BRAIN_DIR", None)
+                else:
+                    os.environ["ANTIGRAVITY_BRAIN_DIR"] = old_brain
+
+    def test_r5_freshness_cache_invalidation_and_update_sealed_mcp(self) -> None:
+        from unittest import mock  # noqa: E402
+        from mcp import server as mcp_server  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            history_path = store / "data" / "history.jsonl"
+
+            cid_rec = "88888888-aaaa-bbbb-cccc-000000000008"
+            cid_pend = "99999999-aaaa-bbbb-cccc-000000000009"
+
+            rec_entries = [
+                {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:00:00Z", "content": "/gravity-workflow build feature"},
+                {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 300, "tool_calls": [{"name": "write_file"}]},
+            ]
+            _write_transcript(brain / cid_rec, rec_entries)
+            _write_transcript(
+                brain / cid_pend,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:05:00Z", "content": "/gravity-workflow pend"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "write_file"}]},
+                ],
+            )
+
+            # 1) Cache polling invalidation when subagents/*.json and tasks/task-*.log evolve
+            sig_before = mcp_server._compute_pending_source_sig(brain, store, history_path)
+            sub_dir = brain / cid_pend / ".system_generated" / "subagents"
+            sub_dir.mkdir(parents=True, exist_ok=True)
+            (sub_dir / "sub-1.json").write_text(json.dumps({"conversationId": "sub-1"}), encoding="utf-8")
+            sig_after_sub = mcp_server._compute_pending_source_sig(brain, store, history_path)
+            self.assertNotEqual(sig_before, sig_after_sub)
+
+            tasks_dir = brain / cid_pend / ".system_generated" / "tasks"
+            tasks_dir.mkdir(parents=True, exist_ok=True)
+            (tasks_dir / "task-1.log").write_text("- [agent:builder] DONE\n", encoding="utf-8")
+            sig_after_task = mcp_server._compute_pending_source_sig(brain, store, history_path)
+            self.assertNotEqual(sig_after_sub, sig_after_task)
+
+            # 2) Enregistrement initial via metrics_record_session
+            res_init = _call_mcp_stdio(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "metrics_record_session", "arguments": {"conversation_id": cid_rec[:8], "label": "fresh-run", "project": "ProjFresh"}}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "metrics_get_session", "arguments": {"target": "fresh-run"}}},
+                ],
+                store,
+                brain,
+            )
+            by_id = {r["id"]: r["result"] for r in res_init}
+            self.assertFalse(by_id[1]["isError"])
+            self.assertEqual(by_id[1]["structuredContent"]["recorded"]["label"], "fresh-run")
+            self.assertFalse(by_id[2]["structuredContent"]["freshness"]["has_new_activity"])
+            self.assertEqual(by_id[2]["structuredContent"]["freshness"]["new_llm_calls_delta"], 0)
+            raw_hist_before = history_path.read_text(encoding="utf-8")
+
+            # 3) Fast-path stat() skips _get_transcript_index when transcript mtime < archived_at
+            tpath_rec = brain / cid_rec / ".system_generated" / "logs" / "transcript.jsonl"
+            old_stat_rec = {
+                "conversation_id": cid_rec,
+                "ended_at": "2026-11-25T10:00:10Z",
+                "archived_at": "2099-01-01T00:00:00Z",
+                "root_last_step_index": 1,
+            }
+            with mock.patch.object(mcp_server, "_get_transcript_index", side_effect=AssertionError("fast-path should skip")) as _:
+                fast_fresh = mcp_server._compute_recorded_freshness(old_stat_rec, brain)
+                self.assertFalse(fast_fresh["has_new_activity"])
+                self.assertEqual(fast_fresh["new_llm_calls_delta"], 0)
+
+            # 4) Ajout d'un tour /gravity-metrics (ignoré) + 2 nouveaux PLANNER_RESPONSE hors /gravity-metrics
+            _write_transcript(
+                brain / cid_rec,
+                rec_entries
+                + [
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:01:00Z", "content": "/gravity-metrics"},
+                    {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:01:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_metrics_dashboard"}]},
+                    {"step_index": 4, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T10:02:00Z", "content": "Ajoute les tests"},
+                    {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:02:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 6_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "write_file"}]},
+                    {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T10:02:20Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 4_000, "cache_read_tokens": 0, "output_tokens": 150, "tool_calls": []},
+                ],
+            )
+            self.assertTrue(tpath_rec.is_file())
+
+            res_poll = _call_mcp_stdio(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "metrics_get_state", "arguments": {}}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "metrics_get_session", "arguments": {"target": "fresh-run"}}},
+                ],
+                store,
+                brain,
+            )
+            by_poll = {r["id"]: r["result"] for r in res_poll}
+            rec_state = by_poll[1]["structuredContent"]["records"][0]
+            self.assertTrue(rec_state["has_new_activity"])
+            self.assertEqual(rec_state["new_llm_calls_delta"], 2)
+            self.assertEqual(by_poll[2]["structuredContent"]["freshness"], {"has_new_activity": True, "new_llm_calls_delta": 2})
+            # history.jsonl strictement non muté lors des lectures
+            self.assertEqual(history_path.read_text(encoding="utf-8"), raw_hist_before)
+
+            # 5) Mise à jour via metrics_archive_session(update_sealed=True) sans doublon
+            res_upd = _call_mcp_stdio(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "metrics_archive_session", "arguments": {"conversation_id": cid_rec[:8], "label": "fresh-run", "update_sealed": True}}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "metrics_get_session", "arguments": {"target": "fresh-run"}}},
+                ],
+                store,
+                brain,
+            )
+            by_upd = {r["id"]: r["result"] for r in res_upd}
+            self.assertFalse(by_upd[1]["isError"])
+            self.assertTrue(by_upd[1]["structuredContent"]["updated_sealed"])
+            self.assertEqual(len(by_upd[1]["structuredContent"]["records"]), 1)
+            self.assertFalse(by_upd[1]["structuredContent"]["records"][0]["has_new_activity"])
+            self.assertEqual(by_upd[1]["structuredContent"]["records"][0]["new_llm_calls_delta"], 0)
+            self.assertGreater(by_upd[1]["structuredContent"]["records"][0]["llm_calls"], 1)
+            self.assertFalse(by_upd[2]["structuredContent"]["freshness"]["has_new_activity"])
+
+            # 6) Détection nouveau subagents/*.json post-archived_at même sans nouveau PLANNER_RESPONSE
+            rec_sub_dir = brain / cid_rec / ".system_generated" / "subagents"
+            rec_sub_dir.mkdir(parents=True, exist_ok=True)
+            (rec_sub_dir / "child-late.json").write_text(
+                json.dumps({"conversationId": "child-late", "spawnStepIndex": 99}),
+                encoding="utf-8",
+            )
+            res_sub = _call_mcp_stdio(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "metrics_get_state", "arguments": {}}},
+                ],
+                store,
+                brain,
+            )
+            self.assertTrue(res_sub[0]["result"]["structuredContent"]["records"][0]["has_new_activity"])
+
+            # 7) Vérification _fast_unchanged_signature invalidation directe en mémoire
+            old_env = os.environ.get("GRAVITY_METRICS_HOME")
+            old_brain = os.environ.get("ANTIGRAVITY_BRAIN_DIR")
+            try:
+                os.environ["GRAVITY_METRICS_HOME"] = str(store)
+                os.environ["ANTIGRAVITY_BRAIN_DIR"] = str(brain)
+                mcp_server._STATE_CACHE.clear()
+                snap1 = mcp_server._load_state_snapshot(store, history_path)
+                self.assertEqual(mcp_server._fast_unchanged_signature(store, history_path, snap1["signature"]), snap1["signature"])
+                (tasks_dir / "task-2.log").write_text("- [agent:reviewer] PASS\n", encoding="utf-8")
+                self.assertIsNone(mcp_server._fast_unchanged_signature(store, history_path, snap1["signature"]))
+            finally:
+                mcp_server._STATE_CACHE.clear()
                 if old_env is None:
                     os.environ.pop("GRAVITY_METRICS_HOME", None)
                 else:

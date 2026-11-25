@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Session Freshness & In-Place MCP/UI Updates (`R5` in `plugin/mcp/server.py`, `plugin/mcp/ui/app_js.py`):**
+  - Extended `_compute_pending_source_sig`, `_compute_hist_source_sig`, and `_fast_unchanged_signature` to include `subagents/*.json`, `tasks/task-*.log`, and recorded transcript `stat()` tokens so polling invalidates immediately on child or post-record activity.
+  - Added pure in-memory `_compute_recorded_freshness(rec, brain_dir)` (stat fast-path vs `archived_at`/`ended_at`, then RAM-cached `_get_transcript_index`, counting post-`ended_at` / `root_last_step_index` `PLANNER_RESPONSE` calls outside `/gravity-metrics` plus post-`archived_at` `subagents/*.json` / `tasks/task-*.log` files) and enriched `records` copies in `_load_state_snapshot` and `metrics_get_session` (`freshness`) without mutating `history.jsonl`.
+  - Added `update_sealed` / `update` boolean parameters to `metrics_archive_session`, registered canonical alias `metrics_record_session` in `_TOOL_DISPATCH` and `_tool_definitions`, and added the **« Mettre à jour »** action button (`updateRecordedSession`) plus discrete `+N appels` / `MAJ` indicators in the widget detail and `Enregistrées` list.
+- **Native 4-Phase Detection & `record` Lifecycle (`R1–R4` in `plugin/metrics/`, `plugin/hooks/`, `plugin/scripts/cli.py`):**
+  - Added `current_turn_start_step_in_transcript()` (`lifecycle.py`) for `/gravity-architect` auto-capture anchoring, `±2` step deduplication (`find_archived_session`, `upsert_session`, `resolve_sealed_update_target`), `/swarm` + `subagents/*.json` + direct non-studio edit detection for `Production`, and double-quoted `CommandLine` unescaping + `audit_ecosystem.py` / `ecosystem_install.py` / `git ... push` detection for `Vérification & Push`.
+  - Added `cli.py record` (with `archive` alias), `--update` (with `--update-sealed` alias), `record_conversation` export (`metrics/__init__.py`), and `Clôture / Enregistrée` milestone wording.
+
+### Changed
+- **UI, Manifest & Docs Terminology (`Enregistrer`):**
+  - Switched widget labels (`app_js.py`, `charts.py`), `plugin/plugin.json` `suggestedPrompts[1]`, `plugin/rules/AGENTS.md` (`<= 600` B), `plugin/skills/gravity-metrics/SKILL.md`, `plugin/README.md`, and `README.md` from `Archiver` / `Archivées` / `À archiver` to `Enregistrer` / `Enregistrées` / `À enregistrer` while preserving `status: "archived"` on disk for ecosystem compatibility.
+
 ### Fixed
 - **False Positives `AUD-04-09` & Native Clean Termination (`plugin/metrics/collector.py`, `plugin/metrics/store.py`, `plugin/scripts/cli.py`, `plugin/hooks/pre_invocation_metrics.py`):**
   - `AUD-04-09a`: added `--self-archiving` / `self_archiving` propagation across `cli.py`, `pre_invocation_metrics.py`, `store.py`, and `parse_agent_transcript()` so self-archival from the active root session (`cli.py archive` / `add`) no longer flags `clean_termination=False` (`Interrompu`).

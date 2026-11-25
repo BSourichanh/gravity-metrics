@@ -392,6 +392,10 @@ class TestValidateHardening(unittest.TestCase):
             report_ok = self._run_validate_fast(plugin_dir)
             self.assertTrue(report_ok.ok(strict=True), report_ok.errors + report_ok.warnings)
 
+    def test_w3_real_plugin_strict_passes(self) -> None:
+        report = self._run_validate_fast(PLUGIN_ROOT)
+        self.assertTrue(report.ok(strict=True), report.errors + report.warnings)
+
 
 if __name__ == "__main__":
     unittest.main()

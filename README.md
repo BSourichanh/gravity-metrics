@@ -79,13 +79,13 @@ agy plugin install ./plugin
 ### Commands (`/gravity-metrics` & CLI)
 
 - **`/gravity-metrics`** *(bare)*: opens the interactive dashboard in **read-only** mode (`view="overview"`, zero history mutation).
-- **`/gravity-metrics start [label]`** *(and auto-capture on `/gravity-architect <instruction>`)*: starts an explicit capture window in `active_captures.json` (**0 LLM tokens**; `/gravity-architect` excluding `init|add|sync|status|archive|audit` auto-starts `architect-<slug>` idempotently without overwriting an existing capture).
-- **`/gravity-metrics stop [label]`** *(alias `finish`, or `/gravity-metrics <label> [-n "note"] [--full] [--force]`)*: seals `[start_step .. current]`, archives immutably (`--full` deduplicated; pass `--force` to overwrite), and opens `detail`.
-- **`/gravity-metrics archive <uuid_or_prefix> [label] [--full] [--force]`**: archives a specific session.
-- **`/gravity-metrics pending [--project <name>]`**: lists unarchived root Gravity sessions with work activity (`view="pending"`, hiding consultative noise by default; use `cli.py pending --all` to include all sessions).
+- **`/gravity-metrics start [label]`** *(and auto-capture on `/gravity-architect <instruction>`)*: starts an explicit capture window in `active_captures.json` (**0 LLM tokens**; `/gravity-architect` excluding `init|add|sync|status|archive|audit` auto-starts `architect-<slug>` anchored on the current turn idempotently without overwriting an existing capture).
+- **`/gravity-metrics stop [label]`** *(alias `finish`, or `/gravity-metrics <label> [-n "note"] [--full] [--update] [--force]`)*: seals `[start_step .. current]`, records immutably (`--full` deduplicated; pass `--update` / `--force` to refresh), and opens `detail`.
+- **`/gravity-metrics record <uuid_or_prefix> [label] [--full] [--update] [--force]`** *(aliases `archive`, `--update-sealed`)*: records or updates a specific session.
+- **`/gravity-metrics pending [--project <name>]`**: lists unrecorded root Gravity sessions with work activity (`view="pending"`, hiding consultative noise by default; use `cli.py pending --all` to include all sessions).
 - **`SessionStart` hook (`session_start_metrics.py`)**: records `(conversation_id → cwd, project)` into `session_meta.json` (ignoring subagent worktrees under `/.gemini/antigravity/worktrees/`).
-- **End-of-cycle archival & `--update-sealed`**: `cli.py archive <uuid_or_prefix> --update-sealed` / `cli.py add <uuid_or_prefix> --update-sealed` refreshes an already-sealed window (e.g. after a final `git push`) directly without live `bridge.db` reads or blocking. (`/gravity-architect archive <slug>` remains a passive milestone signal without premature `PreInvocation` archival.)
-- **4 automatic milestones (0 tokens)**: `Conception` → `Production` → `Vérification & Push` → `Clôture / Archivé` (2-milestone fallback `Production → Clôture` in single-repo sessions), with per-phase cost/token breakdown.
+- **End-of-cycle recording & `--update` (`--update-sealed`)**: `cli.py record <uuid_or_prefix> --update` / `cli.py add <uuid_or_prefix> --update` (aliases `archive`, `--update-sealed`, optional `--self-archiving`) refreshes an already-sealed window (e.g. after a final `git push`) without duplicates. (`/gravity-architect archive <slug>` remains a passive milestone signal without premature `PreInvocation` recording.)
+- **4 automatic milestones (0 tokens)**: `Conception` → `Production` (activated by `/swarm`, production subagents, `run_workflow`, and direct non-studio edits) → `Vérification & Push` → `Clôture / Enregistrée` (2-milestone fallback `Production → Clôture` in single-repo sessions), with per-phase cost/token breakdown.
 - **Pricing, Reliability & Cold-Cache Observability**: catalog aliases for `gemini-pro-orchestrator-neon*` and `gemini-flash-worker-agy*` (`2026_nov_standard` & `2027_standard`), `[fallback]` / `unmatched_models` warnings in `cli.py inspect`, separated anomaly counters (`total_error_steps`, `total_invalid_steps`, `total_shell_nonzero_steps`, `total_anomalies`), and `efficiency_and_waste.cold_cache_waste` tracking in CLI & Markdown reports.
 
 ### Sober 3-Space MCP App Widget (`transition-mcp` → `gravity`)
@@ -95,8 +95,8 @@ Open anytime with **zero LLM tokens** from the **left sidebar (`Gravity Metrics`
 - **3 Spaces:**
   1. **`Synthèse` (`overview`):** 4 KPIs (cumulative/avg cost, avg cache/savings, sessions/agents, health/alerts), project distribution (`>= 2` projects), chronological SVG evolution (`started_at`), HTML/CSS category bars, and 5 latest sessions.
   2. **`Sessions` (`sessions` / `pending` / `compare`):**
-     - `Archivées`: Master-Detail (`>= 920px` 280px sidebar with search/model/alerts/sort; `< 920px` quick bar), inline metadata editing (`metrics_update_session_meta`), milestones & read-only historical Bridge badges/trees (`#01–#04`), HTML/CSS workspace bars.
-     - `À archiver`: `En cours` vs `Terminée`, milestone badges, inline **`Archiver…`** drawer (Label, Project, Note, Window vs Full), and **`Ignorer`** / *Masquées* filter (`ignored.json`).
+     - `Enregistrées`: Master-Detail (`>= 920px` 280px sidebar with search/model/alerts/sort; `< 920px` quick bar), `enregistrée` pill, discrete `+N appels` / `MAJ` freshness indicator when post-record activity exists, **`Mettre à jour`** button on every recorded session (`update_sealed: true`), inline metadata editing (`metrics_update_session_meta`), milestones & read-only historical Bridge badges/trees (`#01–#04`), HTML/CSS workspace bars.
+     - `À enregistrer`: `En cours` vs `Terminée`, milestone badges, inline **`Enregistrer…`** drawer (Label, Project, Note, Window vs Full), and **`Ignorer`** / *Masquées* filter (`ignored.json`).
      - `Comparer`: dedicated first-level A vs B comparator preserved across polls.
   3. **`Audits Agents` (`audits`):** separated by a visual divider, dedicated **`Index & Matrice`** button (`README.md` excluded from list/counter/session links), `_TEMPLATE.md`/`_*` and `audits/code/` excluded, colored canonical verdict extraction (`PASS`, `PARTIAL`, `FAIL`, `UNTESTED`, `WARN`, `BLOQUANT`, `OK`, `KO`), `74ch` anti-XSS Markdown reader (`h1..h6`, callouts, nested lists).
 - **Incremental JS & `< 5 ms` Unchanged Polls:** `(mtime_ns, size)` caching in `collector.py` + separate source signature pre-checks (`hist_sig`, `pending_sig`, `audits_sig`) in `server.py`.
@@ -106,10 +106,10 @@ Open anytime with **zero LLM tokens** from the **left sidebar (`Gravity Metrics`
 | Surface | Visibility | Purpose |
 |---|---|---|
 | `open_metrics_dashboard` | `model`, `app` | Opens the widget (`aux_pane` / `global`) with optional `project`, `target`, `view` |
-| `metrics_get_state` | `app` | Fast signature-gated poll returning `records`, `by_project`, `pending_sessions`, `ignored_sessions`, `index_audit`, `audit_links_by_session` |
-| `metrics_get_session` | `app` | Loads detailed JSON session metrics (`reports/<slug>.json` or live recompute) |
-| `metrics_archive_session` | `app` | Archives a pending session (supports `label`, `project`, `note`, `full`, `force`) |
-| `metrics_update_session_meta` | `app` | Updates `label`, `project`, or `note` on an archived session without mutating financial metrics |
+| `metrics_get_state` | `app` | Fast signature-gated poll returning `records` (with `has_new_activity` / `new_llm_calls_delta`), `by_project`, `pending_sessions`, `ignored_sessions`, `index_audit`, `audit_links_by_session` |
+| `metrics_get_session` | `app` | Loads detailed JSON session metrics (`reports/<slug>.json` or live recompute) and `freshness` |
+| `metrics_archive_session` / `metrics_record_session` | `app` | Records or updates (`update_sealed`/`update`) a session (supports `label`, `project`, `note`, `full`, `force`, `update_sealed`) |
+| `metrics_update_session_meta` | `app` | Updates `label`, `project`, or `note` on a recorded session without mutating financial metrics |
 | `metrics_ignore_session` / `metrics_unignore_session` | `app` | Hides or restores a pending session via `ignored.json` |
 | `metrics_remove_session` | `app` | Removes a session from history (with optional `purge_reports`) |
 | `metrics_list_audits` / `metrics_read_audit` | `app` | Read-only `.md` discovery in `audits/agents/` (`index_audit` separated, 256 KiB cap) |
@@ -135,8 +135,8 @@ Workflow profile lookup reads `$GRAVITY_HOME/workflow/workspaces/<hash>/profile.
 python plugin/scripts/cli.py start <uuid_or_prefix> [-l "my-run"] [--step N]
 python plugin/scripts/cli.py list
 python plugin/scripts/cli.py pending [--all]
-python plugin/scripts/cli.py add --latest -l "my-run" -n "Short note" [--update-sealed]
-python plugin/scripts/cli.py archive <uuid_or_prefix> -l "my-run" [--update-sealed]
+python plugin/scripts/cli.py add --latest -l "my-run" -n "Short note" [--update]
+python plugin/scripts/cli.py record <uuid_or_prefix> -l "my-run" [--update]  # alias: archive, --update-sealed
 python plugin/scripts/cli.py inspect <label_or_uuid>
 python plugin/scripts/cli.py remove <label_or_uuid> --purge-reports
 

@@ -55,6 +55,7 @@ APP_JS = r"""
     detail: null,
     detailSlug: "",
     detailMdUri: "",
+    detailFreshness: null,
     detailLoading: false,
     detailCache: {},
     compareTargetA: "",
@@ -73,6 +74,7 @@ APP_JS = r"""
     confirmDeleteTarget: "",
     confirmPurge: true,
     archivingCid: "",
+    updatingTarget: "",
     toast: null,
     loading: true,
     pollInFlight: false,
@@ -273,11 +275,13 @@ APP_JS = r"""
   function cacheDetailPayload(target, sc) {
     if (!sc || !sc.detail) return;
     const keys = [target, sc.detail.label, sc.detail.root_conversation_id].filter(Boolean);
+    const freshness = sc.freshness && typeof sc.freshness === "object" ? sc.freshness : null;
     keys.forEach((k) => {
       state.detailCache[String(k)] = {
         detail: sc.detail,
         slug: String(sc.slug || ""),
-        reportMdUri: String(sc.report_md_uri || "")
+        reportMdUri: String(sc.report_md_uri || ""),
+        freshness: freshness
       };
     });
   }
@@ -299,7 +303,7 @@ APP_JS = r"""
       const projLabel = state.scope === "project" && state.selectedProject
         ? " · " + state.selectedProject
         : " · tous projets";
-      subEl.textContent = state.records.length + " archivée(s) · " + state.pendingSessions.length + " en attente" + projLabel;
+      subEl.textContent = state.records.length + " enregistrée(s) · " + state.pendingSessions.length + " en attente" + projLabel;
     }
     const sessBadge = document.querySelector('[data-badge="sessions"]');
     if (sessBadge) {
@@ -389,11 +393,13 @@ APP_JS = r"""
           state.detail = sc.initial_detail;
           state.detailSlug = String(sc.initial_detail_slug || "");
           state.detailMdUri = String(sc.initial_detail_md_uri || "");
+          state.detailFreshness = null;
           state.detailLoading = false;
           cacheDetailPayload(initTarget, {
             detail: state.detail,
             slug: state.detailSlug,
-            report_md_uri: state.detailMdUri
+            report_md_uri: state.detailMdUri,
+            freshness: null
           });
         } else {
           openSessionDetail(initTarget, true);
@@ -464,6 +470,7 @@ APP_JS = r"""
               state.detail = detSc.detail;
               state.detailSlug = String(detSc.slug || "");
               state.detailMdUri = String(detSc.report_md_uri || "");
+              state.detailFreshness = detSc.freshness && typeof detSc.freshness === "object" ? detSc.freshness : null;
               cacheDetailPayload(state.detailTarget, detSc);
               render();
             }
@@ -511,6 +518,7 @@ APP_JS = r"""
       state.detail = cached.detail;
       state.detailSlug = cached.slug;
       state.detailMdUri = cached.reportMdUri;
+      state.detailFreshness = cached.freshness || null;
       state.detailLoading = false;
       render();
       return;
@@ -528,6 +536,7 @@ APP_JS = r"""
       state.detail = loaded.detail;
       state.detailSlug = loaded.slug;
       state.detailMdUri = loaded.reportMdUri;
+      state.detailFreshness = loaded.freshness || null;
     } catch (err) {
       showToast(err.message, true);
     } finally {
@@ -706,7 +715,7 @@ APP_JS = r"""
         force: false
       });
       if (res && res.isError) {
-        const errMsg = (res.content && res.content[0] && res.content[0].text) || "Archivage refusé";
+        const errMsg = (res.content && res.content[0] && res.content[0].text) || "Enregistrement refusé";
         throw new Error(errMsg);
       }
       const sc = extractStructured(res);
@@ -716,8 +725,8 @@ APP_JS = r"""
         const lbl = (sc.archived && sc.archived.label) || cid.slice(0, 8);
         showToast(
           sc.already_archived
-            ? "Session « " + lbl + " » déjà archivée (immuable)."
-            : "Session « " + lbl + " » archivée.",
+            ? "Session « " + lbl + " » déjà enregistrée (immuable)."
+            : "Session « " + lbl + " » enregistrée.",
           false
         );
       }
@@ -725,6 +734,53 @@ APP_JS = r"""
       showToast(err.message, true);
     } finally {
       state.archivingCid = "";
+      render();
+    }
+  }
+
+  async function updateRecordedSession(target) {
+    if (!target || !state.hostCaps.serverTools || state.updatingTarget) return;
+    const rec = state.records.find((r) => r.label === target || r.conversation_id === target) || {};
+    const d = state.detail && (state.detail.label === target || state.detail.root_conversation_id === target)
+      ? state.detail
+      : null;
+    const cid = String(rec.conversation_id || (d && d.root_conversation_id) || "").trim();
+    if (!cid) {
+      showToast("Identifiant de conversation introuvable pour cette session.", true);
+      return;
+    }
+    const lbl = String(rec.label || (d && d.label) || target || "").trim();
+    const proj = String(rec.project || (d && d.project) || "").trim();
+    const note = String(rec.note || "").trim();
+    const winMode = String(rec.window_mode || (d && d.window && d.window.mode) || "");
+    state.updatingTarget = lbl || cid;
+    render();
+    try {
+      const res = await callServerTool("metrics_archive_session", {
+        conversation_id: cid,
+        label: lbl,
+        project: proj,
+        note: note,
+        full: winMode === "full_conversation",
+        update_sealed: true
+      });
+      if (res && res.isError) {
+        const errMsg = (res.content && res.content[0] && res.content[0].text) || "Mise à jour refusée";
+        throw new Error(errMsg);
+      }
+      const sc = extractStructured(res);
+      state.detailCache = {};
+      if (sc) {
+        hydrateFromStatePayload(sc, false);
+        const savedLbl = (sc.archived && sc.archived.label) || lbl || cid.slice(0, 8);
+        state.detailTarget = savedLbl;
+        await openSessionDetail(savedLbl, false);
+        showToast("Session « " + savedLbl + " » mise à jour.", false);
+      }
+    } catch (err) {
+      showToast("Erreur mise à jour : " + err.message, true);
+    } finally {
+      state.updatingTarget = "";
       render();
     }
   }
@@ -754,7 +810,7 @@ APP_JS = r"""
       }
       const sc = extractStructured(res);
       if (sc) hydrateFromStatePayload(sc, false);
-      showToast("Session restaurée dans À archiver.", false);
+      showToast("Session restaurée dans À enregistrer.", false);
     } catch (err) {
       showToast(err.message, true);
     }
@@ -1019,7 +1075,7 @@ APP_JS = r"""
       '<div class="brand">' +
       '<span class="brand-dot" title="Synchronisation 0 token"></span>' +
       '<div><div class="brand-title">Gravity Metrics</div>' +
-      '<div class="brand-sub">' + esc(state.records.length) + ' archivée(s) · ' + esc(pendCount) + ' en attente' + esc(projNote) + '</div>' +
+      '<div class="brand-sub">' + esc(state.records.length) + ' enregistrée(s) · ' + esc(pendCount) + ' en attente' + esc(projNote) + '</div>' +
       '</div></div>' +
       '<div class="controls">' + projSelect + tariffHtml + openGlobalMdBtn + refreshBtn + '</div>' +
       '</div>' +
@@ -1075,8 +1131,8 @@ APP_JS = r"""
     let pendBanner = "";
     if (state.pendingSessions.length) {
       pendBanner = '<div class="banner-info">' +
-        '<span><strong>' + state.pendingSessions.length + ' session(s)</strong> en attente d’archivage.</span>' +
-        '<button type="button" class="btn sm primary" data-action="open-pending">Voir À archiver →</button>' +
+        '<span><strong>' + state.pendingSessions.length + ' session(s)</strong> en attente d’enregistrement.</span>' +
+        '<button type="button" class="btn sm primary" data-action="open-pending">Voir À enregistrer →</button>' +
         '</div>';
     }
 
@@ -1130,7 +1186,7 @@ APP_JS = r"""
         ? '<div class="table-wrap"><table><thead><tr>' +
           '<th>Date</th><th>Session</th><th>Mode</th><th class="num">Coût</th><th class="num">Cache %</th><th class="num">Appels</th><th>Santé</th>' +
           '</tr></thead><tbody>' + recentRows + '</tbody></table></div>'
-        : '<div class="empty">Aucune session archivée. Lancez <code>/gravity-metrics stop</code> ou archivez depuis <strong>Sessions → À archiver</strong>.</div>') +
+        : '<div class="empty">Aucune session enregistrée. Lancez <code>/gravity-metrics stop</code> ou enregistrez depuis <strong>Sessions → À enregistrer</strong>.</div>') +
       '</div>';
 
     return pendBanner + kpis + projectPanel + charts + recentPanel;
@@ -1143,14 +1199,14 @@ APP_JS = r"""
 
     const topBar = '<div class="panel">' +
       '<div class="panel-head">' +
-      '<span class="panel-title">' + (state.showIgnoredPending ? 'Sessions masquées (' + ignoredList.length + ')' : 'Sessions en attente d’archivage (' + activeList.length + ')') + '</span>' +
+      '<span class="panel-title">' + (state.showIgnoredPending ? 'Sessions masquées (' + ignoredList.length + ')' : 'Sessions en attente d’enregistrement (' + activeList.length + ')') + '</span>' +
       '<div class="controls">' +
       '<button type="button" class="btn sm' + (state.showIgnoredPending ? ' primary' : '') + '" data-action="toggle-ignored-pending">' +
       (state.showIgnoredPending ? 'Voir actives (' + activeList.length + ')' : 'Masquées (' + ignoredList.length + ')') +
       '</button>' +
       '</div></div>' +
       (!useList.length
-        ? '<div class="empty">' + (state.showIgnoredPending ? 'Aucune session masquée.' : 'Aucune session Gravity en attente d’archivage.') + '</div>'
+        ? '<div class="empty">' + (state.showIgnoredPending ? 'Aucune session masquée.' : 'Aucune session Gravity en attente d’enregistrement.') + '</div>'
         : '') +
       '</div>';
 
@@ -1192,7 +1248,7 @@ APP_JS = r"""
         const actions = state.hostCaps.serverTools
           ? '<div class="controls">' +
             '<button type="button" class="btn sm primary" data-action="toggle-archive-drawer" data-cid="' + esc(cid) + '"' + (isBusy ? ' disabled' : '') + '>' +
-            (isDrawerOpen ? 'Fermer' : 'Archiver…') + '</button>' +
+            (isDrawerOpen ? 'Fermer' : 'Enregistrer…') + '</button>' +
             '<button type="button" class="btn sm" data-action="ignore-pending" data-cid="' + esc(cid) + '">Ignorer</button>' +
             '</div>'
           : '';
@@ -1211,7 +1267,7 @@ APP_JS = r"""
             '</select></label>' +
             '</div>' +
             '<div class="controls">' +
-            '<button type="button" class="btn sm primary" data-action="submit-archive-drawer" data-cid="' + esc(cid) + '"' + (isBusy ? ' disabled' : '') + '>' + (isBusy ? 'Archivage...' : 'Archiver') + '</button>' +
+            '<button type="button" class="btn sm primary" data-action="submit-archive-drawer" data-cid="' + esc(cid) + '"' + (isBusy ? ' disabled' : '') + '>' + (isBusy ? 'Enregistrement...' : 'Enregistrer') + '</button>' +
             '<button type="button" class="btn sm" data-action="cancel-archive-drawer">Annuler</button>' +
             '</div></div>';
         }
@@ -1238,14 +1294,14 @@ APP_JS = r"""
 
     return topBar +
       renderGroup("En cours", inProgress, "info") +
-      renderGroup("Terminée — prête à archiver", finished, "ok");
+      renderGroup("Terminée — prête à enregistrer", finished, "ok");
   }
 
   function renderCompareSubtab() {
     const pool = scopedRecords();
     const allRecs = (pool.length >= 2 ? pool : state.records).slice().reverse();
     if (allRecs.length < 2) {
-      return '<div class="panel"><div class="empty">Au moins 2 sessions archivées sont nécessaires pour comparer A vs B.</div></div>';
+      return '<div class="panel"><div class="empty">Au moins 2 sessions enregistrées sont nécessaires pour comparer A vs B.</div></div>';
     }
     const use2027 = effectiveTariff() === "2027";
     const keyA = state.compareTargetA || recKey(allRecs[0]);
@@ -1352,7 +1408,7 @@ APP_JS = r"""
     }
     const d = state.detail;
     if (!d) {
-      return '<div class="panel"><div class="empty">Sélectionnez une session archivée dans la liste pour afficher le détail.</div></div>';
+      return '<div class="panel"><div class="empty">Sélectionnez une session enregistrée dans la liste pour afficher le détail.</div></div>';
     }
     const s = d.summary || {};
     const c = s.cost_usd || {};
@@ -1370,9 +1426,19 @@ APP_JS = r"""
     const shownTotal = Number(actCost.total_usd || 0);
     const otherTotal = use2027 ? Number(c.total_usd || 0) : Number(p.total_usd || 0);
     const histRec = state.records.find((r) => r.label === d.label || r.conversation_id === d.root_conversation_id) || {};
+    const detFresh = state.detailFreshness && typeof state.detailFreshness === "object" ? state.detailFreshness : null;
+    const hasNew = Boolean((detFresh && detFresh.has_new_activity) || histRec.has_new_activity);
+    const newDelta = Number(
+      detFresh && detFresh.new_llm_calls_delta != null
+        ? detFresh.new_llm_calls_delta
+        : (histRec.new_llm_calls_delta || 0)
+    );
+    const updateKey = String(d.label || d.root_conversation_id || "");
+    const isUpdating = Boolean(state.updatingTarget && (state.updatingTarget === d.label || state.updatingTarget === d.root_conversation_id));
 
     let actionBtns = "";
     if (state.hostCaps.serverTools) {
+      actionBtns += '<button type="button" class="btn sm' + (hasNew ? ' primary' : '') + '" data-action="update-recorded-session" data-target="' + esc(updateKey) + '"' + (state.updatingTarget ? ' disabled' : '') + '>' + (isUpdating ? 'Mise à jour...' : 'Mettre à jour') + '</button>';
       actionBtns += '<button type="button" class="btn sm" data-action="toggle-edit-meta" data-target="' + esc(d.label) + '">Éditer</button>';
     }
     if (canUseAuxPane() && state.detailMdUri) {
@@ -1421,11 +1487,16 @@ APP_JS = r"""
         '</div></div>';
     }
 
+    const freshBadge = hasNew
+      ? '<span class="pill warn" title="Nouveaux appels ou activité détectés depuis l’enregistrement">' + (newDelta > 0 ? ('+' + fmtInt(newDelta) + ' appel' + (newDelta > 1 ? 's' : '')) : 'MAJ') + '</span>'
+      : '';
+
     const headPanel = '<div class="panel detail-head">' +
       '<div class="detail-row">' +
       '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
       '<strong style="font-size:15px;">' + esc(d.label) + '</strong>' +
-      '<span class="pill ok">archivé</span>' +
+      '<span class="pill ok">enregistrée</span>' +
+      freshBadge +
       (bridgeCount > 0 ? '<span class="pill bridge">Bridge:' + bridgeCount + '</span>' : '') +
       '</div>' +
       '<div class="controls">' + actionBtns + '</div>' +
@@ -1656,11 +1727,16 @@ APP_JS = r"""
       const bCnt = Number(r.bridge_children_count) || 0;
       const audLinks = state.auditLinksBySession[String(r.conversation_id || "")] || [];
       const tag = bCnt > 0 ? " · bridge:" + bCnt : (audLinks.length ? " · audit" : "");
+      const hasNewRec = Boolean(r.has_new_activity);
+      const newDeltaRec = Number(r.new_llm_calls_delta || 0);
+      const freshTag = hasNewRec
+        ? ' <span class="pill warn">' + (newDeltaRec > 0 ? ('+' + fmtInt(newDeltaRec) + ' app.') : 'MAJ') + '</span>'
+        : '';
       masterItems += '<button type="button" class="master-item' + (isAct ? ' active' : '') + '" data-action="open-detail" data-target="' + esc(k) + '">' +
         '<div class="master-item-top"><strong>' + esc(r.label || k) + '</strong><span>$' + recCost(r).toFixed(4) + '</span></div>' +
         '<div class="master-item-sub">' +
         '<span>' + esc(fmtDate(r)) + (r.project ? ' · ' + esc(r.project) : '') + '</span>' +
-        '<span>' + (Number(r.cache_hit_rate_pct) || 0).toFixed(0) + '% cache' + esc(tag) + '</span>' +
+        '<span>' + (Number(r.cache_hit_rate_pct) || 0).toFixed(0) + '% cache' + esc(tag) + freshTag + '</span>' +
         '</div></button>';
     });
 
@@ -1684,8 +1760,8 @@ APP_JS = r"""
     const archCount = scopedRecords().length;
     const pendCount = state.pendingSessions.length;
     const subNav = '<div class="subtabs" style="border-top:none;padding-top:0;">' +
-      '<button type="button" class="subtab-btn' + (state.sessionsSub === "archived" ? " active" : "") + '" data-action="set-sessions-sub" data-sub="archived">Archivées <span class="tab-badge">' + archCount + '</span></button>' +
-      '<button type="button" class="subtab-btn' + (state.sessionsSub === "pending" ? " active" : "") + '" data-action="set-sessions-sub" data-sub="pending">À archiver <span class="tab-badge' + (pendCount > 0 ? " warn" : "") + '" data-badge="pending">' + pendCount + '</span></button>' +
+      '<button type="button" class="subtab-btn' + (state.sessionsSub === "archived" ? " active" : "") + '" data-action="set-sessions-sub" data-sub="archived">Enregistrées <span class="tab-badge">' + archCount + '</span></button>' +
+      '<button type="button" class="subtab-btn' + (state.sessionsSub === "pending" ? " active" : "") + '" data-action="set-sessions-sub" data-sub="pending">À enregistrer <span class="tab-badge' + (pendCount > 0 ? " warn" : "") + '" data-badge="pending">' + pendCount + '</span></button>' +
       '<button type="button" class="subtab-btn' + (state.sessionsSub === "compare" ? " active" : "") + '" data-action="set-sessions-sub" data-sub="compare">Comparer</button>' +
       '</div>';
 
@@ -2030,6 +2106,11 @@ APP_JS = r"""
         };
       }
       render();
+      return;
+    }
+    if (action === "update-recorded-session") {
+      const tgt = target.getAttribute("data-target") || state.detailTarget || "";
+      if (tgt) updateRecordedSession(tgt);
       return;
     }
     if (action === "cancel-edit-meta") { state.editMetaTarget = ""; render(); return; }

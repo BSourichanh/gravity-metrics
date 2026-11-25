@@ -210,6 +210,31 @@ class TestValidateD4(unittest.TestCase):
                     Path(env["GRAVITY_METRICS_HOME"]).parent.resolve(),
                 )
 
+    def test_real_plugin_budgets_suggested_prompts_and_ui_csp(self) -> None:
+        import json as _json
+
+        rules_bytes = (PLUGIN_ROOT / "rules" / "AGENTS.md").read_bytes()
+        self.assertLessEqual(len(rules_bytes), 600)
+        self.assertFalse(rules_bytes.startswith(validate.UTF8_BOM))
+        self.assertNotIn(b"\r", rules_bytes)
+
+        skill_bytes = (PLUGIN_ROOT / "skills" / "gravity-metrics" / "SKILL.md").read_bytes()
+        self.assertLessEqual(len(skill_bytes), 6000)
+
+        manifest = _json.loads((PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8"))
+        prompts = manifest["suggestedPrompts"]
+        self.assertEqual(len(prompts), 3)
+        self.assertIn("enregistrement", prompts[1])
+        for p in prompts:
+            self.assertLessEqual(len(p), 100)
+            self.assertRegex(p, validate.SUGGESTED_PROMPT_RE)
+
+        for ui_file in (PLUGIN_ROOT / "mcp" / "ui").glob("*.py"):
+            txt = ui_file.read_text(encoding="utf-8")
+            self.assertNotIn("window.confirm", txt)
+            self.assertNotIn("http://", txt)
+            self.assertNotIn("https://", txt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,7 @@
   "repository": "https://github.com/BSourichanh/gravity-metrics.git",
   "suggestedPrompts": [
     "/gravity-metrics — Ouvrir le dashboard coûts/cache en lecture seule",
-    "/gravity-metrics pending — Lister les sessions en attente d'archivage",
+    "/gravity-metrics pending — Lister les sessions en attente d'enregistrement",
     "/gravity-metrics start — Démarrer une fenêtre de capture à 0 token"
   ],
   "author": {

@@ -36,6 +36,11 @@ from metrics import (  # noqa: E402
     unignore_session,
     update_session_metadata,
 )
+from metrics.collector import (  # noqa: E402
+    _TASK_STEP_RE,
+    _get_transcript_index,
+    _parse_iso_ts,
+)
 from mcp.widget_html import render_mcp_widget_html  # noqa: E402
 
 SERVER_NAME = "gravity-metrics"
@@ -162,13 +167,51 @@ def _history_signature(history_path: Path) -> str:
     return _stat_token(history_path)
 
 
-def _compute_hist_source_sig(store_dir: Path, history_path: Path) -> str:
+def _collect_conv_brain_stat_tokens(cdir: Path, prefix: str) -> List[str]:
+    """Collecte les tokens `stat()` de `transcript.jsonl`, `subagents/*.json` et `tasks/task-*.log`."""
+    tokens: List[str] = []
+    tp = cdir / ".system_generated" / "logs" / "transcript.jsonl"
+    if tp.is_file():
+        tokens.append(f"{prefix}:{_stat_token(tp)}")
+    sub_dir = cdir / ".system_generated" / "subagents"
+    if sub_dir.is_dir():
+        try:
+            for sp in sorted(sub_dir.iterdir(), key=lambda p: p.name):
+                if sp.is_file() and sp.suffix.lower() == ".json":
+                    tokens.append(f"{prefix}/sub/{sp.name}:{_stat_token(sp)}")
+        except OSError:
+            tokens.append(f"{prefix}/sub-err")
+    tasks_dir = cdir / ".system_generated" / "tasks"
+    if tasks_dir.is_dir():
+        try:
+            for tk in sorted(tasks_dir.iterdir(), key=lambda p: p.name):
+                if tk.is_file() and tk.name.lower().startswith("task-") and tk.suffix.lower() == ".log":
+                    tokens.append(f"{prefix}/task/{tk.name}:{_stat_token(tk)}")
+        except OSError:
+            tokens.append(f"{prefix}/task-err")
+    return tokens
+
+
+def _compute_hist_source_sig(
+    store_dir: Path,
+    history_path: Path,
+    brain_dir: Optional[Path] = None,
+    recorded_cids: Optional[List[str]] = None,
+) -> str:
     parts = [
         _stat_token(history_path),
         _stat_token(store_dir / "active_captures.json"),
         _stat_token(store_dir / "session_meta.json"),
         _stat_token(store_dir / "ignored.json"),
     ]
+    if brain_dir is not None and brain_dir.is_dir():
+        cids = recorded_cids
+        if cids is None and history_path.is_file():
+            cids = [str(r.get("conversation_id") or "").strip() for r in load_history(history_path)]
+        for cid in sorted({c for c in (cids or []) if c}):
+            cdir = brain_dir / cid
+            if cdir.is_dir():
+                parts.extend(_collect_conv_brain_stat_tokens(cdir, f"rec/{cid}"))
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
@@ -188,9 +231,7 @@ def _compute_pending_source_sig(
             for cdir in sorted(brain_dir.iterdir(), key=lambda p: p.name):
                 if not cdir.is_dir():
                     continue
-                tp = cdir / ".system_generated" / "logs" / "transcript.jsonl"
-                if tp.is_file():
-                    items.append(f"{cdir.name}:{_stat_token(tp)}")
+                items.extend(_collect_conv_brain_stat_tokens(cdir, cdir.name))
         except OSError:
             items.append("brain-err")
     return hashlib.sha256("|".join(items).encode("utf-8")).hexdigest()[:12]
@@ -342,6 +383,118 @@ def _audits_signature(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
+def _has_new_child_files(
+    cdir: Path,
+    arch_epoch: Optional[float],
+    root_last_step: Optional[int],
+) -> bool:
+    has_last_step = isinstance(root_last_step, int) and not isinstance(root_last_step, bool)
+    sub_dir = cdir / ".system_generated" / "subagents"
+    if sub_dir.is_dir():
+        try:
+            for sp in sub_dir.iterdir():
+                if not sp.is_file() or sp.suffix.lower() != ".json":
+                    continue
+                st_mtime = sp.stat().st_mtime
+                if arch_epoch is not None and st_mtime >= arch_epoch + 1.0:
+                    return True
+                if has_last_step and (arch_epoch is None or st_mtime >= arch_epoch - 1.0):
+                    try:
+                        sd = json.loads(sp.read_text(encoding="utf-8", errors="replace"))
+                    except Exception:
+                        sd = None
+                    if isinstance(sd, dict):
+                        spawn_step = sd.get("spawnStepIndex")
+                        if (
+                            isinstance(spawn_step, int)
+                            and not isinstance(spawn_step, bool)
+                            and spawn_step > root_last_step
+                        ):
+                            return True
+        except OSError:
+            pass
+    tasks_dir = cdir / ".system_generated" / "tasks"
+    if tasks_dir.is_dir():
+        try:
+            for tk in tasks_dir.iterdir():
+                if not tk.is_file() or not tk.name.lower().startswith("task-") or tk.suffix.lower() != ".log":
+                    continue
+                st_mtime = tk.stat().st_mtime
+                if arch_epoch is not None and st_mtime >= arch_epoch + 1.0:
+                    return True
+                if has_last_step and (arch_epoch is None or st_mtime >= arch_epoch - 1.0):
+                    m = _TASK_STEP_RE.match(tk.name)
+                    if m and int(m.group(1)) > root_last_step:
+                        return True
+        except OSError:
+            pass
+    return False
+
+
+def _compute_recorded_freshness(rec: Dict[str, Any], brain_dir: Path) -> Dict[str, Any]:
+    """Détecte en mémoire les appels LLM et fichiers enfants post-enregistrement (sans muter history.jsonl)."""
+    cid = str(rec.get("conversation_id") or "").strip() if isinstance(rec, dict) else ""
+    if not cid:
+        return {"has_new_activity": False, "new_llm_calls_delta": 0}
+    cdir = Path(brain_dir) / cid
+    if not cdir.is_dir():
+        return {"has_new_activity": False, "new_llm_calls_delta": 0}
+
+    raw_last_step = rec.get("root_last_step_index")
+    has_last_step = isinstance(raw_last_step, int) and not isinstance(raw_last_step, bool)
+    root_last_step: Optional[int] = raw_last_step if has_last_step else None
+
+    ended_dt = _parse_iso_ts(rec.get("ended_at"))
+    archived_dt = _parse_iso_ts(rec.get("archived_at") or rec.get("added_at"))
+    ref_dt = archived_dt or ended_dt
+    ref_epoch = ref_dt.timestamp() if ref_dt is not None else None
+    arch_epoch = (
+        archived_dt.timestamp()
+        if archived_dt is not None
+        else (ended_dt.timestamp() if ended_dt is not None else None)
+    )
+
+    has_new_children = _has_new_child_files(cdir, arch_epoch, root_last_step)
+
+    tpath = cdir / ".system_generated" / "logs" / "transcript.jsonl"
+    if not tpath.is_file():
+        return {"has_new_activity": bool(has_new_children), "new_llm_calls_delta": 0}
+    try:
+        t_mtime = tpath.stat().st_mtime
+    except OSError:
+        return {"has_new_activity": bool(has_new_children), "new_llm_calls_delta": 0}
+
+    if ref_epoch is not None and t_mtime < ref_epoch:
+        return {"has_new_activity": bool(has_new_children), "new_llm_calls_delta": 0}
+
+    tx = _get_transcript_index(tpath)
+    entries = tx.get("entries") or []
+    cutoff_dt = ended_dt or archived_dt
+    new_calls = 0
+    in_metrics_turn = False
+    for entry in entries:
+        if entry.get("is_user"):
+            in_metrics_turn = bool(entry.get("is_metrics"))
+            continue
+        if not entry.get("is_planner") or in_metrics_turn:
+            continue
+        is_post = False
+        si = entry.get("step_index")
+        if root_last_step is not None and isinstance(si, int) and not isinstance(si, bool):
+            is_post = si > root_last_step
+        elif cutoff_dt is not None:
+            edt = _parse_iso_ts(entry.get("created_at"))
+            if edt is not None and edt > cutoff_dt:
+                is_post = True
+        if is_post:
+            new_calls += 1
+
+    return {
+        "has_new_activity": bool(new_calls > 0 or has_new_children),
+        "new_llm_calls_delta": int(new_calls),
+    }
+
+
 def _load_state_snapshot(
     store_dir: Path,
     history_path: Path,
@@ -352,7 +505,19 @@ def _load_state_snapshot(
     ckey = _state_cache_key(store_dir, history_path, brain_dir)
     cached = None if force_refresh else _STATE_CACHE.get(ckey)
 
-    hist_src_sig = _compute_hist_source_sig(store_dir, history_path)
+    hist_file_sig = _history_signature(history_path)
+    raw_records: Optional[List[Dict[str, Any]]] = None
+    if cached and cached.get("history_file_sig") == hist_file_sig:
+        recorded_cids = list(cached.get("recorded_cids") or [])
+    else:
+        raw_records = load_history(history_path)
+        recorded_cids = sorted(
+            {str(r.get("conversation_id") or "").strip() for r in raw_records if r.get("conversation_id")}
+        )
+
+    hist_src_sig = _compute_hist_source_sig(
+        store_dir, history_path, brain_dir=brain_dir, recorded_cids=recorded_cids
+    )
     pending_src_sig = _compute_pending_source_sig(brain_dir, store_dir, history_path)
     audits_src_sig = _compute_audits_source_sig(hist_src_sig)
 
@@ -360,14 +525,33 @@ def _load_state_snapshot(
         hist_data = cached["hist_data"]
         hist_sig = cached["hist_sig"]
     else:
-        records = load_history(history_path)
+        base_records = raw_records if raw_records is not None else load_history(history_path)
+        records: List[Dict[str, Any]] = []
+        freshness_sig_parts: List[Any] = []
+        for r in base_records:
+            r_copy = dict(r)
+            fresh = _compute_recorded_freshness(r_copy, brain_dir)
+            r_copy["has_new_activity"] = bool(fresh["has_new_activity"])
+            r_copy["new_llm_calls_delta"] = int(fresh["new_llm_calls_delta"])
+            records.append(r_copy)
+            freshness_sig_parts.append(
+                (
+                    r_copy.get("conversation_id"),
+                    r_copy.get("label"),
+                    r_copy["has_new_activity"],
+                    r_copy["new_llm_calls_delta"],
+                )
+            )
         projects = _collect_projects(records)
         by_project = _aggregate_by_project(records)
         metrics_md_uri = _file_uri_if_exists(store_dir / "METRICS.md")
         active_captures = load_active_captures(store_dir)
-        hist_file_sig = _history_signature(history_path)
         hist_sig = hashlib.sha256(
-            f"{hist_file_sig}|{len(records)}|{json.dumps(active_captures, sort_keys=True)}".encode("utf-8")
+            (
+                f"{hist_file_sig}|{len(records)}|"
+                f"{json.dumps(active_captures, sort_keys=True)}|"
+                f"{json.dumps(freshness_sig_parts, sort_keys=True)}"
+            ).encode("utf-8")
         ).hexdigest()[:12]
         hist_data = {
             "records": records,
@@ -417,6 +601,8 @@ def _load_state_snapshot(
 
     sig = f"h:{hist_sig}|p:{pending_sig}|a:{audits_sig}"
     _STATE_CACHE[ckey] = {
+        "history_file_sig": hist_file_sig,
+        "recorded_cids": recorded_cids,
         "hist_src_sig": hist_src_sig,
         "pending_src_sig": pending_src_sig,
         "audits_src_sig": audits_src_sig,
@@ -448,13 +634,66 @@ def _fast_unchanged_signature(store_dir: Path, history_path: Path, since_sig: st
     cached = _STATE_CACHE.get(ckey)
     if not cached or cached.get("signature") != since_sig:
         return None
-    if _compute_hist_source_sig(store_dir, history_path) != cached.get("hist_src_sig"):
+    if (
+        _compute_hist_source_sig(
+            store_dir,
+            history_path,
+            brain_dir=brain_dir,
+            recorded_cids=cached.get("recorded_cids"),
+        )
+        != cached.get("hist_src_sig")
+    ):
         return None
     if _compute_pending_source_sig(brain_dir, store_dir, history_path) != cached.get("pending_src_sig"):
         return None
     if _compute_audits_source_sig(cached["hist_src_sig"]) != cached.get("audits_src_sig"):
         return None
     return str(cached["signature"])
+
+
+def _record_session_input_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "conversation_id": {
+                "type": "string",
+                "description": "UUID ou préfixe unique de la conversation à enregistrer.",
+            },
+            "label": {
+                "type": "string",
+                "description": "Label optionnel (auto-généré si omis).",
+            },
+            "project": {
+                "type": "string",
+                "description": "Nom du projet associé (optionnel, résolu automatiquement si omis).",
+            },
+            "note": {
+                "type": "string",
+                "description": "Note optionnelle.",
+            },
+            "full": {
+                "type": "boolean",
+                "description": "Mesurer toute la conversation au lieu de la fenêtre Gravity.",
+            },
+            "force": {
+                "type": "boolean",
+                "description": "Forcer le ré-enregistrement même si la session est déjà enregistrée.",
+            },
+            "update_sealed": {
+                "type": "boolean",
+                "description": "Mettre à jour une fenêtre déjà enregistrée sans doublon.",
+            },
+            "update": {
+                "type": "boolean",
+                "description": "Alias de update_sealed pour mettre à jour une session enregistrée.",
+            },
+            "profile": {
+                "type": "string",
+                "description": "Profil tarifaire (défaut: 2026_nov_standard).",
+            },
+        },
+        "required": ["conversation_id"],
+    }
 
 
 def _tool_definitions() -> List[Dict[str, Any]]:
@@ -543,42 +782,18 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "metrics_archive_session",
-            "title": "Archiver une session",
-            "description": "Analyse et archive de façon immuable une session Gravity en attente.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "conversation_id": {
-                        "type": "string",
-                        "description": "UUID ou préfixe unique de la conversation à archiver.",
-                    },
-                    "label": {
-                        "type": "string",
-                        "description": "Label optionnel (auto-généré si omis).",
-                    },
-                    "project": {
-                        "type": "string",
-                        "description": "Nom du projet associé (optionnel, résolu automatiquement si omis).",
-                    },
-                    "note": {
-                        "type": "string",
-                        "description": "Note optionnelle.",
-                    },
-                    "full": {
-                        "type": "boolean",
-                        "description": "Mesurer toute la conversation au lieu de la fenêtre Gravity.",
-                    },
-                    "force": {
-                        "type": "boolean",
-                        "description": "Forcer le ré-archivage même si la session est déjà archivée.",
-                    },
-                    "profile": {
-                        "type": "string",
-                        "description": "Profil tarifaire (défaut: 2026_nov_standard).",
-                    },
-                },
-                "required": ["conversation_id"],
+            "title": "Enregistrer / mettre à jour une session",
+            "description": "Analyse et enregistre de façon immuable (ou met à jour avec update_sealed) une session Gravity.",
+            "inputSchema": _record_session_input_schema(),
+            "_meta": {
+                "ui": {"visibility": ["app"]},
             },
+        },
+        {
+            "name": "metrics_record_session",
+            "title": "Enregistrer / mettre à jour une session",
+            "description": "Alias canonique de metrics_archive_session pour enregistrer ou mettre à jour une session Gravity.",
+            "inputSchema": _record_session_input_schema(),
             "_meta": {
                 "ui": {"visibility": ["app"]},
             },
@@ -586,13 +801,13 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         {
             "name": "metrics_update_session_meta",
             "title": "Mettre à jour les métadonnées d'une session",
-            "description": "Modifie label, projet ou note d'une session archivée sans altérer ses métriques financières.",
+            "description": "Modifie label, projet ou note d'une session enregistrée sans altérer ses métriques financières.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Label ou UUID de la session archivée.",
+                        "description": "Label ou UUID de la session enregistrée.",
                     },
                     "label": {
                         "type": "string",
@@ -616,7 +831,7 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         {
             "name": "metrics_ignore_session",
             "title": "Ignorer une session en attente",
-            "description": "Masque une conversation de la file À archiver dans ignored.json (réversible).",
+            "description": "Masque une conversation de la file À enregistrer dans ignored.json (réversible).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -638,7 +853,7 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         {
             "name": "metrics_unignore_session",
             "title": "Restaurer une session ignorée",
-            "description": "Retire une conversation de ignored.json pour la réafficher dans À archiver.",
+            "description": "Retire une conversation de ignored.json pour la réafficher dans À enregistrer.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -912,12 +1127,25 @@ def _handle_metrics_get_session(args: Dict[str, Any]) -> Dict[str, Any]:
         str(metrics.get("label") or ""), f"session-{metrics['root_conversation_id'][:8]}"
     )
     report_md_uri = _file_uri_if_exists(store_dir / "reports" / f"{resolved_slug}.md")
+    records = load_history(history_path)
+    matched_rec: Optional[Dict[str, Any]] = None
+    if records:
+        try:
+            matched_rec = records[resolve_session_index(records, target)]
+        except (KeyError, ValueError):
+            matched_rec = None
+    freshness = (
+        _compute_recorded_freshness(matched_rec, brain_dir)
+        if matched_rec is not None
+        else {"has_new_activity": False, "new_llm_calls_delta": 0}
+    )
     return _tool_ok(
         f"Détail session '{metrics['label']}' chargé.",
         {
             "detail": metrics,
             "slug": resolved_slug,
             "report_md_uri": report_md_uri,
+            "freshness": freshness,
         },
     )
 
@@ -935,6 +1163,7 @@ def _handle_metrics_archive_session(args: Dict[str, Any]) -> Dict[str, Any]:
     note = str(args.get("note") or "").strip()
     full = bool(args.get("full", False))
     force = bool(args.get("force", False))
+    update_sealed = bool(args.get("update_sealed") or args.get("update"))
     profile = str(args.get("profile") or "2026_nov_standard").strip() or "2026_nov_standard"
 
     saved_rec, _, _metrics = archive_conversation(
@@ -950,17 +1179,26 @@ def _handle_metrics_archive_session(args: Dict[str, Any]) -> Dict[str, Any]:
         full_conversation=full,
         project=project,
         force=force,
+        update_sealed=update_sealed,
     )
 
     snap = _load_state_snapshot(store_dir, history_path, force_refresh=True)
     already = bool(saved_rec.get("already_archived"))
-    msg = (
-        f"Session '{saved_rec.get('label')}' déjà archivée (immuable)."
-        if already
-        else f"Session '{saved_rec.get('label')}' archivée."
-    )
+    if already:
+        msg = f"Session '{saved_rec.get('label')}' déjà enregistrée (immuable)."
+    elif update_sealed:
+        msg = f"Session '{saved_rec.get('label')}' mise à jour."
+    else:
+        msg = f"Session '{saved_rec.get('label')}' enregistrée."
     payload = _state_payload(snap)
-    payload.update({"archived": saved_rec, "already_archived": already})
+    payload.update(
+        {
+            "archived": saved_rec,
+            "recorded": saved_rec,
+            "already_archived": already,
+            "updated_sealed": bool(update_sealed and not already),
+        }
+    )
     return _tool_ok(msg, payload)
 
 
@@ -1097,6 +1335,7 @@ _TOOL_DISPATCH = {
     "metrics_get_state": _handle_metrics_get_state,
     "metrics_get_session": _handle_metrics_get_session,
     "metrics_archive_session": _handle_metrics_archive_session,
+    "metrics_record_session": _handle_metrics_archive_session,
     "metrics_update_session_meta": _handle_metrics_update_session_meta,
     "metrics_ignore_session": _handle_metrics_ignore_session,
     "metrics_unignore_session": _handle_metrics_unignore_session,

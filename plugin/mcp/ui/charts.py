@@ -124,7 +124,7 @@ CHARTS_JS = r"""
   }
 
   function renderProjectShareBars(projRows, use2027) {
-    if (!projRows.length) return '<div class="empty">Aucun projet archivé.</div>';
+    if (!projRows.length) return '<div class="empty">Aucun projet enregistré.</div>';
     let html = '<div class="share-list">';
     projRows.forEach((p, idx) => {
       const cost = use2027 ? Number(p.cost_2027_usd || 0) : Number(p.cost_usd || 0);
@@ -209,7 +209,7 @@ CHARTS_JS = r"""
     barsHtml += '</div>';
 
     const subtitle = isFallback
-      ? '<span class="subline">archive 2.0.0 — repli projet</span>'
+      ? '<span class="subline">enregistrement 2.0.0 — repli projet</span>'
       : '<span class="subline">' + wsEntries.length + ' dossier(s) / workspace(s)</span>';
 
     return '<div class="panel"><div class="panel-head"><span class="panel-title">Répartition par Dossier / Workspace</span>' + subtitle + '</div>' +
