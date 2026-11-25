@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Canonical Workspace Resolution, Technical Signals & Full `--json` CLI (`plugin/metrics/workspace_resolver.py`, `plugin/metrics/technical_signals.py`, `plugin/metrics/collector.py`, `plugin/metrics/history.py`, `plugin/scripts/cli.py`, `tests/test_technical_and_workspace.py`):**
+  - Added `workspace_resolver.py` (`resolve_agent_workspace`, `normalize_worktree_path`, `classify_workspace_kind`) with 5-tier priority resolution (`bridge_workspace` > write/shell `cd`/`git -C` > read outside `root_workspace` `specs/`/`tasks/` > non-inherit `workspaceUris` > `root_workspace`), worktree normalization (`gravity-worktrees/<repo>-wN`, `.gemini/antigravity/worktrees/<repo>-*`, `.worktrees/<repo>-*`), and `"atelier"` vs `"code"` classification.
+  - Added `technical_signals.py` (`extract_technical_signals`, `aggregate_technical_signals`, `TechnicalSignalAccumulator`) computing `thinking_{calls,chars,est_tokens}`, `compaction_count` (`ctx < 0.55 * prev_ctx` with `prev_ctx > 40k` or `/compact`), and bounded step latencies (`latency_{avg,p50,p95}_ms`), exposed in `reports/<slug>.json` and `history.jsonl` (`thinking_est_tokens`, `compaction_count`, `latency_p95_ms`, `workspace_kinds`) while preserving all legacy fields and shrinking `collector.py` line count.
+  - Added `--json` support across all `cli.py` subcommands (`start`, `add`, `record`/`archive`, `pending`, `list`, `inspect`, `remove`) plus new `update-meta`, `ignore`, and `unignore` subcommands.
+
 ### Fixed
 - **`/swarm` Clean Termination, Reviewer Classification & POSIX Worktree Filtering (`ACT-05-02` in `plugin/metrics/collector.py`, `plugin/metrics/pricing.py`, `plugin/hooks/session_start_metrics.py`):**
   - Added `_has_clean_terminal_tool_call()` (`finish`, `post_message`, `swarm_wait`) and `trailing_after_planner` tracking in `parse_agent_transcript()` (plus `subagent_state` propagation from `collect_run_metrics()`) so `/swarm` workers finishing via `post_message` + `swarm_wait` with consecutive clean `GENERIC(DONE)` steps are no longer marked `INTERRUPTED` even when `subagent_state == "SUBAGENT_STATE_KILLED"`.

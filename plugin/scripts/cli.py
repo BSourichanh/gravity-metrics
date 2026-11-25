@@ -19,9 +19,11 @@ from metrics import (  # noqa: E402
     collect_run_metrics,
     default_brain_dir,
     history_lock,
+    ignore_session,
     list_gravity_conversations,
     list_pending_sessions,
     load_history,
+    load_ignored_sessions,
     load_session_for_inspect,
     next_step_index_in_transcript,
     read_gravity_profile_summary,
@@ -33,6 +35,8 @@ from metrics import (  # noqa: E402
     resolve_conversation_id_in_brain,
     resolve_store_paths,
     start_active_capture,
+    unignore_session,
+    update_session_metadata,
 )
 
 DEFAULT_CATALOG_PATH = PLUGIN_ROOT / "config" / "pricing_catalog.json"
@@ -110,27 +114,35 @@ def _print_archived_summary(
     print(f"     Historique global: {store_dir / 'METRICS.md'}" + reports_msg)
 
 
+def _emit_json(payload: object) -> None:
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def _emit_error(args: argparse.Namespace, msg: str, code: int = 1) -> int:
+    if getattr(args, "json", False):
+        _emit_json({"ok": False, "error": str(msg)})
+    else:
+        print(f"[ERREUR] {msg}", file=sys.stderr)
+    return code
+
+
 def _cmd_start(args: argparse.Namespace) -> int:
     store_dir, _ = resolve_store_paths(args.history, args.store)
     brain_dir = args.brain_dir.expanduser()
     cid = str(args.cid or "").strip()
     if not cid:
-        print("[ERREUR] Identifiant de conversation vide.", file=sys.stderr)
-        return 1
+        return _emit_error(args, "Identifiant de conversation vide.")
 
     if brain_dir.is_dir():
         try:
             cid = resolve_conversation_id_in_brain(cid, brain_dir)
         except ValueError as exc:
-            print(f"[ERREUR] {exc}", file=sys.stderr)
-            return 1
+            return _emit_error(args, str(exc))
         except FileNotFoundError as exc:
             if args.step is None:
-                print(f"[ERREUR] {exc}", file=sys.stderr)
-                return 1
+                return _emit_error(args, str(exc))
     elif args.step is None:
-        print(f"[ERREUR] Répertoire des conversations introuvable : {brain_dir}", file=sys.stderr)
-        return 1
+        return _emit_error(args, f"Répertoire des conversations introuvable : {brain_dir}")
 
     start_step = (
         max(0, args.step)
@@ -148,13 +160,17 @@ def _cmd_start(args: argparse.Namespace) -> int:
         store_dir=store_dir,
         overwrite=True,
     )
+    state_path = store_dir / "active_captures.json"
+    if args.json:
+        _emit_json({"ok": True, "conversation_id": cid, "capture": cap, "state_path": str(state_path)})
+        return 0
     lbl_txt = cap.get("label") or "(auto)"
     proj_txt = cap.get("project") or "(aucun)"
     print(
         f"[OK] Capture démarrée : {cid[:8]} | step={cap['start_step']} | "
         f"label={lbl_txt} | projet={proj_txt}"
     )
-    print(f"     État : {store_dir / 'active_captures.json'}")
+    print(f"     État : {state_path}")
     return 0
 
 
@@ -175,14 +191,12 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 runs_jsonl_paths=_discover_runs_jsonl(ws_path),
             )
             if not convs:
-                print(
-                    f"[ERREUR] Aucune session Gravity trouvée dans {brain_dir}.",
-                    file=sys.stderr,
-                )
-                return 1
+                return _emit_error(args, f"Aucune session Gravity trouvée dans {brain_dir}.")
             cid = convs[0]["conversation_id"]
             if not label:
                 label = f"session-{cid[:8]}"
+        elif args.json:
+            return _emit_error(args, "Identifiant de conversation ou --latest requis avec --json.")
         else:
             try:
                 cid, _title = _pick_conversation_interactively(
@@ -192,8 +206,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 print("\nAnnulé.", file=sys.stderr)
                 return 1
             except Exception as exc:
-                print(f"[ERREUR] {exc}", file=sys.stderr)
-                return 1
+                return _emit_error(args, str(exc))
             if not label:
                 label = input(f"Label de la session [session-{cid[:8]}] : ").strip()
             if not note:
@@ -202,8 +215,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         try:
             cid = resolve_conversation_id_in_brain(cid, brain_dir)
         except (ValueError, FileNotFoundError) as exc:
-            print(f"[ERREUR] {exc}", file=sys.stderr)
-            return 1
+            return _emit_error(args, str(exc))
 
     explicit_label = label
     if not label:
@@ -215,31 +227,44 @@ def _cmd_add(args: argparse.Namespace) -> int:
     caller_cid = os.environ.get("ANTIGRAVITY_CONVERSATION_ID", "").strip()
     self_archiving = bool(getattr(args, "self_archiving", False)) or bool(caller_cid and caller_cid == cid)
 
-    metrics = collect_run_metrics(
-        root_id=cid,
-        brain_dir=brain_dir,
-        pricing_catalog_path=catalog_path,
-        pricing_profile=args.profile,
-        label=label,
-        gravity_window=use_gravity_win,
-        full_conversation=bool(args.full),
-        project=project,
-        gravity_profile=gravity_profile,
-        store_dir=store_dir,
-        self_archiving=self_archiving,
-    )
-    saved_rec, _ = record_session_metrics(
-        metrics,
-        store_dir=store_dir,
-        history_path=history_path,
-        label=explicit_label if args.update_sealed else label,
-        note=note,
-        summary_only=args.summary_only,
-        force=bool(args.force),
-        update_sealed=bool(args.update_sealed),
-        self_archiving=self_archiving,
-    )
+    try:
+        metrics = collect_run_metrics(
+            root_id=cid,
+            brain_dir=brain_dir,
+            pricing_catalog_path=catalog_path,
+            pricing_profile=args.profile,
+            label=label,
+            gravity_window=use_gravity_win,
+            full_conversation=bool(args.full),
+            project=project,
+            gravity_profile=gravity_profile,
+            store_dir=store_dir,
+            self_archiving=self_archiving,
+        )
+        saved_rec, _ = record_session_metrics(
+            metrics,
+            store_dir=store_dir,
+            history_path=history_path,
+            label=explicit_label if args.update_sealed else label,
+            note=note,
+            summary_only=args.summary_only,
+            force=bool(args.force),
+            update_sealed=bool(args.update_sealed),
+            self_archiving=self_archiving,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        return _emit_error(args, str(exc))
 
+    if args.json:
+        _emit_json(
+            {
+                "ok": True,
+                "conversation_id": cid,
+                "already_archived": bool(saved_rec.get("already_archived")),
+                "record": saved_rec,
+            }
+        )
+        return 0
     _print_archived_summary(saved_rec, cid, store_dir, summary_only=args.summary_only)
     return 0
 
@@ -279,9 +304,18 @@ def _cmd_archive(args: argparse.Namespace) -> int:
             self_archiving=self_archiving,
         )
     except (FileNotFoundError, ValueError) as exc:
-        print(f"[ERREUR] {exc}", file=sys.stderr)
-        return 1
+        return _emit_error(args, str(exc))
 
+    if args.json:
+        _emit_json(
+            {
+                "ok": True,
+                "conversation_id": metrics["root_conversation_id"],
+                "already_archived": bool(saved_rec.get("already_archived")),
+                "record": saved_rec,
+            }
+        )
+        return 0
     _print_archived_summary(
         saved_rec,
         metrics["root_conversation_id"],
@@ -301,7 +335,7 @@ def _cmd_pending(args: argparse.Namespace) -> int:
         include_noise=bool(args.all),
     )
     if args.json:
-        print(json.dumps(pending, indent=2, ensure_ascii=False))
+        _emit_json(pending)
     else:
         print(render_pending_table(pending))
     return 0
@@ -315,7 +349,10 @@ def _cmd_list(args: argparse.Namespace) -> int:
             regenerate_views(store_dir, records)
     else:
         records = load_history(history_path)
-    print(render_terminal_table(records))
+    if args.json:
+        _emit_json({"ok": True, "count": len(records), "records": records})
+    else:
+        print(render_terminal_table(records))
     return 0
 
 
@@ -324,7 +361,7 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
     brain_dir = args.brain_dir.expanduser()
     catalog_path = args.catalog.expanduser()
     try:
-        metrics, _ = load_session_for_inspect(
+        metrics, slug = load_session_for_inspect(
             args.target,
             store_dir=store_dir,
             history_path=history_path,
@@ -333,25 +370,100 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
             pricing_profile=args.profile,
         )
     except (ValueError, FileNotFoundError) as exc:
-        print(f"[ERREUR] {exc}", file=sys.stderr)
-        return 1
-    print(render_inspect_text(metrics))
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "slug": slug, "metrics": metrics})
+    else:
+        print(render_inspect_text(metrics))
     return 0
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:
     store_dir, history_path = resolve_store_paths(args.history, args.store)
     try:
-        _, remaining = apply_remove(
+        removed_rec, remaining = apply_remove(
             args.target,
             store_dir=store_dir,
             history_path=history_path,
             purge_reports=args.purge_reports,
         )
     except (KeyError, ValueError) as exc:
-        print(f"[ERREUR] {exc}", file=sys.stderr)
-        return 1
-    print(f"[OK] Session supprimée ({remaining} restante(s)).")
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "removed": removed_rec, "remaining": remaining})
+    else:
+        print(f"[OK] Session supprimée ({remaining} restante(s)).")
+    return 0
+
+
+def _cmd_update_meta(args: argparse.Namespace) -> int:
+    store_dir, history_path = resolve_store_paths(args.history, args.store)
+    try:
+        updated_rec, _ = update_session_metadata(
+            args.target,
+            store_dir=store_dir,
+            history_path=history_path,
+            label=args.label,
+            project=args.project,
+            note=args.note,
+        )
+    except (KeyError, ValueError) as exc:
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "record": updated_rec})
+    else:
+        print(f"[OK] Métadonnées mises à jour : {updated_rec.get('label')}")
+    return 0
+
+
+def _resolve_target_cid(target: str, brain_dir: Path, known_ids: Optional[List[str]] = None) -> str:
+    raw = str(target or "").strip()
+    if not raw:
+        raise ValueError("Identifiant de conversation vide.")
+    if brain_dir.is_dir():
+        try:
+            return resolve_conversation_id_in_brain(raw, brain_dir)
+        except FileNotFoundError:
+            pass
+    if known_ids:
+        if raw in known_ids:
+            return raw
+        pref = [k for k in known_ids if k.startswith(raw)]
+        if len(pref) == 1:
+            return pref[0]
+        if len(pref) > 1:
+            raise ValueError(f"Préfixe ambigu ({len(pref)} correspondances) : {raw!r}")
+    return raw
+
+
+def _cmd_ignore(args: argparse.Namespace) -> int:
+    store_dir, _ = resolve_store_paths(args.history, args.store)
+    brain_dir = args.brain_dir.expanduser()
+    try:
+        cid = _resolve_target_cid(args.target, brain_dir)
+        entry = ignore_session(cid, reason=args.reason, store_dir=store_dir)
+    except ValueError as exc:
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "conversation_id": cid, "ignored": entry})
+    else:
+        print(f"[OK] Session masquée : {cid[:8]}")
+    return 0
+
+
+def _cmd_unignore(args: argparse.Namespace) -> int:
+    store_dir, _ = resolve_store_paths(args.history, args.store)
+    brain_dir = args.brain_dir.expanduser()
+    try:
+        ignored_ids = list(load_ignored_sessions(store_dir).keys())
+        cid = _resolve_target_cid(args.target, brain_dir, known_ids=ignored_ids)
+        removed = unignore_session(cid, store_dir=store_dir)
+    except ValueError as exc:
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "conversation_id": cid, "removed": bool(removed)})
+    else:
+        print(f"[OK] Session restaurée : {cid[:8]}" if removed else f"[INFO] Session non ignorée : {cid[:8]}")
     return 0
 
 
@@ -370,6 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
     p_start.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_start.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_start.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_start.set_defaults(func=_cmd_start)
 
     p_add = sub.add_parser("add", help="Ajoute et enregistre une session Gravity dans l'historique.")
@@ -403,6 +516,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Indique un auto-enregistrement depuis la session racine active (clean_termination=True).",
     )
+    p_add.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_add.set_defaults(func=_cmd_add)
 
     p_arch = sub.add_parser(
@@ -438,6 +552,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Indique un auto-enregistrement depuis la session racine active (clean_termination=True).",
     )
+    p_arch.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_arch.set_defaults(func=_cmd_archive)
 
     p_pend = sub.add_parser("pending", help="Liste les sessions Gravity racines non encore enregistrées (zéro écriture).")
@@ -453,6 +568,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_list.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_list.add_argument("--regen", action="store_true", help="Régénère METRICS.md.")
+    p_list.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_list.set_defaults(func=_cmd_list)
 
     p_insp = sub.add_parser("inspect", help="Affiche le détail complet d'une session.")
@@ -463,6 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_insp.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH, help="Catalogue tarifaire JSON.")
     p_insp.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_insp.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_insp.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_insp.set_defaults(func=_cmd_inspect)
 
     p_rm = sub.add_parser("remove", help="Retire une session de l'historique.")
@@ -476,7 +593,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Supprime aussi les rapports détaillés dans reports/.",
     )
+    p_rm.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_rm.set_defaults(func=_cmd_remove)
+
+    p_meta = sub.add_parser("update-meta", help="Met à jour label, projet ou note d'une session enregistrée.")
+    p_meta.add_argument("target", help="Label ou UUID (ou préfixe) de la session.")
+    p_meta.add_argument("-l", "--label", default=None, help="Nouveau label.")
+    p_meta.add_argument("-p", "--project", default=None, help="Nouveau projet.")
+    p_meta.add_argument("-n", "--note", default=None, help="Nouvelle note.")
+    p_meta.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
+    p_meta.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_meta.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
+    p_meta.set_defaults(func=_cmd_update_meta)
+
+    p_ign = sub.add_parser("ignore", help="Masque une session en attente dans ignored.json.")
+    p_ign.add_argument("target", help="UUID ou préfixe unique de la conversation.")
+    p_ign.add_argument("-r", "--reason", default="", help="Raison du masquage.")
+    p_ign.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
+    p_ign.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
+    p_ign.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_ign.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
+    p_ign.set_defaults(func=_cmd_ignore)
+
+    p_unign = sub.add_parser("unignore", help="Restaure une session masquée depuis ignored.json.")
+    p_unign.add_argument("target", help="UUID ou préfixe unique de la conversation.")
+    p_unign.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
+    p_unign.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
+    p_unign.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_unign.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
+    p_unign.set_defaults(func=_cmd_unignore)
 
     return parser
 

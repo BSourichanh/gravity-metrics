@@ -5,7 +5,6 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -29,6 +28,20 @@ from .pricing import (
     load_pricing_catalog,
     resolve_model_pricing,
 )
+from .technical_signals import (
+    TechnicalSignalAccumulator,
+    _percentile_sorted,
+    aggregate_technical_signals,
+)
+from .workspace_resolver import (
+    WorkspaceSignalAccumulator,
+    _extract_shell_command_str,
+    _is_atelier_doc_path,
+    _parse_tool_call_args,
+    classify_workspace_kind,
+    discover_known_repos,
+    resolve_agent_workspace,
+)
 
 METRICS_MARKER = "<!-- gravity-metrics:recorded -->"
 METRICS_OPEN_MARKER = "<!-- gravity-metrics:opened -->"
@@ -50,7 +63,6 @@ _GRAVITY_METRICS_ARGS_RE = re.compile(
 )
 _SWARM_CMD_RE = re.compile(r"^/swarm(?::swarm)?(?:\s|$)", re.IGNORECASE)
 _GIT_PUSH_RE = re.compile(r"\bgit\b[^\n;|&]*\bpush\b", re.IGNORECASE)
-_ATELIER_DOC_PATH_RE = re.compile(r"(?:^|/)(?:specs|tasks|tracking)/", re.IGNORECASE)
 _DIRECT_EDIT_TOOL_NAMES = frozenset(
     {
         "write_file",
@@ -90,53 +102,10 @@ _WORK_TOOL_NAMES = frozenset(
     }
 )
 _STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "au",
-    "aux",
-    "avec",
-    "ce",
-    "ces",
-    "dans",
-    "de",
-    "des",
-    "du",
-    "elle",
-    "en",
-    "et",
-    "for",
-    "il",
-    "in",
-    "je",
-    "la",
-    "le",
-    "les",
-    "me",
-    "ne",
-    "no",
-    "non",
-    "of",
-    "ok",
-    "on",
-    "or",
-    "ou",
-    "oui",
-    "par",
-    "pas",
-    "peux",
-    "pour",
-    "sur",
-    "te",
-    "the",
-    "to",
-    "tu",
-    "un",
-    "une",
-    "vas",
-    "vazi",
-    "veux",
-    "yes",
+    "a", "an", "and", "au", "aux", "avec", "ce", "ces", "dans", "de", "des", "du",
+    "elle", "en", "et", "for", "il", "in", "je", "la", "le", "les", "me", "ne",
+    "no", "non", "of", "ok", "on", "or", "ou", "oui", "par", "pas", "peux", "pour",
+    "sur", "te", "the", "to", "tu", "un", "une", "vas", "vazi", "veux", "yes",
 }
 
 
@@ -670,44 +639,6 @@ def _stat_sig(path: Path) -> Tuple[int, int]:
         return (int(st.st_mtime_ns), int(st.st_size))
     except OSError:
         return (0, -1)
-
-
-def _parse_tool_call_args(tc: Dict[str, Any]) -> Dict[str, Any]:
-    """Extrait le dictionnaire d'arguments d'un tool_call (`args` ou `arguments`)."""
-    raw_args = tc.get("args") if tc.get("args") is not None else tc.get("arguments")
-    if isinstance(raw_args, str):
-        try:
-            raw_args = json.loads(raw_args)
-        except Exception:
-            return {"CommandLine": raw_args}
-    return raw_args if isinstance(raw_args, dict) else {}
-
-
-def _extract_shell_command_str(tc: Dict[str, Any]) -> str:
-    """Extrait la commande shell depuis un tool_call (`CommandLine`/`command`/`cmd`), y compris JSON doublement quoté."""
-    args = _parse_tool_call_args(tc)
-    raw = (
-        args.get("CommandLine")
-        or args.get("command")
-        or args.get("command_line")
-        or args.get("cmd")
-        or ""
-    )
-    cmd = str(raw).strip()
-    if len(cmd) >= 2 and cmd[0] == '"' and cmd[-1] == '"':
-        try:
-            unwrapped = json.loads(cmd)
-            if isinstance(unwrapped, str):
-                cmd = unwrapped.strip()
-        except Exception:
-            pass
-    return cmd
-
-
-def _is_atelier_doc_path(raw_path: str) -> bool:
-    if not raw_path:
-        return False
-    return bool(_ATELIER_DOC_PATH_RE.search(raw_path.replace("\\", "/").strip()))
 
 
 def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
@@ -1616,6 +1547,9 @@ def _discover_direct_subagent_children(conv_dir: Path) -> List[Dict[str, Any]]:
                 "role": str(desc.get("role") or scid[:8]),
                 "state": sd.get("state"),
                 "spawn_step_index": sd.get("spawnStepIndex"),
+                "workspace_uris": [
+                    str(u) for u in (sd.get("workspaceUris") or []) if isinstance(u, str) and u.strip()
+                ],
             }
         )
     return children
@@ -1645,6 +1579,7 @@ def discover_agent_tree(
             "bridge_workspace": None,
             "bridge_job_status": None,
             "bridge_created_at": None,
+            "workspace_uris": [],
         }
     ]
     nodes: List[Dict[str, Any]] = []
@@ -1684,6 +1619,7 @@ def discover_agent_tree(
                         "bridge_workspace": cur_bridge_ws,
                         "bridge_job_status": None,
                         "bridge_created_at": None,
+                        "workspace_uris": sub.get("workspace_uris") or [],
                     }
                 )
 
@@ -1712,6 +1648,7 @@ def discover_agent_tree(
                         "bridge_workspace": cur_bridge_ws,
                         "bridge_job_status": None,
                         "bridge_created_at": None,
+                        "workspace_uris": [],
                     }
                 )
 
@@ -1732,6 +1669,7 @@ def discover_agent_tree(
                 "bridge_workspace": cur_bridge_ws,
                 "bridge_job_status": item["bridge_job_status"],
                 "bridge_created_at": item["bridge_created_at"],
+                "workspace_uris": item.get("workspace_uris") or [],
                 "children_ids": children_ids,
                 "transcript_path": str(transcript_path),
                 "transcript_exists": transcript_path.is_file(),
@@ -1740,13 +1678,6 @@ def discover_agent_tree(
         )
 
     return nodes
-
-
-def _percentile_sorted(sorted_vals: List[int], pct: float) -> int:
-    if not sorted_vals:
-        return 0
-    idx = min(len(sorted_vals) - 1, max(0, math.ceil(pct * len(sorted_vals)) - 1))
-    return int(sorted_vals[idx])
 
 
 _SHELL_EXIT_RE = re.compile(r"^Command exited with code (-?\d+)\b", re.MULTILINE)
@@ -2081,6 +2012,8 @@ def parse_agent_transcript(
     last_step_index: Optional[int] = None
     user_prompt_texts: List[str] = []
     step_costs: List[Dict[str, Any]] = []
+    tech_acc = TechnicalSignalAccumulator()
+    ws_acc = WorkspaceSignalAccumulator()
 
     if tpath.is_file():
         with tpath.open("r", encoding="utf-8", errors="replace") as fh:
@@ -2111,6 +2044,7 @@ def parse_agent_transcript(
                 dt = _parse_iso_ts(obj.get("created_at"))
                 if dt is not None:
                     timestamps.append(dt)
+                tech_acc.feed(obj, dt)
 
                 if step_type != "SYSTEM_MESSAGE":
                     prev_non_sys = last_non_sys
@@ -2146,6 +2080,7 @@ def parse_agent_transcript(
                     if isinstance(tc, dict):
                         tool_calls_total += 1
                         tool_calls_by_name[str(tc.get("name") or "unknown")] += 1
+                        ws_acc.feed_tool_call(tc)
 
                 if step_type == "PLANNER_RESPONSE":
                     last_planner_resp = obj
@@ -2373,6 +2308,8 @@ def parse_agent_transcript(
         "_user_prompts": user_prompt_texts,
         "_step_costs": step_costs,
         "_reviewer_verdict_failed": _is_reviewer_verdict_failed(last_planner_resp),
+        "_workspace_signals": ws_acc.finalize(),
+        **tech_acc.finalize(),
     }
 
 
@@ -2829,10 +2766,11 @@ def collect_run_metrics(
         or to_step is not None
     )
     root_node = nodes[0]
-    resolved_project = str(project or "").strip()
-    if not resolved_project:
-        meta_entry = load_session_meta(store_dir).get(root_id) or {}
-        resolved_project = str(meta_entry.get("project") or "").strip()
+    meta_entry = load_session_meta(store_dir).get(root_id) or {}
+    resolved_project = str(project or "").strip() or str(meta_entry.get("project") or "").strip()
+    raw_cwd = str(meta_entry.get("cwd") or "").strip()
+    root_ws_path = Path(raw_cwd) if (raw_cwd and (not resolved_project or Path(raw_cwd).name == resolved_project)) else None
+    known_repos = discover_known_repos(resolved_project, root_ws_path)
 
     if apply_window:
         window_info = resolve_gravity_window(
@@ -2900,8 +2838,19 @@ def collect_run_metrics(
             missing_transcripts.append(node["conversation_id"])
         malformed_lines_total += parsed["malformed_lines"]
 
-        ag_workspace = str(node.get("bridge_workspace") or "").strip() or root_workspace
-        merged = {**node, **parsed, "workspace": ag_workspace}
+        ag_workspace = (
+            root_workspace
+            if (is_root and resolved_project)
+            else resolve_agent_workspace(
+                node,
+                parsed.get("_workspace_signals"),
+                root_workspace=root_workspace,
+                root_workspace_path=root_ws_path,
+                known_repos=known_repos,
+            )
+        )
+        ag_ws_kind = classify_workspace_kind(ag_workspace, root_workspace=root_workspace, root_workspace_path=root_ws_path)
+        merged = {**node, **parsed, "workspace": ag_workspace, "workspace_kind": ag_ws_kind}
         enriched_agents.append(merged)
         nodes_by_id[node["conversation_id"]] = merged
         if node["parent_id"]:
@@ -3075,12 +3024,14 @@ def collect_run_metrics(
         ),
     ):
         agg = _aggregate_bucket(subset)
+        agg["workspace_kind"] = classify_workspace_kind(ws_name, root_workspace=root_workspace, root_workspace_path=root_ws_path)
         agg["cost_share_pct"] = (
             round((sum(a["_raw_cost"]["total_usd"] for a in subset) / total_cost_float) * 100.0, 2)
             if total_cost_float > 0
             else 0.0
         )
         by_workspace[ws_name] = agg
+    tech_agg = aggregate_technical_signals(enriched_agents)
 
     dup_groups_map: Dict[Tuple[Optional[str], str, str], List[Dict[str, Any]]] = defaultdict(list)
     for ag in enriched_agents:
@@ -3239,7 +3190,15 @@ def collect_run_metrics(
             "parallelism_factor": round(sum_lifespans / wall_clock_s, 2) if wall_clock_s > 0 else 1.0,
             "execution_mode": execution_mode,
             "features_used": features_used,
+            "thinking_calls": tech_agg["thinking_calls"],
+            "thinking_chars": tech_agg["thinking_chars"],
+            "thinking_est_tokens": tech_agg["thinking_est_tokens"],
+            "compaction_count": tech_agg["compaction_count"],
+            "latency_avg_ms": tech_agg["latency_avg_ms"],
+            "latency_p50_ms": tech_agg["latency_p50_ms"],
+            "latency_p95_ms": tech_agg["latency_p95_ms"],
         },
+        "technical_signals": tech_agg,
         "by_category": by_category,
         "by_model": by_model,
         "by_phase": by_phase,

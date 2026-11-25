@@ -115,6 +115,14 @@ def to_session_record(
         ws: data["cost_share_pct"]
         for ws, data in (metrics.get("by_workspace") or {}).items()
     }
+    workspace_kinds = {
+        ws: str(data.get("workspace_kind") or "code")
+        for ws, data in (metrics.get("by_workspace") or {}).items()
+        if isinstance(data, dict)
+    }
+    tech_sig = metrics.get("technical_signals") or {}
+    if not tech_sig:
+        tech_sig = s
     ms_raw = metrics.get("milestones") or {}
     ms_compact = None
     if isinstance(ms_raw, dict) and isinstance(ms_raw.get("phases"), list):
@@ -160,6 +168,13 @@ def to_session_record(
         "bridge_children_count": bridge_children_count,
         "bridge_workspaces": bridge_workspaces,
         "workspace_share_pct": workspace_shares,
+        "workspace_kinds": workspace_kinds,
+        "thinking_calls": int(tech_sig.get("thinking_calls") or 0),
+        "thinking_est_tokens": int(tech_sig.get("thinking_est_tokens") or 0),
+        "compaction_count": int(tech_sig.get("compaction_count") or 0),
+        "latency_avg_ms": float(tech_sig.get("latency_avg_ms") or 0.0),
+        "latency_p50_ms": int(tech_sig.get("latency_p50_ms") or 0),
+        "latency_p95_ms": int(tech_sig.get("latency_p95_ms") or 0),
         "primary_model": primary_model,
         "models": models_compact,
         "agents": s["total_agents"],

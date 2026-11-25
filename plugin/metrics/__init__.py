@@ -88,6 +88,15 @@ from .store import (
     update_session_metadata,
     write_session_details,
 )
+from .technical_signals import (
+    aggregate_technical_signals,
+    extract_technical_signals,
+)
+from .workspace_resolver import (
+    classify_workspace_kind,
+    normalize_worktree_path,
+    resolve_agent_workspace,
+)
 
 record_conversation = archive_conversation
 
@@ -165,4 +174,9 @@ __all__ = [
     "load_session_for_inspect",
     "apply_remove",
     "update_session_metadata",
+    "extract_technical_signals",
+    "aggregate_technical_signals",
+    "resolve_agent_workspace",
+    "normalize_worktree_path",
+    "classify_workspace_kind",
 ]
