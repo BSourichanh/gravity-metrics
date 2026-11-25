@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Install Source Provenance (`install.py`, `tests/test_install.py`):**
+  - Added atomic provenance recording (`_record_install_source`, `_atomic_write_json`, `_probe_git_metadata`, `resolve_gravity_home`) in `$GRAVITY_HOME/core/sources.json` (UTF-8 without BOM, LF, schema v1) upon successful real global installs (`rc == 0`, `not dry_run`, `scope == "global"`, `target is None`) while preserving existing module entries, tolerating missing `git`/`.git`, and keeping the installed plugin directory untouched.
+
 ### Fixed
 - **Auto-Capture Hygiene & Retroactive Worktree Purge (`plugin/metrics/lifecycle.py`, `plugin/hooks/pre_invocation_metrics.py`, `plugin/metrics/collector.py`, tests):**
   - Added `source` (`"manual"` by default, `"architect_auto"` from `/gravity-architect`) to `start_active_capture()` and guarded `_maybe_auto_start_architect_capture()` against purely consultative `/gravity-architect` questions while preserving `handoff`, `spec`, `task`, and action prompts.

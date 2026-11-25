@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -157,15 +158,144 @@ def run_fix_python_cmd(plugin_dir: Path) -> subprocess.CompletedProcess:
     )
 
 
+def resolve_gravity_home() -> Path:
+    """Resolve Gravity Core home directory ($GRAVITY_HOME > ~/.gemini/gravity)."""
+    gravity_home = os.environ.get("GRAVITY_HOME", "").strip()
+    if gravity_home:
+        return Path(gravity_home).expanduser()
+    return Path.home() / ".gemini" / "gravity"
+
+
 def resolve_store_dir() -> Path:
     """Resolve centralized store directory ($GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics)."""
     env_home = os.environ.get("GRAVITY_METRICS_HOME", "").strip()
     if env_home:
         return Path(env_home).expanduser()
-    gravity_home = os.environ.get("GRAVITY_HOME", "").strip()
-    if gravity_home:
-        return Path(gravity_home).expanduser() / "metrics"
-    return Path.home() / ".gemini" / "gravity" / "metrics"
+    return resolve_gravity_home() / "metrics"
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    """Atomically write JSON (UTF-8 without BOM, LF) via NamedTemporaryFile + fsync + os.replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(tmp_path), str(path))
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _probe_git_metadata(repo_dir: Path) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort lookup of (git_branch, git_sha) without failing when git or .git is absent."""
+    if not (repo_dir / ".git").exists():
+        return None, None
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+
+    def _run_git(git_args: Sequence[str]) -> Optional[str]:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo_dir), *git_args],
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
+            return None
+        value = proc.stdout.strip()
+        return value or None
+
+    branch = _run_git(["symbolic-ref", "--short", "-q", "HEAD"])
+    sha = _run_git(["rev-parse", "HEAD"])
+    return branch, sha
+
+
+def _record_install_source(
+    plugin_src: Path,
+    repo_root: Path,
+    *,
+    method: str,
+    target_dir: Optional[Path],
+) -> Optional[Path]:
+    """Record global install provenance in $GRAVITY_HOME/core/sources.json without touching other modules."""
+    sources_path = resolve_gravity_home() / "core" / "sources.json"
+    existing_data: Dict[str, Any] = {}
+    if sources_path.is_file():
+        try:
+            parsed = json.loads(sources_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                existing_data = parsed
+        except (OSError, ValueError):
+            existing_data = {}
+
+    existing_sources = existing_data.get("sources")
+    sources_map: Dict[str, Any] = (
+        dict(existing_sources) if isinstance(existing_sources, dict) else {}
+    )
+
+    manifest = read_plugin_manifest(plugin_src) or {}
+    plugin_name = str(manifest.get("name") or PLUGIN_NAME).strip() or PLUGIN_NAME
+    raw_repo = manifest.get("repository")
+    repository = raw_repo.strip() if isinstance(raw_repo, str) and raw_repo.strip() else None
+    raw_version = manifest.get("version")
+    installed_version = (
+        str(raw_version).strip()
+        if raw_version is not None and str(raw_version).strip()
+        else None
+    )
+    git_branch, git_sha = _probe_git_metadata(repo_root)
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    sources_map[plugin_name] = {
+        "plugin_name": plugin_name,
+        "repo_dir": str(repo_root.resolve()),
+        "repository": repository,
+        "install_method": method,
+        "target_dir": str(target_dir.resolve()) if target_dir is not None else None,
+        "git_branch": git_branch,
+        "git_sha": git_sha,
+        "installed_version": installed_version,
+        "installed_at": now_utc,
+    }
+
+    payload = dict(existing_data)
+    payload["schema_version"] = 1
+    payload["updated_at"] = now_utc
+    payload["sources"] = sources_map
+
+    try:
+        _atomic_write_json(sources_path, payload)
+    except OSError as exc:
+        print(
+            f"[WARN]  Failed to record install provenance in {sources_path}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+    return sources_path
 
 
 def print_next_steps(target_dir: Optional[Path]) -> None:
@@ -621,6 +751,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return rc
 
     if not args.dry_run:
+        if args.scope == "global" and args.target is None:
+            _record_install_source(
+                PLUGIN_SOURCE,
+                REPO_ROOT,
+                method=args.method,
+                target_dir=target_dir,
+            )
         print_next_steps(target_dir)
 
     return 0

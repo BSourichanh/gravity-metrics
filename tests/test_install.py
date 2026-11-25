@@ -258,6 +258,144 @@ class TestInstaller(unittest.TestCase):
                 ):
                     self.assertEqual(installer.resolve_store_dir(), explicit)
 
+    def test_global_install_records_sources_json_atomically_and_preserves_other_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_home = root / "home"
+            grav_home = root / "grav-home"
+            fake_home.mkdir()
+            core_dir = grav_home / "core"
+            core_dir.mkdir(parents=True)
+            sources_file = core_dir / "sources.json"
+            existing_gravity = {
+                "plugin_name": "gravity",
+                "repo_dir": "/tmp/gravity",
+                "repository": "https://github.com/BSourichanh/gravity.git",
+                "install_method": "copy",
+                "target_dir": "/tmp/plugins/gravity",
+                "git_branch": "dev",
+                "git_sha": "abc1234",
+                "installed_version": "0.3.0",
+                "installed_at": "2026-11-25T12:00:00Z",
+            }
+            sources_file.write_text(
+                json.dumps({"schema_version": 1, "sources": {"gravity": existing_gravity}}, indent=2)
+                + "\n",
+                encoding="utf-8",
+            )
+
+            isolated_env = {
+                "HOME": str(fake_home),
+                "USERPROFILE": str(fake_home),
+                "GRAVITY_HOME": str(grav_home),
+            }
+            r_inst = _run_install("--scope", "global", extra_env=isolated_env)
+            self.assertEqual(r_inst.returncode, 0, r_inst.stderr + r_inst.stdout)
+
+            raw_bytes = sources_file.read_bytes()
+            self.assertFalse(raw_bytes.startswith(b"\xef\xbb\xbf"))
+            self.assertNotIn(b"\r\n", raw_bytes)
+            self.assertEqual([p.name for p in core_dir.iterdir()], ["sources.json"])
+
+            data = json.loads(raw_bytes.decode("utf-8"))
+            self.assertEqual(data["schema_version"], 1)
+            self.assertRegex(data["updated_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            self.assertEqual(data["sources"]["gravity"], existing_gravity)
+
+            entry = data["sources"]["gravity-metrics"]
+            expected_target = (fake_home / ".gemini" / "config" / "plugins" / "gravity-metrics").resolve()
+            self.assertEqual(entry["plugin_name"], "gravity-metrics")
+            self.assertEqual(entry["repo_dir"], str(PROJECT_ROOT.resolve()))
+            self.assertEqual(entry["repository"], "https://github.com/BSourichanh/gravity-metrics.git")
+            self.assertEqual(entry["install_method"], "copy")
+            self.assertEqual(entry["target_dir"], str(expected_target))
+            self.assertEqual(entry["installed_version"], "0.5.1")
+            self.assertRegex(entry["installed_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            self.assertFalse((expected_target / ".gravity-source.json").exists())
+
+            # Global --method agy also records provenance with target_dir=None
+            with mock.patch.object(installer.Path, "home", return_value=fake_home), mock.patch.dict(
+                os.environ, isolated_env, clear=False
+            ), mock.patch.object(installer, "install_agy", return_value=0):
+                rc_agy = installer.main(["--scope", "global", "--method", "agy"])
+            self.assertEqual(rc_agy, 0)
+            data_agy = json.loads(sources_file.read_text(encoding="utf-8"))
+            self.assertEqual(data_agy["sources"]["gravity-metrics"]["install_method"], "agy")
+            self.assertIsNone(data_agy["sources"]["gravity-metrics"]["target_dir"])
+            self.assertEqual(data_agy["sources"]["gravity"], existing_gravity)
+
+    def test_sources_json_skipped_on_dry_run_check_workspace_target_and_uninstall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_home = root / "home"
+            grav_home = root / "grav-home"
+            ws = root / "workspace"
+            custom_target = root / "custom-target"
+            fake_home.mkdir()
+            ws.mkdir()
+
+            isolated_env = {
+                "HOME": str(fake_home),
+                "USERPROFILE": str(fake_home),
+                "GRAVITY_HOME": str(grav_home),
+            }
+            sources_file = grav_home / "core" / "sources.json"
+
+            self.assertEqual(_run_install("--check", "--scope", "global", extra_env=isolated_env).returncode, 0)
+            self.assertFalse(sources_file.exists())
+
+            self.assertEqual(_run_install("--dry-run", "--scope", "global", extra_env=isolated_env).returncode, 0)
+            self.assertFalse(sources_file.exists())
+
+            self.assertEqual(
+                _run_install("--scope", "workspace", "--workspace", str(ws), extra_env=isolated_env).returncode,
+                0,
+            )
+            self.assertFalse(sources_file.exists())
+
+            self.assertEqual(
+                _run_install("--scope", "global", "--target", str(custom_target), extra_env=isolated_env).returncode,
+                0,
+            )
+            self.assertFalse(sources_file.exists())
+
+            # Install globally, remove sources.json, then verify --uninstall does not recreate it
+            self.assertEqual(_run_install("--scope", "global", extra_env=isolated_env).returncode, 0)
+            self.assertTrue(sources_file.is_file())
+            sources_file.unlink()
+            self.assertEqual(_run_install("--uninstall", "--scope", "global", extra_env=isolated_env).returncode, 0)
+            self.assertFalse(sources_file.exists())
+
+    def test_record_install_source_tolerates_missing_git_and_dot_git(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            no_git_repo = root / "no-git-repo"
+            no_git_repo.mkdir()
+            grav_home = root / "grav-home"
+
+            self.assertEqual(installer._probe_git_metadata(no_git_repo), (None, None))
+
+            with mock.patch.object(
+                installer.subprocess, "run", side_effect=FileNotFoundError("git not found")
+            ):
+                self.assertEqual(installer._probe_git_metadata(PROJECT_ROOT), (None, None))
+
+            with mock.patch.dict(os.environ, {"GRAVITY_HOME": str(grav_home)}, clear=False), mock.patch.object(
+                installer.subprocess, "run", side_effect=FileNotFoundError("git not found")
+            ):
+                recorded = installer._record_install_source(
+                    installer.PLUGIN_SOURCE,
+                    PROJECT_ROOT,
+                    method="copy",
+                    target_dir=root / "target",
+                )
+            self.assertEqual(recorded, grav_home / "core" / "sources.json")
+            data = json.loads((grav_home / "core" / "sources.json").read_text(encoding="utf-8"))
+            entry = data["sources"]["gravity-metrics"]
+            self.assertIsNone(entry["git_branch"])
+            self.assertIsNone(entry["git_sha"])
+            self.assertEqual(entry["installed_version"], "0.5.1")
+
 
 if __name__ == "__main__":
     unittest.main()
