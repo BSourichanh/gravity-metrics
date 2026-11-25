@@ -29,7 +29,7 @@ def _mode_cell_md(rec: Dict[str, Any]) -> str:
     feats = [str(f) for f in (rec.get("features_used") or []) if f != mode]
     gp = _md_cell(rec.get("gravity_profile"))
     bridge_txt = _md_cell(_bridge_badge(rec))
-    status_txt = _md_cell(_status_badge(rec), "archivé")
+    status_txt = _md_cell(_status_badge(rec), "enregistrée")
     cell = f"`{mode}`" + (f" ({', '.join(feats)})" if feats else "")
     if bridge_txt:
         cell += f" · `{bridge_txt}`"
@@ -184,7 +184,7 @@ def render_terminal_table(records: List[Dict[str, Any]]) -> str:
     if not records:
         return "Aucune session enregistrée dans l'historique."
     header = (
-        f"{'Date':16} {'Label':24} {'Projet':14} {'Mode':12} {'Statut':8} {'Modèle':22} "
+        f"{'Date':16} {'Label':24} {'Projet':14} {'Mode':12} {'Statut':12} {'Modèle':22} "
         f"{'Coût':>9} {'Cache%':>7} {'Ag':>4} {'Calls':>6} {'Durée':>8} {'Alertes':11} Note"
     )
     sep = "-" * len(header)
@@ -195,7 +195,7 @@ def render_terminal_table(records: List[Dict[str, Any]]) -> str:
         mode = str(rec.get("execution_mode") or "single")
         b_cnt = int(rec.get("bridge_children_count") or 0)
         mode_cell = f"{mode}+B{b_cnt}" if b_cnt > 0 and mode != "bridge" else (f"bridge:{b_cnt}" if b_cnt > 0 else mode)
-        status_s = _status_badge(rec)[:8]
+        status_s = _status_badge(rec)[:12]
         mod = str(rec.get("primary_model") or "")[:22]
         cost_s = f"${float(rec.get('cost_usd') or 0.0):.4f}"
         cache_s = f"{float(rec.get('cache_hit_rate_pct') or 0.0):.1f}%"
@@ -205,18 +205,18 @@ def render_terminal_table(records: List[Dict[str, Any]]) -> str:
         al_s = _alerts_str(rec)
         note_s = str(rec.get("note") or "")[:36]
         lines.append(
-            f"{_session_date_str(rec):16} {lbl:24} {proj:14} {mode_cell[:12]:12} {status_s:8} {mod:22} "
+            f"{_session_date_str(rec):16} {lbl:24} {proj:14} {mode_cell[:12]:12} {status_s:12} {mod:22} "
             f"{cost_s:>9} {cache_s:>7} {ag_s:>4} {calls_s:>6} {dur_s:>8} {al_s:11} {note_s}"
         )
     lines.append(sep)
-    lines.append(f"Total : {len(records)} session(s) archivée(s)")
+    lines.append(f"Total : {len(records)} session(s) enregistrée(s)")
     return "\n".join(lines)
 
 
 def render_pending_table(pending: List[Dict[str, Any]]) -> str:
-    """Formate la file des sessions Gravity en attente d'archivage pour le terminal."""
+    """Formate la file des sessions Gravity en attente d'enregistrement pour le terminal."""
     if not pending:
-        return "Aucune session Gravity en attente d'archivage."
+        return "Aucune session Gravity en attente d'enregistrement."
     header = (
         f"{'ID':10} {'MAJ (UTC)':16} {'Appels':>6} {'Bridge':18} {'Fenêtre':16} Titre"
     )
@@ -238,7 +238,7 @@ def render_pending_table(pending: List[Dict[str, Any]]) -> str:
         title = str(item.get("title") or "")[:48]
         lines.append(f"{cid:10} {upd:16} {calls:>6} {b_cell[:18]:18} {wmode:16} {title}")
     lines.append(sep)
-    lines.append(f"En attente : {len(pending)} session(s) (`cli.py archive <id>`)")
+    lines.append(f"En attente : {len(pending)} session(s) (`cli.py record <id>`)")
     return "\n".join(lines)
 
 
@@ -246,11 +246,11 @@ def render_pending_markdown(pending: List[Dict[str, Any]]) -> str:
     """Formate la file `pending` pour affichage chat lors de `/gravity-metrics pending`."""
     lines = [
         METRICS_OPEN_MARKER,
-        f"### Gravity Metrics — Sessions en attente d'archivage ({len(pending)})",
+        f"### Gravity Metrics — Sessions en attente d'enregistrement ({len(pending)})",
         "",
     ]
     if not pending:
-        lines.append("_Aucune session Gravity en attente : tout est archivé._")
+        lines.append("_Aucune session Gravity en attente : tout est enregistré._")
         return "\n".join(lines)
 
     lines.extend(
@@ -275,7 +275,7 @@ def render_pending_markdown(pending: List[Dict[str, Any]]) -> str:
             bridge_cell = "—"
         wmode = _md_cell(item.get("window_mode") or "gravity_session")
         title = _md_cell(item.get("title") or "—")
-        cmd = f"`/gravity-metrics archive {short_id}`"
+        cmd = f"`/gravity-metrics record {short_id}`"
         lines.append(
             f"| `{short_id}` | `{upd}` | {calls} | {bridge_cell} | `{wmode}` | {title} | {cmd} |"
         )
@@ -395,7 +395,7 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
         "[← Retour aux métriques globales](../METRICS.md)",
         "",
         f"- **Conversation racine** : `{metrics['root_conversation_id']}`",
-        "- **Statut** : `archivé`",
+        "- **Statut** : `enregistrée`",
     ]
     if metrics.get("project"):
         lines.append(f"- **Projet** : `{metrics['project']}`")
@@ -630,7 +630,7 @@ def render_chat_summary_markdown(
         meta_parts.append(f"Profil Gravity : `{saved_rec['gravity_profile']}`")
     meta_parts.append(_window_desc(win))
 
-    heading_state = "déjà archivée (immuable)" if already_archived else "archivée"
+    heading_state = "déjà enregistrée (immuable)" if already_archived else "enregistrée"
     lines = [
         METRICS_MARKER,
         f"### Gravity Metrics — `{saved_rec['label']}` {heading_state}",

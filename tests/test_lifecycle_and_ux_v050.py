@@ -508,6 +508,17 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(merged[0]["label"], "new-lbl")
             self.assertEqual(merged[0]["window_start_step"], 72)
 
+            # Vague 2 : exports publics, badge "enregistrée" et tableau terminal sans troncature
+            import metrics as metrics_pkg
+
+            self.assertIs(metrics_pkg.record_conversation, archive_conversation)
+            self.assertIn("current_turn_start_step_in_transcript", metrics_pkg.__all__)
+            self.assertIn("record_conversation", metrics_pkg.__all__)
+            self.assertEqual(metrics_pkg.render_terminal_table([rec_new]).count("enregistrée"), 2)
+            self.assertIn("Statut      ", metrics_pkg.render_terminal_table([rec_new]))
+            self.assertIn("cli.py record <id>", metrics_pkg.render_pending_table([{"conversation_id": cid_h, "updated_at": "2026-11-25T10:00:00Z", "llm_calls": 2, "window_mode": "gravity_session", "title": "t"}]))
+            self.assertIn("tout est enregistré", metrics_pkg.render_pending_markdown([]))
+
 
 if __name__ == "__main__":
     unittest.main()

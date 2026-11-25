@@ -33,6 +33,7 @@ from .collector import (
     suggest_auto_label,
 )
 from .lifecycle import (
+    current_turn_start_step_in_transcript,
     ignore_session,
     load_active_captures,
     load_ignored_sessions,
@@ -88,6 +89,8 @@ from .store import (
     write_session_details,
 )
 
+record_conversation = archive_conversation
+
 __all__ = [
     "SCHEMA_VERSION",
     "METRICS_MARKER",
@@ -138,6 +141,7 @@ __all__ = [
     "load_session_meta",
     "record_session_meta",
     "load_active_captures",
+    "current_turn_start_step_in_transcript",
     "next_step_index_in_transcript",
     "start_active_capture",
     "pop_active_capture",
@@ -156,6 +160,7 @@ __all__ = [
     "write_session_details",
     "purge_session_details",
     "record_session_metrics",
+    "record_conversation",
     "archive_conversation",
     "load_session_for_inspect",
     "apply_remove",

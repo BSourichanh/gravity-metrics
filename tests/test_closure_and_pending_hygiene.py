@@ -150,7 +150,8 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
                 brain_dir=brain,
             )
             self.assertEqual(proc_imm.returncode, 0, proc_imm.stderr)
-            self.assertIn("déjà archivée", proc_imm.stdout)
+            self.assertIn("déjà enregistrée", proc_imm.stdout)
+            self.assertIn("--update", proc_imm.stdout)
             self.assertEqual(load_history(hist_path)[0]["input_tokens"], 12_000)
 
             # 3) --update-sealed rafraîchit directement la fenêtre scellée

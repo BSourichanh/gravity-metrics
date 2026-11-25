@@ -97,11 +97,11 @@ def _print_archived_summary(
 
     if saved_rec.get("already_archived"):
         print(
-            f"[INFO] Session déjà archivée (immuable) : {saved_rec['label']} ({cid[:8]}) "
-            "— utilisez --update-sealed ou --force pour mettre à jour"
+            f"[INFO] Session déjà enregistrée (immuable) : {saved_rec['label']} ({cid[:8]}) "
+            "— utilisez --update ou --force pour mettre à jour"
         )
     else:
-        print(f"[OK] Session archivée : {saved_rec['label']} ({cid[:8]})")
+        print(f"[OK] Session enregistrée : {saved_rec['label']} ({cid[:8]})")
     print(
         f"     Coût: ${saved_rec['cost_usd']:.4f} | "
         f"Agents: {saved_rec['agents']} | Appels: {saved_rec['llm_calls']} | "
@@ -372,7 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_start.set_defaults(func=_cmd_start)
 
-    p_add = sub.add_parser("add", help="Ajoute et archive une session Gravity dans l'historique.")
+    p_add = sub.add_parser("add", help="Ajoute et enregistre une session Gravity dans l'historique.")
     p_add.add_argument("conversation_id", nargs="?", default=None, help="UUID (ou préfixe) de la conversation (optionnel).")
     p_add.add_argument("-l", "--label", default="", help="Label lisible de la session.")
     p_add.add_argument("-n", "--note", default="", help="Note libre sur le changement testé.")
@@ -388,12 +388,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_add.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_add.add_argument("--summary-only", action="store_true", help="N'écrit que dans l'historique global (sans fichiers reports/).")
-    p_add.add_argument("--update-sealed", action="store_true", help="Met à jour une fenêtre déjà archivée.")
-    p_add.add_argument("--force", action="store_true", help="Autorise l'écrasement d'une archive existante.")
-    p_add.add_argument("--self-archiving", action="store_true", help="Indique un auto-archivage depuis la session racine active (clean_termination=True).")
+    p_add.add_argument(
+        "--update",
+        "--update-sealed",
+        dest="update_sealed",
+        action="store_true",
+        help="Met à jour une fenêtre déjà enregistrée.",
+    )
+    p_add.add_argument("--force", action="store_true", help="Autorise l'écrasement d'un enregistrement existant.")
+    p_add.add_argument(
+        "--self-recording",
+        "--self-archiving",
+        dest="self_archiving",
+        action="store_true",
+        help="Indique un auto-enregistrement depuis la session racine active (clean_termination=True).",
+    )
     p_add.set_defaults(func=_cmd_add)
 
-    p_arch = sub.add_parser("archive", help="Analyse et archive a posteriori une session Gravity par UUID ou préfixe.")
+    p_arch = sub.add_parser(
+        "record",
+        aliases=["archive"],
+        help="Analyse et enregistre a posteriori une session Gravity par UUID ou préfixe.",
+    )
     p_arch.add_argument("target", help="UUID ou préfixe unique de la conversation.")
     p_arch.add_argument("-l", "--label", default="", help="Label lisible de la session (auto-généré si omis).")
     p_arch.add_argument("-n", "--note", default="", help="Note libre sur le changement testé.")
@@ -407,12 +423,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_arch.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
     p_arch.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_arch.add_argument("--summary-only", action="store_true", help="N'écrit que dans l'historique global.")
-    p_arch.add_argument("--update-sealed", action="store_true", help="Met à jour une fenêtre déjà archivée.")
-    p_arch.add_argument("--force", action="store_true", help="Autorise le ré-archivage d'une session existante.")
-    p_arch.add_argument("--self-archiving", action="store_true", help="Indique un auto-archivage depuis la session racine active (clean_termination=True).")
+    p_arch.add_argument(
+        "--update",
+        "--update-sealed",
+        dest="update_sealed",
+        action="store_true",
+        help="Met à jour une fenêtre déjà enregistrée.",
+    )
+    p_arch.add_argument("--force", action="store_true", help="Autorise le ré-enregistrement d'une session existante.")
+    p_arch.add_argument(
+        "--self-recording",
+        "--self-archiving",
+        dest="self_archiving",
+        action="store_true",
+        help="Indique un auto-enregistrement depuis la session racine active (clean_termination=True).",
+    )
     p_arch.set_defaults(func=_cmd_archive)
 
-    p_pend = sub.add_parser("pending", help="Liste les sessions Gravity racines non encore archivées (zéro écriture).")
+    p_pend = sub.add_parser("pending", help="Liste les sessions Gravity racines non encore enregistrées (zéro écriture).")
     p_pend.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
     p_pend.add_argument("--bridge-db", type=Path, default=None, help=argparse.SUPPRESS)
     p_pend.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
@@ -421,7 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pend.add_argument("--json", action="store_true", help="Affiche la liste au format JSON.")
     p_pend.set_defaults(func=_cmd_pending)
 
-    p_list = sub.add_parser("list", help="Affiche la liste historique des sessions archivées.")
+    p_list = sub.add_parser("list", help="Affiche la liste historique des sessions enregistrées.")
     p_list.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_list.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_list.add_argument("--regen", action="store_true", help="Régénère METRICS.md.")

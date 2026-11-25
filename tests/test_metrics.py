@@ -1753,6 +1753,122 @@ class TestAudit0409Fixes(unittest.TestCase):
             self.assertTrue(parsed["clean_termination"])
             self.assertEqual(parsed["last_step_index"], 5)
 
+    def test_w2_cli_record_aliases_flags_and_reports_wording(self) -> None:
+        import metrics as metrics_pkg
+        from metrics.formatters import _status_badge
+        from metrics.markdown_report import (
+            _mode_cell_md,
+            render_chat_summary_markdown,
+            render_pending_markdown,
+            render_pending_table,
+            render_terminal_table,
+        )
+
+        self.assertIs(metrics_pkg.record_conversation, archive_conversation)
+        self.assertIn("current_turn_start_step_in_transcript", metrics_pkg.__all__)
+        self.assertIn("record_conversation", metrics_pkg.__all__)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            brain = root / "brain"
+            store = root / "store"
+            hist_path = store / "data" / "history.jsonl"
+
+            cid_rec = "e2000001-1111-4111-8111-111111111111"
+            cid_arch = "e2000002-1111-4111-8111-111111111111"
+            for cid in (cid_rec, cid_arch):
+                _write_transcript(
+                    brain / cid,
+                    [
+                        {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T13:00:00Z", "content": "/gravity-workflow fix"},
+                        {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T13:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "read_file"}]},
+                        {"step_index": 2, "type": "GENERIC", "status": "RUNNING", "created_at": "2026-11-25T13:00:11Z", "content": "active"},
+                    ],
+                )
+
+            # 1) cli.py record --self-recording
+            proc_rec = subprocess.run(
+                [sys.executable, "-B", str(CLI_SCRIPT), "record", cid_rec, "-l", "rec-one", "--self-recording", "--brain-dir", str(brain), "--store", str(store)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(proc_rec.returncode, 0, proc_rec.stderr)
+            self.assertIn("Session enregistrée : rec-one", proc_rec.stdout)
+
+            # 2) cli.py archive (alias) --self-archiving -> parité totale
+            proc_arch = subprocess.run(
+                [sys.executable, "-B", str(CLI_SCRIPT), "archive", cid_arch, "-l", "arch-two", "--self-archiving", "--brain-dir", str(brain), "--store", str(store)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(proc_arch.returncode, 0, proc_arch.stderr)
+            self.assertIn("Session enregistrée : arch-two", proc_arch.stdout)
+
+            recs = load_history(hist_path)
+            self.assertEqual(len(recs), 2)
+            for rec in recs:
+                self.assertEqual(rec["status"], "archived")
+                self.assertEqual(rec["interrupted_agents"], 0)
+                self.assertEqual(_status_badge(rec), "enregistrée")
+                self.assertIn("`enregistrée`", _mode_cell_md(rec))
+
+            # 3) Mise à jour via record --update et add --update
+            _write_transcript(
+                brain / cid_rec,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T13:00:00Z", "content": "/gravity-workflow fix"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T13:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "read_file"}]},
+                    {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T13:00:20Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 4_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                ],
+            )
+            proc_upd_rec = subprocess.run(
+                [sys.executable, "-B", str(CLI_SCRIPT), "record", cid_rec, "--update", "--brain-dir", str(brain), "--store", str(store)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(proc_upd_rec.returncode, 0, proc_upd_rec.stderr)
+            self.assertIn("Session enregistrée : rec-one", proc_upd_rec.stdout)
+
+            proc_upd_add = subprocess.run(
+                [sys.executable, "-B", str(CLI_SCRIPT), "add", cid_rec, "--gravity-window", "--update-sealed", "--brain-dir", str(brain), "--store", str(store)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(proc_upd_add.returncode, 0, proc_upd_add.stderr)
+            recs_after = [r for r in load_history(hist_path) if r["conversation_id"] == cid_rec]
+            self.assertEqual(len(recs_after), 1)
+            self.assertEqual(recs_after[0]["input_tokens"], 9_000)
+
+            # 4) Tableau terminal sans troncature de "enregistrée" (colonne Statut largeur 12) + rapports Markdown
+            table = render_terminal_table(recs_after)
+            self.assertIn("Statut      ", table)
+            self.assertIn("enregistrée ", table)
+            self.assertNotIn("enregist ", table)
+            self.assertIn("1 session(s) enregistrée(s)", table)
+
+            self.assertIn("en attente d'enregistrement", render_pending_table([]))
+            pend_sample = [{"conversation_id": cid_rec, "updated_at": "2026-11-25T13:00:00Z", "llm_calls": 2, "window_mode": "gravity_session", "title": "demo"}]
+            self.assertIn("cli.py record <id>", render_pending_table(pend_sample))
+            self.assertIn("tout est enregistré", render_pending_markdown([]))
+            self.assertIn(f"/gravity-metrics record {cid_rec[:8]}", render_pending_markdown(pend_sample))
+
+            det_md = (store / "reports" / f"{recs_after[0]['detail_slug']}.md").read_text(encoding="utf-8")
+            self.assertIn("- **Statut** : `enregistrée`", det_md)
+
+            det_json = json.loads((store / "reports" / f"{recs_after[0]['detail_slug']}.json").read_text(encoding="utf-8"))
+            chat_new = render_chat_summary_markdown(det_json, recs_after[0], store, already_archived=False)
+            chat_old = render_chat_summary_markdown(det_json, recs_after[0], store, already_archived=True)
+            self.assertIn("`rec-one` enregistrée", chat_new)
+            self.assertIn("`rec-one` déjà enregistrée (immuable)", chat_old)
+
 
 if __name__ == "__main__":
     unittest.main()

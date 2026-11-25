@@ -191,7 +191,7 @@ class TestPreInvocationHook(unittest.TestCase):
             out_immut = _run_hook(json.dumps(payload_b_immut), store, brain)
             self.assertNotIn("terminationBehavior", out_immut)
             md_immut = out_immut["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
-            self.assertIn("déjà archivée", md_immut)
+            self.assertIn("déjà enregistrée", md_immut)
             records_immut = load_history(store / "data" / "history.jsonl")
             self.assertEqual(len(records_immut), 1)
             self.assertEqual(records_immut[0]["label"], records[0]["label"])
