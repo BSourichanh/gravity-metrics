@@ -276,6 +276,10 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
 
             wt_linux = root / ".gemini" / "antigravity" / "worktrees" / "subagent-1"
             wt_linux.mkdir(parents=True)
+            wt_snap = root / "gravity-worktrees" / "gravity-metrics-w1"
+            wt_snap.mkdir(parents=True)
+            wt_posix = root / "repo" / "worktrees" / "wt-posix"
+            wt_posix.mkdir(parents=True)
             real_ws = root / "RealProject"
             real_ws.mkdir()
 
@@ -283,6 +287,9 @@ class TestClosureAndPendingHygiene(unittest.TestCase):
                 [
                     str(wt_linux),
                     str(wt_linux.parent),
+                    str(wt_snap),
+                    str(wt_snap.parent),
+                    str(wt_posix),
                     r"C:\Users\dev\.gemini\antigravity\worktrees\wt-win",
                     r"D:\repo\worktrees\wt-branch",
                 ],

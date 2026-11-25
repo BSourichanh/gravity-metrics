@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`/swarm` Clean Termination, Reviewer Classification & POSIX Worktree Filtering (`ACT-05-02` in `plugin/metrics/collector.py`, `plugin/metrics/pricing.py`, `plugin/hooks/session_start_metrics.py`):**
+  - Added `_has_clean_terminal_tool_call()` (`finish`, `post_message`, `swarm_wait`) and `trailing_after_planner` tracking in `parse_agent_transcript()` (plus `subagent_state` propagation from `collect_run_metrics()`) so `/swarm` workers finishing via `post_message` + `swarm_wait` with consecutive clean `GENERIC(DONE)` steps are no longer marked `INTERRUPTED` even when `subagent_state == "SUBAGENT_STATE_KILLED"`.
+  - Prioritized `reviewer|challenger|auditor` ahead of `worker|builder` in `classify_agent()` so `Swarm Worker (*-reviewer)` classifies as `verification` instead of `build`.
+  - Extended `_is_subagent_worktree()` to ignore POSIX `/gravity-worktrees/` and `/worktrees/` paths in `SessionStart`.
+
 ### Added
 - **Session Freshness & In-Place MCP/UI Updates (`R5` in `plugin/mcp/server.py`, `plugin/mcp/ui/app_js.py`):**
   - Extended `_compute_pending_source_sig`, `_compute_hist_source_sig`, and `_fast_unchanged_signature` to include `subagents/*.json`, `tasks/task-*.log`, and recorded transcript `stat()` tokens so polling invalidates immediately on child or post-record activity.

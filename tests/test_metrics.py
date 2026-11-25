@@ -95,6 +95,10 @@ class TestCoreAndParsing(unittest.TestCase):
         self.assertEqual(classify_agent("planner", "Arch"), "orchestration")
         self.assertEqual(classify_agent("builder", "Impl"), "build")
         self.assertEqual(classify_agent("reviewer", "Audit"), "verification")
+        self.assertEqual(classify_agent("worker", "Swarm Worker (dip-reviewer)"), "verification")
+        self.assertEqual(classify_agent("worker", "Swarm Worker (security-auditor)"), "verification")
+        self.assertEqual(classify_agent("worker", "Swarm Worker (spec-challenger)"), "verification")
+        self.assertEqual(classify_agent("worker", "Swarm Worker (core-builder)"), "build")
 
     def test_pricing_long_context_tier_flash_flat_and_fallback(self) -> None:
         p_pro, is_fb = resolve_model_pricing("gemini-3.1-pro-preview", self.catalog, "2026_nov_standard")

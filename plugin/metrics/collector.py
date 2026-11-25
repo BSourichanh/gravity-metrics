@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import shlex
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple, Union
 import unicodedata
 
 from .lifecycle import (
@@ -1767,17 +1767,28 @@ def _extract_shell_nonzero_code(content: Any) -> Optional[int]:
     return None
 
 
-def _has_finish_tool_call(step_obj: Optional[Dict[str, Any]]) -> bool:
-    """Vérifie si un step PLANNER_RESPONSE invoque l'outil terminal `finish`."""
+_CLEAN_TERMINAL_TOOLS = frozenset({"finish", "post_message", "swarm_wait"})
+
+
+def _has_clean_terminal_tool_call(
+    step_obj: Optional[Dict[str, Any]],
+    tool_names: FrozenSet[str] = _CLEAN_TERMINAL_TOOLS,
+) -> bool:
+    """Vérifie si un step PLANNER_RESPONSE invoque un outil terminal propre (`finish`, `post_message`, `swarm_wait`)."""
     if not isinstance(step_obj, dict) or step_obj.get("type") != "PLANNER_RESPONSE":
         return False
     raw_tcs = step_obj.get("tool_calls")
     if not isinstance(raw_tcs, (list, tuple)):
         return False
     return any(
-        isinstance(tc, dict) and str(tc.get("name") or "").strip() == "finish"
+        isinstance(tc, dict) and str(tc.get("name") or "").strip() in tool_names
         for tc in raw_tcs
     )
+
+
+def _has_finish_tool_call(step_obj: Optional[Dict[str, Any]]) -> bool:
+    """Vérifie si un step PLANNER_RESPONSE invoque l'outil terminal `finish`."""
+    return _has_clean_terminal_tool_call(step_obj, frozenset({"finish"}))
 
 
 _CLI_VALUE_FLAGS = frozenset(
@@ -2020,6 +2031,7 @@ def parse_agent_transcript(
     self_archiving: bool = False,
     allow_cli_self_archive: bool = True,
     conversation_id: Optional[str] = None,
+    subagent_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Extrait les métriques d'exécution, tokens, coûts et qualité d'un transcript (optionnellement fenêtré)."""
     tpath = Path(transcript_path)
@@ -2065,6 +2077,7 @@ def parse_agent_transcript(
     prev_non_sys: Optional[Dict[str, Any]] = None
     last_non_sys: Optional[Dict[str, Any]] = None
     last_planner_resp: Optional[Dict[str, Any]] = None
+    trailing_after_planner: List[Dict[str, Any]] = []
     last_step_index: Optional[int] = None
     user_prompt_texts: List[str] = []
     step_costs: List[Dict[str, Any]] = []
@@ -2102,6 +2115,8 @@ def parse_agent_transcript(
                 if step_type != "SYSTEM_MESSAGE":
                     prev_non_sys = last_non_sys
                     last_non_sys = obj
+                    if step_type != "PLANNER_RESPONSE" and last_planner_resp is not None:
+                        trailing_after_planner.append(obj)
                 else:
                     system_messages += 1
 
@@ -2134,6 +2149,7 @@ def parse_agent_transcript(
 
                 if step_type == "PLANNER_RESPONSE":
                     last_planner_resp = obj
+                    trailing_after_planner = []
                     llm_calls += 1
                     in_t = int(obj.get("input_tokens") or 0)
                     cache_t = int(obj.get("cache_read_tokens") or 0)
@@ -2225,13 +2241,16 @@ def parse_agent_transcript(
     if not eff_cid and tpath.parent.name == "logs" and tpath.parent.parent.name == ".system_generated":
         eff_cid = tpath.parents[2].name
 
+    sub_state_norm = str(subagent_state or "").strip().upper()
+    sub_state_error = sub_state_norm in ("SUBAGENT_STATE_ERROR", "SUBAGENT_STATE_FAILED")
     clean_term = False
     last_non_sys_type: Optional[str] = None
     if last_non_sys is not None:
         last_non_sys_type = last_non_sys.get("type")
         last_status = last_non_sys.get("status")
         has_terminal_error = (
-            last_status in ("ERROR", "INVALID")
+            sub_state_error
+            or last_status in ("ERROR", "INVALID")
             or (
                 last_non_sys_type == "GENERIC"
                 and _extract_shell_nonzero_code(last_non_sys.get("content")) is not None
@@ -2244,7 +2263,7 @@ def parse_agent_transcript(
         elif last_non_sys_type == "PLANNER_RESPONSE":
             clean_term = (
                 (not bool(last_non_sys.get("tool_calls")))
-                or (last_status == "DONE" and _has_finish_tool_call(last_non_sys))
+                or (last_status == "DONE" and _has_clean_terminal_tool_call(last_non_sys))
                 or (
                     allow_cli_self_archive
                     and _is_cli_archive_tool_call(last_non_sys, eff_cid)
@@ -2258,11 +2277,17 @@ def parse_agent_transcript(
             ):
                 clean_term = True
             else:
+                trailing_all_clean_generic = bool(trailing_after_planner) and all(
+                    s.get("type") == "GENERIC"
+                    and s.get("status") == "DONE"
+                    and _extract_shell_nonzero_code(s.get("content")) is None
+                    for s in trailing_after_planner
+                )
                 clean_term = (
-                    last_status == "DONE"
-                    and prev_non_sys is not None
-                    and prev_non_sys.get("status") == "DONE"
-                    and _has_finish_tool_call(prev_non_sys)
+                    last_planner_resp is not None
+                    and last_planner_resp.get("status") == "DONE"
+                    and _has_clean_terminal_tool_call(last_planner_resp)
+                    and trailing_all_clean_generic
                 )
 
     ts_sorted = sorted(timestamps)
@@ -2868,6 +2893,7 @@ def collect_run_metrics(
             self_archiving=bool(self_archiving and is_root),
             allow_cli_self_archive=is_root,
             conversation_id=node["conversation_id"],
+            subagent_state=node.get("subagent_state"),
         )
         unmatched_models.update(parsed["unmatched_models"])
         if parsed["transcript_missing"]:

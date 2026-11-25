@@ -16,7 +16,12 @@ def _is_subagent_worktree(ws_path_str: str) -> bool:
     """Retourne True si le chemin résolu correspond à un worktree de sous-agent Antigravity."""
     norm_raw = ws_path_str.lower()
     norm_posix = (ws_path_str.replace("\\", "/").rstrip("/") + "/").lower()
-    return "/.gemini/antigravity/worktrees/" in norm_posix or "\\worktrees\\" in (norm_raw + "\\")
+    return (
+        "/.gemini/antigravity/worktrees/" in norm_posix
+        or "/gravity-worktrees/" in norm_posix
+        or "/worktrees/" in norm_posix
+        or "\\worktrees\\" in (norm_raw + "\\")
+    )
 
 
 def main() -> int:
