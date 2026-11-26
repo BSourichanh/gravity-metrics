@@ -74,7 +74,7 @@ class TestAuditsReader(unittest.TestCase):
                 self.assertEqual(len(roots_env), 1)
                 self.assertEqual(roots_env[0]["path"], env_audits.resolve())
 
-            # 2) Sans $GRAVITY_AUDITS_DIR : <workspace>/audits/agents/ puis <canonical_path>/audits/agents/ (audits/code/ ignoré)
+            # 2) Sans $GRAVITY_AUDITS_DIR : uniquement <workspace>/audits/agents/ (audits/code/ ignoré, zéro lecture SQLite bridge.db)
             with mock.patch.dict(os.environ, {"GRAVITY_AUDITS_DIR": ""}, clear=False):
                 roots_ws = discover_audit_roots(
                     workspace_dirs=[ws_local],
@@ -85,7 +85,6 @@ class TestAuditsReader(unittest.TestCase):
                     [r["path"] for r in roots_ws],
                     [
                         (ws_local / "audits" / "agents").resolve(),
-                        (ws_bridge / "audits" / "agents").resolve(),
                     ],
                 )
                 audits_ws, _ = list_audits(
@@ -93,7 +92,11 @@ class TestAuditsReader(unittest.TestCase):
                     bridge_db=db_path,
                     include_cwd=False,
                 )
-                self.assertEqual({a["filename"] for a in audits_ws}, {"local.md", "bridge.md"})
+                self.assertEqual({a["filename"] for a in audits_ws}, {"local.md"})
+                self.assertEqual(
+                    discover_audit_roots(workspace_dirs=[], bridge_db=db_path, include_cwd=False),
+                    [],
+                )
 
             # 3) Base bridge.db absente tolérée sans création
             missing_db = root / "absent" / "bridge.db"
@@ -266,10 +269,7 @@ class TestAuditsReader(unittest.TestCase):
                     )
 
                     audits_bridge, _ = list_audits(bridge_db=db_path, include_cwd=False)
-                    self.assertEqual(
-                        {a["filename"] for a in audits_bridge},
-                        {"2026-11-22-audit-01.md", "code.md"},
-                    )
+                    self.assertEqual(audits_bridge, [])
 
                     # Chemins relatifs (".", "audits", "audits/agents", workspace_dirs=["."])
                     roots_rel_ws = discover_audit_roots(workspace_dirs=["."], bridge_db=missing_db, include_cwd=False)
@@ -377,6 +377,21 @@ class TestAuditsReader(unittest.TestCase):
             root_id = bundle["roots"][0]["root_id"]
             with self.assertRaises((ValueError, FileNotFoundError)):
                 read_audit(f"{root_id}:_TEMPLATE.md", audits_dir=audits_dir, include_cwd=False)
+
+    def test_rejects_symlinked_or_junction_audit_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "leak.md").write_text("# Leak\n", encoding="utf-8")
+            ws = root / "ws"
+            (ws / "audits").mkdir(parents=True)
+            link_agents = ws / "audits" / "agents"
+            try:
+                link_agents.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("Symlink creation requires elevated privileges on this OS.")
+            self.assertEqual(discover_audit_roots(workspace_dirs=[ws], include_cwd=False), [])
 
 
 if __name__ == "__main__":

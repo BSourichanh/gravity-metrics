@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Découverte et lecture sécurisée en lecture seule des dossiers audits/agents/ (100 % stdlib)."""
 
-from contextlib import closing
 from datetime import datetime, timezone
+import importlib
 import os
 from pathlib import Path, PurePosixPath
 import re
-import sqlite3
+import sys
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from .bridge_links import _connect_ro, _table_columns, resolve_bridge_db_path
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+
+_path_safety = importlib.import_module("_shared.path_safety")
 
 MAX_AUDIT_BYTES = 262_144
 
@@ -48,43 +52,17 @@ def _split_env_dirs(raw: str) -> List[Path]:
     return [Path(p).expanduser() for p in parts]
 
 
-def _load_bridge_workspace_dirs(bridge_db: Optional[Union[Path, str]] = None) -> List[Tuple[str, Path]]:
-    db_path = resolve_bridge_db_path(bridge_db)
-    conn = _connect_ro(db_path)
-    if conn is None:
-        return []
-    out: List[Tuple[str, Path]] = []
-    try:
-        with closing(conn):
-            cols = _table_columns(conn, "workspaces")
-            if "canonical_path" not in cols:
-                return []
-            select_cols = ["canonical_path"]
-            if "slug" in cols:
-                select_cols.append("slug")
-            if "display_name" in cols:
-                select_cols.append("display_name")
-            order_col = "slug" if "slug" in cols else "canonical_path"
-            rows = conn.execute(
-                f"SELECT {', '.join(select_cols)} FROM workspaces "
-                f"WHERE canonical_path IS NOT NULL AND TRIM(canonical_path) != '' "
-                f"ORDER BY {order_col} ASC"
-            ).fetchall()
-            for row in rows:
-                r = dict(row)
-                cpath = str(r.get("canonical_path") or "").strip()
-                if not cpath:
-                    continue
-                ws_name = str(r.get("slug") or r.get("display_name") or Path(cpath).name or "").strip()
-                out.append((ws_name, Path(cpath).expanduser()))
-    except sqlite3.Error:
-        return []
-    return out
-
-
-def _is_audits_code_dir(path: Path) -> bool:
-    """Retourne True si le chemin désigne un dossier `audits/code`."""
-    return path.name.lower() == "code" and path.parent.name.lower() == "audits"
+def _is_audits_code_dir(path: Path, *, is_direct: bool = False) -> bool:
+    """Retourne True si le chemin désigne un dossier `audits/code` ou `code` direct."""
+    low_name = path.name.lower()
+    if is_direct and low_name == "code":
+        return True
+    if low_name == "code" and path.parent.name.lower() == "audits":
+        return True
+    return any(
+        path.parts[idx].lower() == "audits" and path.parts[idx + 1].lower() == "code"
+        for idx in range(len(path.parts) - 1)
+    )
 
 
 def _is_code_audit_path(
@@ -127,6 +105,7 @@ def discover_audit_roots(
     include_cwd: bool = True,
 ) -> List[Dict[str, Any]]:
     """Découvre les dossiers `audits/agents/` en lecture seule selon la priorité Gravity."""
+    _ = bridge_db
     candidates: List[Tuple[str, Path, str, bool]] = []
 
     if audits_dir is not None:
@@ -153,10 +132,6 @@ def discover_audit_roots(
                 candidates.append(
                     (_workspace_label(cwd), cwd / "audits" / "agents", "workspace", False)
                 )
-            for ws_name, ws_path in _load_bridge_workspace_dirs(bridge_db):
-                candidates.append(
-                    (_workspace_label(ws_path, ws_name), ws_path / "audits" / "agents", "bridge_db", False)
-                )
 
     roots: List[Dict[str, Any]] = []
     seen_paths: Set[str] = set()
@@ -164,18 +139,17 @@ def discover_audit_roots(
 
     for ws_label_hint, root_path, source, is_direct in candidates:
         try:
-            if is_direct:
-                abs_path = Path(os.path.abspath(str(root_path)))
-                if _is_audits_code_dir(abs_path):
-                    continue
-            if not root_path.is_dir():
+            abs_path = Path(os.path.abspath(str(root_path)))
+            if _is_audits_code_dir(abs_path, is_direct=is_direct):
+                continue
+            if _path_safety.is_symlink_or_junction(root_path) or not root_path.is_dir():
                 continue
             resolved = root_path.resolve()
-            if _is_audits_code_dir(resolved):
+            if _is_audits_code_dir(resolved, is_direct=is_direct):
                 continue
             if is_direct:
                 agents_sub = resolved / "agents"
-                if agents_sub.is_dir():
+                if agents_sub.is_dir() and not _path_safety.is_symlink_or_junction(agents_sub):
                     agents_resolved = agents_sub.resolve()
                     if _is_audits_code_dir(agents_sub) or _is_audits_code_dir(agents_resolved):
                         continue
@@ -448,9 +422,15 @@ def _resolve_audit_target(
 
     for root in matched_roots:
         root_resolved = root["path"].resolve()
+        if _path_safety.is_symlink_or_junction(root["path"]) or _path_safety.is_symlink_or_junction(root_resolved):
+            raise ValueError(f"Lien symbolique ou jonction interdit : {audit_id!r}")
         unresolved_candidate = root_resolved / rel_part
+        try:
+            _path_safety.ensure_no_symlink_or_junction_under(root_resolved, unresolved_candidate)
+        except ValueError as exc:
+            raise ValueError(f"Chemin d'audit invalide ou lien symbolique interdit ({audit_id!r}): {exc}") from exc
         candidate = unresolved_candidate.resolve()
-        if not candidate.is_relative_to(root_resolved):
+        if not _path_safety.is_within_root(root_resolved, candidate):
             raise ValueError(f"Path traversal détecté : {audit_id!r}")
         if _is_code_audit_path(root_resolved, unresolved_candidate, candidate):
             raise ValueError(f"Accès aux audits de code interdit : {audit_id!r}")
@@ -492,14 +472,15 @@ def list_audits_bundle(
             continue
         for fpath in candidates:
             try:
-                if not fpath.is_file() or fpath.suffix.lower() != ".md":
+                if _path_safety.is_symlink_or_junction(fpath) or not fpath.is_file() or fpath.suffix.lower() != ".md":
                     continue
                 if fpath.name.startswith("_"):
                     continue
+                _path_safety.ensure_no_symlink_or_junction_under(root_resolved, fpath)
                 resolved_file = fpath.resolve()
                 if resolved_file.name.startswith("_"):
                     continue
-                if not resolved_file.is_relative_to(root_resolved):
+                if not _path_safety.is_within_root(root_resolved, resolved_file):
                     continue
                 if _is_code_audit_path(root_resolved, fpath, resolved_file):
                     continue
@@ -508,7 +489,7 @@ def list_audits_bundle(
                     index_candidates.append(rec)
                 else:
                     regular_raw.append(rec)
-            except OSError:
+            except (OSError, ValueError):
                 continue
 
     index_candidates.sort(

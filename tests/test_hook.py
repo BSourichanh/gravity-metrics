@@ -16,7 +16,8 @@ HOOK_SCRIPT = PLUGIN_ROOT / "hooks" / "pre_invocation_metrics.py"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from metrics import METRICS_MARKER, load_history  # noqa: E402
+from metrics import METRICS_MARKER, load_active_captures, load_history, load_session_meta  # noqa: E402
+START_HOOK = PLUGIN_ROOT / "hooks" / "session_start_metrics.py"
 
 
 def _write_transcript(conv_dir: Path, lines: list) -> Path:
@@ -136,7 +137,9 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertNotIn("terminationBehavior", out_ro)
             sys_ro = out_ro["injectSteps"][0]["systemMessage"]
             self.assertIn("lecture seule", sys_ro["metadata"]["user_markdown"])
-            self.assertIn("open_metrics_dashboard", sys_ro["systemMessage"])
+            self.assertIn("open_gravity_dashboard", sys_ro["systemMessage"])
+            self.assertIn("gravity_dashboard", sys_ro["systemMessage"])
+            self.assertIn('"view": "metrics"', sys_ro["systemMessage"])
             self.assertFalse((store / "data" / "history.jsonl").exists())
 
             # Cas (a) : /gravity-metrics stop capture même sans flush disque du prompt courant
@@ -153,7 +156,8 @@ class TestPreInvocationHook(unittest.TestCase):
             smsg_a = sys_a["systemMessage"]
             self.assertIn(METRICS_MARKER, md_a)
             self.assertIn(METRICS_MARKER, smsg_a)
-            self.assertIn("open_metrics_dashboard", smsg_a)
+            self.assertIn("open_gravity_dashboard", smsg_a)
+            self.assertIn('"metrics_sub": "sessions"', smsg_a)
             self.assertIn("ProjetAlpha", smsg_a)
             self.assertIn("METRICS.md", md_a)
             self.assertNotIn(".html", md_a)
@@ -232,7 +236,7 @@ class TestPreInvocationHook(unittest.TestCase):
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
                     {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T16:01:00Z", "content": "/gravity-metrics"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T16:01:01Z", "content": METRICS_MARKER},
-                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 500, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_metrics_dashboard"}]},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 500, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_gravity_dashboard"}]},
                 ],
             )
             out_mid = _run_hook(
@@ -285,7 +289,7 @@ class TestPreInvocationHook(unittest.TestCase):
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
                     {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T16:01:00Z", "content": "/gravity-metrics stop"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T16:01:01Z", "content": METRICS_MARKER},
-                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 500, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_metrics_dashboard"}]},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 500, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "open_gravity_dashboard"}]},
                     {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T16:01:03Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 400, "cache_read_tokens": 0, "output_tokens": 20, "tool_calls": []},
                 ],
             )
@@ -304,7 +308,7 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertNotIn("terminationBehavior", out_dup)
             sys_dup = out_dup["injectSteps"][0]["systemMessage"]
             self.assertIn("Aucune nouvelle activité", sys_dup["metadata"]["user_markdown"])
-            self.assertIn("open_metrics_dashboard", sys_dup["systemMessage"])
+            self.assertIn("open_gravity_dashboard", sys_dup["systemMessage"])
             self.assertIn("ProjetBeta", sys_dup["systemMessage"])
             self.assertEqual(load_history(store / "data" / "history.jsonl"), [])
 
@@ -366,7 +370,7 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertNotIn("terminationBehavior", out_cap)
             sys_msg_obj = out_cap["injectSteps"][0]["systemMessage"]
             self.assertIn(METRICS_MARKER, sys_msg_obj["systemMessage"])
-            self.assertIn("open_metrics_dashboard", sys_msg_obj["systemMessage"])
+            self.assertIn("open_gravity_dashboard", sys_msg_obj["systemMessage"])
             md_cap = sys_msg_obj["metadata"]["user_markdown"]
             self.assertIn("evo→medium · slow · safe", md_cap)
             self.assertIn("résumé-cp1252", md_cap)
@@ -492,6 +496,7 @@ class TestPreInvocationHook(unittest.TestCase):
                         "cache_read_tokens": 0,
                         "output_tokens": 200,
                         "tool_calls": [
+                            {"name": "edit_file"},
                             {
                                 "name": "call_mcp_tool",
                                 "args": {
@@ -506,7 +511,7 @@ class TestPreInvocationHook(unittest.TestCase):
                                         }
                                     ),
                                 },
-                            }
+                            },
                         ],
                     },
                     {
@@ -545,7 +550,7 @@ class TestPreInvocationHook(unittest.TestCase):
 
             extra_env = {"GRAVITY_BRIDGE_HOME": str(bridge_home)}
 
-            # 1) /gravity-metrics pending -> liste uniquement la racine (exclut child_cid) sans écrire
+            # 1) /gravity-metrics pending -> liste uniquement la racine (exclut child_cid via transcript) sans lire bridge.db
             out_pend = _run_hook(
                 json.dumps({"cwd": str(ws), "lastUserInput": "/gravity-metrics pending"}),
                 store,
@@ -556,27 +561,10 @@ class TestPreInvocationHook(unittest.TestCase):
             md_pend = out_pend["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
             self.assertIn("7777aaaa", md_pend)
             self.assertNotIn("8888bbbb", md_pend)
-            self.assertIn("job actif", md_pend)
+            self.assertNotIn("job actif", md_pend)
             self.assertFalse((store / "data" / "history.jsonl").exists())
 
-            # 2) Archivage bloqué tant que le job Bridge est 'dispatched' (zéro écriture)
-            out_blk = _run_hook(
-                json.dumps({"cwd": str(ws), "lastUserInput": "/gravity-metrics archive 7777aaaa"}),
-                store,
-                brain,
-                extra_env=extra_env,
-            )
-            self.assertEqual(out_blk.get("terminationBehavior"), "terminate")
-            md_blk = out_blk["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
-            self.assertIn("--force", md_blk)
-            self.assertFalse((store / "data" / "history.jsonl").exists())
-
-            # 3) Clôture du job Bridge -> /gravity-metrics archive <prefix> réussit et unifie les tokens
-            con = sqlite3.connect(str(db_path))
-            con.execute("UPDATE jobs SET status = 'completed' WHERE id = 'job-1'")
-            con.commit()
-            con.close()
-
+            # 2) Aucun blocage Bridge même si bridge.db contient un job 'dispatched' -> archive directe réussit
             out_arch = _run_hook(
                 json.dumps({"cwd": str(ws), "lastUserInput": "/gravity-metrics archive 7777aaaa e2e-arch"}),
                 store,
@@ -587,10 +575,187 @@ class TestPreInvocationHook(unittest.TestCase):
             recs = load_history(store / "data" / "history.jsonl")
             self.assertEqual(len(recs), 1)
             self.assertEqual(recs[0]["label"], "e2e-arch")
-            self.assertEqual(recs[0]["agents"], 2)
-            self.assertEqual(recs[0]["input_tokens"], 15_000)
-            self.assertEqual(recs[0]["bridge_children_count"], 1)
-            self.assertEqual(recs[0]["bridge_workspaces"], ["gravity-metrics"])
+            self.assertEqual(recs[0]["agents"], 1)
+            self.assertEqual(recs[0]["input_tokens"], 10_000)
+            self.assertEqual(recs[0]["bridge_children_count"], 0)
+            self.assertEqual(recs[0]["bridge_workspaces"], [])
+
+    def test_spi2_capture_policy_both_schemas_exclusions_and_bypass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            g_home = root / "gravity_home"
+            store = root / "store"
+            brain = root / "brain"
+            ws = root / "ProjetSPI2"
+            ws.mkdir()
+            (g_home / "core").mkdir(parents=True)
+
+            # Schema A (validator_core list format) + disabled policy (auto_start=False)
+            (g_home / "core" / "modules.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "modules": [
+                            {
+                                "id": "atelier",
+                                "commands": ["/atelier-cmd"],
+                                "capture_policy": {
+                                    "commands": ["/atelier-cmd"],
+                                    "exclude_subcommands": ["init", "sync", "status", "audit", "archive"],
+                                    "consultative_bypass": True,
+                                    "label_prefix": "atelier",
+                                },
+                            },
+                            {
+                                "id": "silent",
+                                "commands": ["/silent-cmd"],
+                                "capture_policy": {
+                                    "commands": ["/silent-cmd"],
+                                    "auto_start": False,
+                                    "exclude_subcommands": [],
+                                    "consultative_bypass": True,
+                                    "label_prefix": "silent",
+                                },
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cid = "9999aaaa-1111-2222-3333-444455556666"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Intro"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                ],
+            )
+            env_g = {"GRAVITY_HOME": str(g_home)}
+
+            # invocationNum=1/True, bare command, excluded subcommands, consultative prompt, auto_start=False -> no capture
+            for payload in (
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 1, "lastUserInput": "/atelier-cmd spec x"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": True, "lastUserInput": "/atelier-cmd spec x"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd init"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd status"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd pourquoi ce module ?"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/silent-cmd build feature"},
+            ):
+                self.assertEqual(_run_hook(json.dumps(payload), store, brain, extra_env=env_g), {})
+            self.assertEqual(load_active_captures(store), {})
+
+            # Action override in consultative question -> captured
+            out_ok = _run_hook(
+                json.dumps({
+                    "conversationId": cid,
+                    "transcriptPath": str(tpath),
+                    "cwd": str(ws),
+                    "invocationNum": 0,
+                    "lastUserInput": "/atelier-cmd comment créer une spec w8 ?",
+                }),
+                store,
+                brain,
+                extra_env=env_g,
+            )
+            self.assertEqual(out_ok, {})
+            caps = load_active_captures(store)
+            self.assertIn(cid, caps)
+            self.assertEqual(caps[cid]["start_step"], 2)
+            self.assertTrue(caps[cid]["label"].startswith("atelier-"))
+            self.assertEqual(caps[cid]["source"], "atelier_auto")
+
+            # Schema B (T3-P14 dict format, invocationNum omitted -> is_initial_invocation True)
+            cid2 = "8888bbbb-1111-2222-3333-444455557777"
+            tpath2 = _write_transcript(
+                brain / cid2,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "init"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                ],
+            )
+            (g_home / "core" / "modules.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "modules": {
+                            "custom": {
+                                "id": "custom",
+                                "commands": ["/custom-mod"],
+                                "capture_policy": {
+                                    "auto_start": True,
+                                    "exclude_subcommands": ["init", "sync", "status", "audit", "archive"],
+                                },
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _run_hook(
+                    json.dumps({"conversationId": cid2, "transcriptPath": str(tpath2), "cwd": str(ws), "lastUserInput": "/custom-mod init"}),
+                    store,
+                    brain,
+                    extra_env=env_g,
+                ),
+                {},
+            )
+            self.assertNotIn(cid2, load_active_captures(store))
+            self.assertEqual(
+                _run_hook(
+                    json.dumps({"conversationId": cid2, "transcriptPath": str(tpath2), "cwd": str(ws), "lastUserInput": "/custom-mod refactor auth"}),
+                    store,
+                    brain,
+                    extra_env=env_g,
+                ),
+                {},
+            )
+            caps2 = load_active_captures(store)
+            self.assertIn(cid2, caps2)
+            self.assertEqual(caps2[cid2]["source"], "custom_auto")
+            self.assertEqual(caps2[cid2]["label"], "custom-refactor-auth")
+
+    def test_session_start_worktree_skip_and_t3_p29_wrapper(self) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("session_start_metrics", START_HOOK)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(mod)
+
+        self.assertTrue(mod._is_subagent_worktree("/home/user/.gemini/antigravity/worktrees/wt-1"))
+        self.assertTrue(mod._is_subagent_worktree("/home/user/gravity-worktrees/repo-w1"))
+        self.assertTrue(mod._is_subagent_worktree(r"C:\repo\worktrees\wt-2"))
+        self.assertFalse(mod._is_subagent_worktree("/home/user/projects/my-app"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            wt_dir = root / "gravity-worktrees" / "repo-w1"
+            wt_dir.mkdir(parents=True)
+            ws_dir = root / "my-repo"
+            ws_dir.mkdir()
+
+            for cid, target_dir in (("wt-cid-1", wt_dir), ("ws-cid-1", ws_dir)):
+                proc = subprocess.run(
+                    [sys.executable, "-B", str(START_HOOK)],
+                    input=json.dumps({"conversationId": cid, "cwd": str(target_dir)}),
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    env={**os.environ, "GRAVITY_METRICS_HOME": str(store), "PYTHONDONTWRITEBYTECODE": "1"},
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(json.loads(proc.stdout), {})
+
+            meta = load_session_meta(store)
+            self.assertNotIn("wt-cid-1", meta)
+            self.assertIn("ws-cid-1", meta)
+            self.assertEqual(meta["ws-cid-1"]["project"], "my-repo")
 
 
 if __name__ == "__main__":
