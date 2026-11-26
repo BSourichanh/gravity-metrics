@@ -276,7 +276,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(recs[0]["label"], "mon-jalon")
             self.assertEqual(recs[0]["input_tokens"], 25_000)
             self.assertEqual(recs[0]["project"], "ProjetHybrid")
-            self.assertEqual(recs[0]["current_phase"], "Clôture / Archivé")
+            self.assertEqual(recs[0]["current_phase"], "Clôture / Enregistrée")
             self.assertEqual([m["id"] for m in recs[0]["milestones"]["phases"]], ["production", "cloture"])
 
     def test_architect_archive_auto_archive_and_bridge_milestones(self) -> None:

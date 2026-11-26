@@ -1,61 +1,34 @@
 #!/usr/bin/env python3
-"""Gestion de l'historique multi-sessions JSONL et verrous (100 % stdlib)."""
+"""Gestion de l'historique multi-sessions JSONL et verrous fail-closed (100 % stdlib)."""
 
 import contextlib
 from datetime import datetime, timezone
+import importlib
 import json
-import os
 from pathlib import Path
-import time
+import sys
 from typing import Any, Dict, Iterator, List, Optional, Union
+
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+
+_atomic_io = importlib.import_module("_shared.atomic_io")
+_file_lock = importlib.import_module("_shared.file_lock")
 
 from .collector import _fmt_iso_utc, slugify_label
 from .pricing import SCHEMA_VERSION
 
 
 @contextlib.contextmanager
-def history_lock(history_path: Union[Path, str]) -> Iterator[None]:
-    """Verrou fichier inter-processus léger (Windows msvcrt / POSIX fcntl) pour history.jsonl."""
+def history_lock(
+    history_path: Union[Path, str],
+    timeout_s: float = 5.0,
+) -> Iterator[None]:
+    """Verrou fichier inter-processus fail-closed (Windows/POSIX) pour history.jsonl."""
     lock_path = Path(history_path).with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = lock_path.open("a+b")
-    locked = False
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            for _ in range(100):
-                try:
-                    fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                    locked = True
-                    break
-                except OSError:
-                    time.sleep(0.02)
-        else:
-            import fcntl
-
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            locked = True
+    with _file_lock.exclusive_file_lock(lock_path, timeout_s=timeout_s):
         yield
-    finally:
-        if locked:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            except Exception:
-                pass
-        try:
-            fh.close()
-        except Exception:
-            pass
 
 
 def to_session_record(
@@ -115,6 +88,12 @@ def to_session_record(
         ws: data["cost_share_pct"]
         for ws, data in (metrics.get("by_workspace") or {}).items()
     }
+    workspace_kinds = {
+        ws: str(data.get("workspace_kind") or "code")
+        for ws, data in (metrics.get("by_workspace") or {}).items()
+        if isinstance(data, dict)
+    }
+    tech_sig = metrics.get("technical_signals") or s
     ms_raw = metrics.get("milestones") or {}
     ms_compact = None
     if isinstance(ms_raw, dict) and isinstance(ms_raw.get("phases"), list):
@@ -160,6 +139,13 @@ def to_session_record(
         "bridge_children_count": bridge_children_count,
         "bridge_workspaces": bridge_workspaces,
         "workspace_share_pct": workspace_shares,
+        "workspace_kinds": workspace_kinds,
+        "thinking_calls": int(tech_sig.get("thinking_calls") or 0),
+        "thinking_est_tokens": int(tech_sig.get("thinking_est_tokens") or 0),
+        "compaction_count": int(tech_sig.get("compaction_count") or 0),
+        "latency_avg_ms": float(tech_sig.get("latency_avg_ms") or 0.0),
+        "latency_p50_ms": int(tech_sig.get("latency_p50_ms") or 0),
+        "latency_p95_ms": int(tech_sig.get("latency_p95_ms") or 0),
         "primary_model": primary_model,
         "models": models_compact,
         "agents": s["total_agents"],
@@ -186,6 +172,22 @@ def to_session_record(
         "rewind_calls": eff["rewind_waste"]["rewind_calls"],
         "interrupted_agents": eff["interrupted_agents"]["count"],
     }
+    root_ag = next(
+        (a for a in agents_list if isinstance(a, dict) and a.get("conversation_id") == cid),
+        None,
+    )
+    root_last_step = metrics.get("root_last_step_index")
+    if not _is_int_step(root_last_step):
+        cand_step = root_ag.get("last_step_index") if isinstance(root_ag, dict) else None
+        root_last_step = cand_step if _is_int_step(cand_step) else None
+    root_llm_calls = metrics.get("root_llm_calls")
+    if not _is_int_step(root_llm_calls):
+        cand_calls = root_ag.get("llm_calls") if isinstance(root_ag, dict) else None
+        root_llm_calls = int(cand_calls) if _is_int_step(cand_calls) else None
+    if root_last_step is not None:
+        rec_out["root_last_step_index"] = root_last_step
+    if root_llm_calls is not None:
+        rec_out["root_llm_calls"] = root_llm_calls
     if ms_compact is not None:
         rec_out["current_phase"] = ms_compact["current_phase"]
         rec_out["milestones"] = ms_compact
@@ -213,13 +215,19 @@ def load_history(history_path: Union[Path, str]) -> List[Dict[str, Any]]:
     return records
 
 
+def _is_int_step(val: Any) -> bool:
+    return isinstance(val, int) and not isinstance(val, bool)
+
+
 def find_archived_session(
     records: List[Dict[str, Any]],
     conversation_id: str,
     window_start_step: Optional[int],
 ) -> Optional[Dict[str, Any]]:
-    """Retourne l'enregistrement archivé correspondant à `(conversation_id, window_start_step)` ou couvert par `--full`."""
+    """Retourne l'enregistrement archivé correspondant à `(conversation_id, window_start_step)` (tolérance ±2 steps) ou couvert par `--full`."""
     exact_match: Optional[Dict[str, Any]] = None
+    tolerant_match: Optional[Dict[str, Any]] = None
+    tolerant_dist = 3
     full_match: Optional[Dict[str, Any]] = None
     any_match: Optional[Dict[str, Any]] = None
 
@@ -233,6 +241,11 @@ def find_archived_session(
         if rec_wstep == window_start_step:
             exact_match = dict(rec)
             break
+        if _is_int_step(window_start_step) and _is_int_step(rec_wstep):
+            dist = abs(rec_wstep - window_start_step)
+            if dist <= 2 and dist < tolerant_dist:
+                tolerant_dist = dist
+                tolerant_match = dict(rec)
         if rec_wstep is None and full_match is None:
             full_match = dict(rec)
         if any_match is None:
@@ -240,6 +253,8 @@ def find_archived_session(
 
     if exact_match is not None:
         return exact_match
+    if tolerant_match is not None:
+        return tolerant_match
     if full_match is not None:
         return full_match
     if window_start_step is None and any_match is not None:
@@ -248,14 +263,14 @@ def find_archived_session(
 
 
 def save_history(history_path: Union[Path, str], records: List[Dict[str, Any]]) -> None:
-    """Sauvegarde la liste des sessions dans history.jsonl (UTF-8)."""
+    """Sauvegarde atomiquement la liste des sessions dans history.jsonl (UTF-8 sans BOM, LF)."""
     hpath = Path(history_path)
-    hpath.parent.mkdir(parents=True, exist_ok=True)
-    if not records:
-        hpath.write_text("", encoding="utf-8")
-        return
-    payload = "\n".join(json.dumps(rec, ensure_ascii=False) for rec in records) + "\n"
-    hpath.write_text(payload, encoding="utf-8")
+    payload = (
+        "\n".join(json.dumps(rec, ensure_ascii=False) for rec in records) + "\n"
+        if records
+        else ""
+    )
+    _atomic_io.write_text_atomic(hpath, payload)
 
 
 def resolve_session_index(records: List[Dict[str, Any]], key: str) -> int:
@@ -282,7 +297,7 @@ def resolve_session_index(records: List[Dict[str, Any]], key: str) -> int:
 
 
 def upsert_session(records: List[Dict[str, Any]], record: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Ajoute ou met à jour une session dans la liste historique."""
+    """Ajoute ou met à jour une session dans la liste historique (tolérance ±2 steps sans doublon)."""
     updated = [dict(r) for r in records]
     new_rec = dict(record)
     new_cid = new_rec.get("conversation_id")
@@ -293,6 +308,17 @@ def upsert_session(records: List[Dict[str, Any]], record: Dict[str, Any]) -> Lis
         if r.get("conversation_id") == new_cid and r.get("window_start_step") == new_wstep:
             match_idx = idx
             break
+    if match_idx is None and _is_int_step(new_wstep):
+        best_dist = 3
+        for idx, r in enumerate(updated):
+            if r.get("conversation_id") != new_cid:
+                continue
+            r_wstep = r.get("window_start_step")
+            if _is_int_step(r_wstep):
+                dist = abs(r_wstep - new_wstep)
+                if dist <= 2 and dist < best_dist:
+                    best_dist = dist
+                    match_idx = idx
     if match_idx is None and new_rec.get("label"):
         for idx, r in enumerate(updated):
             if r.get("label") == new_rec.get("label"):

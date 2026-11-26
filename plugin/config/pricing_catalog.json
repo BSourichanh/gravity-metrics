@@ -51,6 +51,18 @@
           "output": 15.0,
           "note": "Tarif plat jusqu'à 1M tokens"
         },
+        "gemini-pro-orchestrator-neon*": {
+          "input": 3.0,
+          "cache_read": 0.15,
+          "output": 15.0,
+          "note": "Alias estimé palier Gemini 4 Neon"
+        },
+        "gemini-flash-worker-agy*": {
+          "input": 0.75,
+          "cache_read": 0.075,
+          "output": 3.75,
+          "note": "Alias estimé palier Gemini 3.8 Flash (introductif 2026)"
+        },
         "gemini-3.5-flash-lite*": {
           "input": 0.3,
           "cache_read": 0.03,
@@ -109,6 +121,18 @@
           "input": 3.0,
           "cache_read": 0.15,
           "output": 15.0
+        },
+        "gemini-pro-orchestrator-neon*": {
+          "input": 3.0,
+          "cache_read": 0.15,
+          "output": 15.0,
+          "note": "Alias estimé palier Gemini 4 Neon"
+        },
+        "gemini-flash-worker-agy*": {
+          "input": 1.5,
+          "cache_read": 0.15,
+          "output": 7.5,
+          "note": "Alias estimé palier Gemini 3.8 Flash (standard 2027)"
         },
         "gemini-3.5-flash-lite*": {
           "input": 0.3,

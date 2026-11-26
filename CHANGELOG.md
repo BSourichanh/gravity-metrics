@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Locks, Atomic I/O, `SPI-3` Signals, `technical_signals` & Pricing (`TASK-MET-01b`, `plugin/metrics/`, `plugin/config/`):**
+  - Migrated `plugin/metrics/history.py`, `plugin/metrics/lifecycle.py`, and `plugin/metrics/store.py` onto `_shared.file_lock` (fail-closed `TimeoutError` on POSIX & Windows) and `_shared.atomic_io` (`newline="\n"`, UTF-8 no-BOM, symlink/junction rejection).
+  - Updated `plugin/metrics/store.py` to remove `bridge_links`/`PendingBridgeJobsError` enforcement (keeping temporary compat stubs until W12), port `dev` `update_sealed`/`self_archiving` lifecycle, and emit `signal_v1` (`session-metrics`) via `_shared.signal_bus` with strict kebab-case slug normalization (`SPI-3`).
+  - Ported `plugin/metrics/technical_signals.py` and `plugin/config/pricing_catalog.json` aliases (`gemini-pro-orchestrator-neon*`, `gemini-flash-worker-agy*`) from `dev`.
 - **Collector SRP Split & `_shared` Sync (`TASK-MET-01a`, `plugin/metrics/`):**
   - Synced read-only `plugin/_shared/` and `plugin/.shared_manifest.json` from `gravity/shared/gravity_shared/`.
   - Split `plugin/metrics/collector.py` into 5 modules strictly `< 750` lines (`prompt_classifier.py`, `transcript_index.py`, `agent_tree.py`, `milestone_analyzer.py`, `collector.py` façade), delegating transcript/worktree/ISO/shell-exit helpers to `_shared.transcript_reader`, removing `bridge_links` coupling, preserving `dev` collector fixes (`invalid_steps`, `shell_nonzero_steps`, `cold_cache_waste`, `technical_signals`, `by_workspace`, anti-noise `pending`, `self_archiving`), and adding `$GRAVITY_HOME/workflow/workspaces/<slug>-<sha256[:8]>/profile.json` resolution (`T3-P25`).

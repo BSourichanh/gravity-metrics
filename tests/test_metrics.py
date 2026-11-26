@@ -1192,6 +1192,357 @@ class TestReconciliationAndCompliance(unittest.TestCase):
             self.assertTrue(m["agents"][0]["clean_termination"])
             self.assertIn("gravity-metrics", m["by_workspace"])
 
+    def test_locks_fail_closed_timeout_posix_and_simulated_windows(self) -> None:
+        import fcntl
+        import importlib
+        import types
+        from metrics.history import history_lock
+        from metrics.lifecycle import state_file_lock
+
+        file_lock_mod = importlib.import_module("_shared.file_lock")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hpath = root / "history.jsonl"
+            hlock = hpath.with_suffix(".lock")
+            spath = root / "session_meta.json"
+            slock = spath.with_suffix(".lock")
+
+            with hlock.open("a+b") as holder:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    with self.assertRaises(TimeoutError):
+                        with history_lock(hpath, timeout_s=0.05):
+                            pass
+                finally:
+                    fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+            with slock.open("a+b") as holder:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    with self.assertRaises(TimeoutError):
+                        with state_file_lock(spath, timeout_s=0.05):
+                            pass
+                finally:
+                    fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+            fake_msvcrt = types.SimpleNamespace(
+                LK_NBLCK=1,
+                LK_UNLCK=0,
+                locking=mock.Mock(side_effect=OSError("win lock busy")),
+            )
+            fake_win_os = types.SimpleNamespace(
+                name="nt",
+                fspath=os.fspath,
+                path=os.path,
+                SEEK_END=os.SEEK_END,
+            )
+            with mock.patch.object(file_lock_mod, "os", fake_win_os), mock.patch.object(
+                file_lock_mod, "msvcrt", fake_msvcrt
+            ):
+                with self.assertRaises(TimeoutError):
+                    with history_lock(hpath, timeout_s=0.05):
+                        pass
+                with self.assertRaises(TimeoutError):
+                    with state_file_lock(spath, timeout_s=0.05):
+                        pass
+
+            sym_lock = root / "sym.lock"
+            sym_lock.symlink_to(hlock)
+            with self.assertRaises(ValueError):
+                with history_lock(root / "sym.jsonl", timeout_s=0.05):
+                    pass
+
+    def test_atomic_lf_writes_and_symlink_rejection(self) -> None:
+        from metrics.lifecycle import record_session_meta, start_active_capture
+        from metrics.store import regenerate_views, write_session_details
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            hist = store / "data" / "history.jsonl"
+            rec = {
+                "schema_version": "2.1.0",
+                "status": "archived",
+                "added_at": "2026-11-26T10:00:00Z",
+                "archived_at": "2026-11-26T10:00:00Z",
+                "label": "lf-test",
+                "detail_slug": "lf-test",
+                "conversation_id": "11111111-1111-4111-8111-111111111111",
+                "note": "line1\r\nline2",
+                "project": "gravity-metrics",
+                "pricing_profile": "2026_nov_standard",
+                "started_at": "2026-11-26T10:00:00Z",
+                "ended_at": "2026-11-26T10:01:00Z",
+                "wall_clock_s": 60.0,
+                "primary_model": "gemini-3.8-flash-tiered",
+                "models": {},
+                "agents": 1,
+                "max_depth": 0,
+                "llm_calls": 1,
+                "tool_calls": 0,
+                "user_inputs": 1,
+                "error_steps": 0,
+                "error_rate_pct": 0.0,
+                "input_tokens": 100,
+                "cache_read_tokens": 0,
+                "output_tokens": 10,
+                "total_tokens": 110,
+                "cache_hit_rate_pct": 0.0,
+                "max_context_tokens": 100,
+                "cost_usd": 0.001,
+                "cost_input_usd": 0.0005,
+                "cost_cache_usd": 0.0,
+                "cost_output_usd": 0.0005,
+                "cache_savings_usd": 0.0,
+                "cost_2027_usd": 0.002,
+                "category_share_pct": {},
+                "duplicate_spawns": 0,
+                "rewind_calls": 0,
+                "interrupted_agents": 0,
+            }
+            save_history(hist, [rec])
+            record_session_meta("11111111-1111-4111-8111-111111111111", cwd=str(root), project="gravity-metrics", store_dir=store)
+            start_active_capture("11111111-1111-4111-8111-111111111111", start_step=0, label="lf-test", store_dir=store)
+            regenerate_views(store, [rec])
+            sample_metrics = {
+                "schema_version": "2.1.0",
+                "label": "lf-test",
+                "root_conversation_id": "11111111-1111-4111-8111-111111111111",
+                "project": "gravity-metrics",
+                "pricing_profile": "2026_nov_standard",
+                "secondary_pricing_profile": "2027_standard",
+                "summary": {
+                    "total_agents": 1, "max_tree_depth": 0, "total_llm_calls": 1, "total_tool_calls": 0,
+                    "total_user_inputs": 1, "total_error_steps": 0, "error_rate_pct": 0.0,
+                    "input_tokens": 100, "cache_read_tokens": 0, "output_tokens": 10, "total_tokens": 110,
+                    "cache_hit_rate_pct": 0.0, "first_ts": "2026-11-26T10:00:00Z", "last_ts": "2026-11-26T10:01:00Z",
+                    "wall_clock_s": 60.0, "sum_agent_active_s": 60.0, "parallelism_factor": 1.0,
+                    "cost_usd": {"total_usd": 0.001, "input_usd": 0.0005, "cache_read_usd": 0.0, "output_usd": 0.0005, "without_cache_usd": 0.001, "cache_savings_usd": 0.0},
+                    "cost_usd_projection": {"total_usd": 0.002},
+                },
+                "by_category": {}, "by_model": {}, "by_phase": {},
+                "tool_usage": {"total_calls": 0, "by_tool": {}, "top_errors": []},
+                "efficiency_and_waste": {
+                    "verification_to_build_cost_ratio": 0.0,
+                    "duplicate_role_spawns": {"duplicate_agent_count": 0, "duplicate_calls": 0, "duplicate_cost_usd": 0.0, "groups": []},
+                    "rewind_waste": {"rewind_calls": 0, "rewind_cost_usd": 0.0},
+                    "interrupted_agents": {"count": 0, "total_llm_calls": 0, "total_cost_usd": 0.0},
+                    "context_bloat": {"max_context_tokens_overall": 100, "calls_over_100k_ctx": 0, "calls_over_128k_ctx": 0, "calls_over_200k_ctx": 0},
+                },
+                "agents": [],
+                "data_quality": {"unmatched_models": [], "missing_transcripts": [], "malformed_lines": 0},
+            }
+            write_session_details(store, "lf-test", sample_metrics)
+
+            for fpath in (
+                hist,
+                store / "session_meta.json",
+                store / "active_captures.json",
+                store / "METRICS.md",
+                store / "reports" / "lf-test.json",
+                store / "reports" / "lf-test.md",
+            ):
+                raw = fpath.read_bytes()
+                self.assertFalse(raw.startswith(b"\xef\xbb\xbf"), f"BOM found in {fpath}")
+                self.assertNotIn(b"\r", raw, f"CR/CRLF found in {fpath}")
+
+            sym_hist = root / "sym_history.jsonl"
+            sym_hist.symlink_to(hist)
+            with self.assertRaises(ValueError):
+                save_history(sym_hist, [rec])
+
+    def test_spi3_signal_emission_slug_normalization_and_window(self) -> None:
+        import importlib
+
+        signal_bus = importlib.import_module("_shared.signal_bus")
+        expected_keys = {
+            "avg_error_rate_pct",
+            "avg_cache_hit_rate_pct",
+            "max_context_tokens",
+            "recent_duplicate_spawns",
+            "recent_rewind_calls",
+            "recent_interrupted_agents",
+            "recent_bridge_sessions",
+            "high_output_cost_ratio",
+        }
+
+        def _make_metrics(cid: str, project: str, err: float, cache: float, ctx: int, dup: int, rw: int, intr: int, cost: float, out_cost: float, ts_end: str) -> dict:
+            return {
+                "schema_version": "2.1.0",
+                "label": f"lbl-{cid[:8]}",
+                "root_conversation_id": cid,
+                "project": project,
+                "pricing_profile": "2026_nov_standard",
+                "secondary_pricing_profile": "2027_standard",
+                "window": {"mode": "full_conversation", "start_step_index": None, "first_prompt": "run"},
+                "summary": {
+                    "total_agents": 1, "max_tree_depth": 0, "total_llm_calls": 2, "total_tool_calls": 2,
+                    "total_user_inputs": 1, "total_error_steps": 0, "error_rate_pct": err,
+                    "input_tokens": 1000, "cache_read_tokens": 1000, "output_tokens": 100, "total_tokens": 2100,
+                    "cache_hit_rate_pct": cache, "first_ts": "2026-11-26T10:00:00Z", "last_ts": ts_end,
+                    "wall_clock_s": 10.0, "sum_agent_active_s": 10.0, "parallelism_factor": 1.0,
+                    "cost_usd": {"total_usd": cost, "input_usd": cost - out_cost, "cache_read_usd": 0.0, "output_usd": out_cost, "without_cache_usd": cost, "cache_savings_usd": 0.0},
+                    "cost_usd_projection": {"total_usd": cost},
+                },
+                "by_category": {}, "by_model": {}, "by_phase": {}, "by_workspace": {},
+                "tool_usage": {"total_calls": 2, "by_tool": {}, "top_errors": []},
+                "bridge_pending_jobs": [{"thread_id": "legacy-ignored"}],
+                "efficiency_and_waste": {
+                    "verification_to_build_cost_ratio": 0.0,
+                    "duplicate_role_spawns": {"duplicate_agent_count": dup, "duplicate_calls": 0, "duplicate_cost_usd": 0.0, "groups": []},
+                    "rewind_waste": {"rewind_calls": rw, "rewind_cost_usd": 0.0},
+                    "interrupted_agents": {"count": intr, "total_llm_calls": 0, "total_cost_usd": 0.0},
+                    "context_bloat": {"max_context_tokens_overall": ctx, "calls_over_100k_ctx": 0, "calls_over_128k_ctx": 0, "calls_over_200k_ctx": 0},
+                },
+                "agents": [],
+                "data_quality": {"unmatched_models": [], "missing_transcripts": [], "malformed_lines": 0},
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grav_home = root / "grav_home"
+            store = grav_home / "metrics"
+            hist = store / "data" / "history.jsonl"
+
+            with mock.patch.dict(os.environ, {"GRAVITY_HOME": str(grav_home)}, clear=False):
+                os.environ.pop("GRAVITY_METRICS_HOME", None)
+                for idx in range(6):
+                    cid = f"sig0000{idx}-1111-4111-8111-111111111111"
+                    m = _make_metrics(
+                        cid, "My.Project_v2!", err=float(idx * 2), cache=50.0 + idx,
+                        ctx=10_000 * (idx + 1), dup=idx, rw=1, intr=1 if idx >= 4 else 0,
+                        cost=1.0, out_cost=0.25, ts_end=f"2026-11-26T10:0{idx}:00Z",
+                    )
+                    record_session_metrics(m, store_dir=store, history_path=hist, label=f"s-{idx}")
+
+                sig_path = grav_home / "signals" / "session-metrics" / "my-project-v2.json"
+                self.assertTrue(sig_path.is_file(), f"Missing SPI-3 signal file: {sig_path}")
+                sig = signal_bus.read_signal("session-metrics", "my-project-v2", gravity_home=grav_home)
+                self.assertIsNotNone(sig)
+                self.assertEqual(sig["schema_version"], 1)
+                self.assertEqual(sig["topic"], "session-metrics")
+                self.assertEqual(sig["producer"], "metrics")
+                self.assertEqual(sig["sample_count"], 5)
+                self.assertEqual(sig["window_size"], 5)
+                payload = sig["payload"]
+                self.assertEqual(set(payload.keys()), expected_keys)
+                self.assertEqual(payload["avg_error_rate_pct"], 6.0)
+                self.assertEqual(payload["avg_cache_hit_rate_pct"], 53.0)
+                self.assertEqual(payload["max_context_tokens"], 60_000)
+                self.assertEqual(payload["recent_duplicate_spawns"], 15)
+                self.assertEqual(payload["recent_rewind_calls"], 5)
+                self.assertEqual(payload["recent_interrupted_agents"], 2)
+                self.assertEqual(payload["recent_bridge_sessions"], 0)
+                self.assertAlmostEqual(payload["high_output_cost_ratio"], 0.25, places=4)
+
+                # Empty project -> "global"; punctuation-only project -> "default"
+                record_session_metrics(
+                    _make_metrics("sig-glob-1111-4111-8111-111111111111", "", 1.0, 80.0, 5000, 0, 0, 0, 0.5, 0.1, "2026-11-26T11:00:00Z"),
+                    store_dir=store, history_path=hist, label="glob-run",
+                )
+                self.assertIsNotNone(signal_bus.read_signal("session-metrics", "global", gravity_home=grav_home))
+
+                record_session_metrics(
+                    _make_metrics("sig-dflt-1111-4111-8111-111111111111", "___...", 1.0, 80.0, 5000, 0, 0, 0, 0.5, 0.1, "2026-11-26T11:05:00Z"),
+                    store_dir=store, history_path=hist, label="dflt-run",
+                )
+                self.assertIsNotNone(signal_bus.read_signal("session-metrics", "default", gravity_home=grav_home))
+
+    def test_dev_history_tolerance_lifecycle_worktree_and_update_sealed(self) -> None:
+        from metrics.history import find_archived_session
+        from metrics.lifecycle import (
+            current_turn_start_step_in_transcript,
+            load_session_meta,
+            next_step_index_in_transcript,
+            record_session_meta,
+            start_active_capture,
+        )
+        from metrics.store import archive_conversation
+
+        cid = "tol00001-1111-4111-8111-111111111111"
+        base_rec = {"conversation_id": cid, "status": "archived", "window_start_step": 10, "label": "tol-1"}
+        self.assertIsNotNone(find_archived_session([base_rec], cid, 12))
+        self.assertIsNone(find_archived_session([base_rec], cid, 13))
+        up = upsert_session([base_rec], {**base_rec, "window_start_step": 11, "label": "tol-1"})
+        self.assertEqual(len(up), 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            hist = store / "data" / "history.jsonl"
+
+            self.assertEqual(record_session_meta(cid, cwd="/tmp/.worktrees/wt-1", store_dir=store), {})
+            record_session_meta(cid, cwd=str(root / "gravity-metrics"), store_dir=store)
+            self.assertIn(cid, load_session_meta(store))
+
+            c1 = start_active_capture(cid, start_step=2, label="first", source="auto", store_dir=store, overwrite=False)
+            c2 = start_active_capture(cid, start_step=4, label="second", source="manual", store_dir=store, overwrite=False)
+            self.assertEqual(c1["label"], "first")
+            self.assertEqual(c2["label"], "first")
+            c3 = start_active_capture(cid, start_step=4, label="second", source="manual", store_dir=store, overwrite=True)
+            self.assertEqual(c3["label"], "second")
+
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:00:00Z", "content": "/gravity-workflow run"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 50},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:01:00Z", "content": "<USER_REQUEST>next turn</USER_REQUEST>"},
+                ],
+            )
+            self.assertEqual(next_step_index_in_transcript(tpath), 3)
+            self.assertEqual(current_turn_start_step_in_transcript(tpath, expected_prompt="next turn"), 2)
+
+            archive_conversation(
+                cid, store_dir=store, history_path=hist, brain_dir=brain,
+                catalog_path=CATALOG_PATH, label="sealed-v1", full_conversation=True,
+            )
+            _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:00:00Z", "content": "/gravity-workflow run"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2000, "cache_read_tokens": 0, "output_tokens": 100},
+                ],
+            )
+            updated_rec, all_recs, _ = archive_conversation(
+                cid, store_dir=store, history_path=hist, brain_dir=brain,
+                catalog_path=CATALOG_PATH, label="sealed-v1", update_sealed=True, self_archiving=True,
+            )
+            self.assertEqual(len(all_recs), 1)
+            self.assertEqual(updated_rec["input_tokens"], 2000)
+
+    def test_technical_signals_and_pricing_catalog_aliases(self) -> None:
+        from metrics.technical_signals import aggregate_technical_signals, extract_technical_signals
+
+        steps = [
+            {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:00:00Z", "content": "Go"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:01Z", "input_tokens": 50_000, "cache_read_tokens": 0, "thinking": "a" * 40},
+            {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:03Z", "input_tokens": 20_000, "cache_read_tokens": 0, "thinking": [{"text": "b" * 20}]},
+            {"step_index": 3, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:15:00Z", "content": "/compact"},
+            {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:15:10Z", "input_tokens": 5_000, "cache_read_tokens": 0},
+        ]
+        sig = extract_technical_signals(steps)
+        self.assertEqual(sig["thinking_calls"], 2)
+        self.assertEqual(sig["thinking_est_tokens"], 15)
+        self.assertEqual(sig["compaction_count"], 2)
+        self.assertEqual(sig["latency_p50_ms"], 2000)
+        self.assertEqual(sig["latency_p95_ms"], 10000)
+        agg = aggregate_technical_signals([{"thinking_calls": 1, "thinking_chars": 8, "thinking_est_tokens": 2, "compaction_count": 1, "_latency_samples_ms": [100, 300]}])
+        self.assertEqual(agg["latency_samples_count"], 2)
+        self.assertEqual(agg["latency_p50_ms"], 100)
+
+        catalog = load_pricing_catalog(CATALOG_PATH)
+        p_neon_26, fb_neon_26 = resolve_model_pricing("gemini-pro-orchestrator-neon", catalog, "2026_nov_standard")
+        self.assertFalse(fb_neon_26)
+        self.assertEqual((p_neon_26["input"], p_neon_26["cache_read"], p_neon_26["output"]), (3.0, 0.15, 15.0))
+        p_agy_26, fb_agy_26 = resolve_model_pricing("gemini-flash-worker-agy-high", catalog, "2026_nov_standard")
+        self.assertFalse(fb_agy_26)
+        self.assertEqual((p_agy_26["input"], p_agy_26["cache_read"], p_agy_26["output"]), (0.75, 0.075, 3.75))
+        p_agy_27, fb_agy_27 = resolve_model_pricing("gemini-flash-worker-agy", catalog, "2027_standard")
+        self.assertFalse(fb_agy_27)
+        self.assertEqual((p_agy_27["input"], p_agy_27["cache_read"], p_agy_27["output"]), (1.5, 0.15, 7.5))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,12 +3,19 @@
 
 import contextlib
 from datetime import datetime, timezone
+import importlib
 import json
-import os
 from pathlib import Path
-import tempfile
-import time
+import sys
 from typing import Any, Dict, Iterator, Optional, Union
+
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+
+_atomic_io = importlib.import_module("_shared.atomic_io")
+_file_lock = importlib.import_module("_shared.file_lock")
+_tr_reader = importlib.import_module("_shared.transcript_reader")
 
 from .pricing import default_store_dir
 
@@ -20,48 +27,14 @@ def _now_iso_utc() -> str:
 
 
 @contextlib.contextmanager
-def state_file_lock(target_path: Union[Path, str]) -> Iterator[None]:
-    """Verrou fichier inter-processus léger (Windows msvcrt / POSIX fcntl)."""
+def state_file_lock(
+    target_path: Union[Path, str],
+    timeout_s: float = 5.0,
+) -> Iterator[None]:
+    """Verrou fichier inter-processus fail-closed (Windows/POSIX) via _shared.file_lock."""
     lock_path = Path(target_path).with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = lock_path.open("a+b")
-    locked = False
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            for _ in range(100):
-                try:
-                    fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                    locked = True
-                    break
-                except OSError:
-                    time.sleep(0.02)
-        else:
-            import fcntl
-
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            locked = True
+    with _file_lock.exclusive_file_lock(lock_path, timeout_s=timeout_s):
         yield
-    finally:
-        if locked:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            except Exception:
-                pass
-        try:
-            fh.close()
-        except Exception:
-            pass
 
 
 def _read_json_dict(path: Path) -> Dict[str, Any]:
@@ -75,22 +48,16 @@ def _read_json_dict(path: Path) -> Dict[str, Any]:
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.stem}_", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-        os.replace(tmp_name, str(path))
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    _atomic_io.write_json_atomic(path, payload, indent=2, ensure_ascii=False)
 
 
 def _resolve_dir(store_dir: Optional[Union[Path, str]]) -> Path:
     return Path(store_dir).expanduser() if store_dir is not None else default_store_dir()
+
+
+def _is_worktree_path(cwd: str) -> bool:
+    """Retourne True si `cwd` correspond à un répertoire worktree temporaire."""
+    return bool(_tr_reader.is_worktree_path(cwd))
 
 
 def load_session_meta(store_dir: Optional[Union[Path, str]] = None) -> Dict[str, Dict[str, Any]]:
@@ -103,7 +70,10 @@ def load_session_meta(store_dir: Optional[Union[Path, str]] = None) -> Dict[str,
     return {
         str(k): dict(v)
         for k, v in sessions.items()
-        if isinstance(k, str) and k.strip() and isinstance(v, dict)
+        if isinstance(k, str)
+        and k.strip()
+        and isinstance(v, dict)
+        and not _is_worktree_path(str(v.get("cwd") or ""))
     }
 
 
@@ -118,17 +88,27 @@ def record_session_meta(
     cid = str(conversation_id or "").strip()
     if not cid:
         return {}
+    clean_cwd = str(cwd or "").strip()
+    if _is_worktree_path(clean_cwd):
+        return {}
     s_dir = _resolve_dir(store_dir)
     meta_path = s_dir / "session_meta.json"
     now_iso = _now_iso_utc()
-    clean_cwd = str(cwd or "").strip()
     clean_proj = str(project or "").strip()
     if not clean_proj and clean_cwd:
         clean_proj = Path(clean_cwd).name
 
     with state_file_lock(meta_path):
         raw = _read_json_dict(meta_path)
-        sessions = raw.get("sessions") if isinstance(raw.get("sessions"), dict) else {}
+        raw_sessions = raw.get("sessions") if isinstance(raw.get("sessions"), dict) else {}
+        sessions = {
+            str(k): v
+            for k, v in raw_sessions.items()
+            if isinstance(k, str)
+            and k.strip()
+            and isinstance(v, dict)
+            and not _is_worktree_path(str(v.get("cwd") or ""))
+        }
         prev = sessions.get(cid) if isinstance(sessions.get(cid), dict) else {}
         entry = {
             "cwd": clean_cwd or str(prev.get("cwd") or ""),
@@ -146,6 +126,27 @@ def record_session_meta(
             sessions = dict(ordered)
         _atomic_write_json(meta_path, {"schema_version": 1, "sessions": sessions})
     return entry
+
+
+def next_step_index_in_transcript(
+    transcript_path: Optional[Union[Path, str]],
+) -> int:
+    """Retourne `max(step_index) + 1` depuis un `transcript.jsonl` (repli `0` si absent/illisible)."""
+    return int(_tr_reader.next_step_index(transcript_path))
+
+
+def _normalize_user_prompt(text: Optional[str]) -> str:
+    """Normalise un prompt utilisateur en retirant métadonnées/balises et en compressant les espaces."""
+    return str(_tr_reader.normalize_user_prompt(text))
+
+
+def current_turn_start_step_in_transcript(
+    transcript_path: Optional[Union[Path, str]],
+    *,
+    expected_prompt: Optional[str] = None,
+) -> int:
+    """Retourne le `step_index` du `USER_INPUT` courant (ancré par `expected_prompt` si fourni)."""
+    return int(_tr_reader.current_turn_start_step(transcript_path, expected_prompt=expected_prompt))
 
 
 def load_active_captures(store_dir: Optional[Union[Path, str]] = None) -> Dict[str, Dict[str, Any]]:
@@ -168,9 +169,11 @@ def start_active_capture(
     start_step: int,
     label: str = "",
     project: str = "",
+    source: str = "manual",
     store_dir: Optional[Union[Path, str]] = None,
+    overwrite: bool = False,
 ) -> Dict[str, Any]:
-    """Enregistre ou remplace une fenêtre de capture active pour `conversation_id`."""
+    """Enregistre une fenêtre de capture active pour `conversation_id` (idempotente si `overwrite=False`)."""
     cid = str(conversation_id or "").strip()
     if not cid:
         raise ValueError("conversation_id requis pour démarrer une capture.")
@@ -181,12 +184,15 @@ def start_active_capture(
         "start_step": max(0, int(start_step)),
         "label": str(label or "").strip(),
         "project": str(project or "").strip(),
+        "source": str(source or "manual").strip() or "manual",
         "started_at": now_iso,
         "updated_at": now_iso,
     }
     with state_file_lock(cap_path):
         raw = _read_json_dict(cap_path)
         captures = raw.get("captures") if isinstance(raw.get("captures"), dict) else {}
+        if not overwrite and isinstance(captures.get(cid), dict):
+            return dict(captures[cid])
         captures[cid] = entry
         _atomic_write_json(cap_path, {"schema_version": 1, "captures": captures})
     return entry
