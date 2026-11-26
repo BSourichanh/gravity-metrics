@@ -250,7 +250,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             )
             con.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-wf-mix", "gravity-studio", "gravity-metrics", "handoff", "done", bridge_cid, root_id, "2026-11-22T10:00:30Z"),
+                ("thr-wf-mix", "gravity-workshop", "gravity-metrics", "handoff", "done", bridge_cid, root_id, "2026-11-22T10:00:30Z"),
             )
             con.execute(
                 "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -280,7 +280,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                 brain,
                 CATALOG_PATH,
                 gravity_window=True,
-                project="gravity-studio",
+                project="gravity-workshop",
                 bridge_db_path=db_path,
             )
             summary = metrics["summary"]
@@ -295,7 +295,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                 self.assertEqual(wag["bridge_workspace"], "gravity-metrics")
                 self.assertEqual(wag["depth"], 2)
 
-            self.assertEqual(metrics["by_workspace"]["gravity-studio"]["agents"], 1)
+            self.assertEqual(metrics["by_workspace"]["gravity-workshop"]["agents"], 1)
             self.assertEqual(metrics["by_workspace"]["gravity-metrics"]["agents"], 7)
 
             self.assertEqual(metrics["by_category"]["orchestration"]["agents"], 3)
@@ -391,7 +391,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             )
             con.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-cb-1", "gravity-studio", "gravity-metrics", "handoff", "open", child_id, root_id, "2026-11-22T11:00:20Z"),
+                ("thr-cb-1", "gravity-workshop", "gravity-metrics", "handoff", "open", child_id, root_id, "2026-11-22T11:00:20Z"),
             )
             # Outbound terminé + callback actif pointant vers root_id avec caller=child_id
             con.execute(
@@ -400,17 +400,17 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             )
             con.execute(
                 "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("job-cb-1", "thr-cb-1", "gravity-studio", "send_message", "callback", root_id, child_id, "dispatched", "2026-11-22T11:02:00Z"),
+                ("job-cb-1", "thr-cb-1", "gravity-workshop", "send_message", "callback", root_id, child_id, "dispatched", "2026-11-22T11:02:00Z"),
             )
 
             # Thread sans job outbound en base, mais avec callback actif uniquement
             con.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-cb-2", "gravity-studio", "gravity-bridge", "question", "open", child_no_out, root_no_out, "2026-11-22T11:10:20Z"),
+                ("thr-cb-2", "gravity-workshop", "gravity-bridge", "question", "open", child_no_out, root_no_out, "2026-11-22T11:10:20Z"),
             )
             con.execute(
                 "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("job-cb-2", "thr-cb-2", "gravity-studio", "send_message", "callback", root_no_out, child_no_out, "queued", "2026-11-22T11:12:00Z"),
+                ("job-cb-2", "thr-cb-2", "gravity-workshop", "send_message", "callback", root_no_out, child_no_out, "queued", "2026-11-22T11:12:00Z"),
             )
             con.commit()
             con.close()
@@ -479,7 +479,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             )
             con1.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("thr-v1", "gravity-studio", "gravity-metrics", "handoff", "open", child_id, "2026-11-22T11:00:20Z"),
+                ("thr-v1", "gravity-workshop", "gravity-metrics", "handoff", "open", child_id, "2026-11-22T11:00:20Z"),
             )
             con1.execute(
                 "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -487,7 +487,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             )
             con1.execute(
                 "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("job-v1-cb", "thr-v1", "gravity-studio", "send_message", root_id, "dispatched", "2026-11-22T11:02:00Z"),
+                ("job-v1-cb", "thr-v1", "gravity-workshop", "send_message", root_id, "dispatched", "2026-11-22T11:02:00Z"),
             )
             con1.commit()
             con1.close()

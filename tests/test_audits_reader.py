@@ -157,7 +157,7 @@ class TestAuditsReader(unittest.TestCase):
     def test_truncation_256kb_metadata_and_session_cross_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            audits_dir = root / "gravity-studio" / "audits"
+            audits_dir = root / "gravity-workshop" / "audits"
             audits_dir.mkdir(parents=True)
 
             cid_full = "aaaaaaaa-1111-2222-3333-444455556666"
@@ -175,7 +175,7 @@ class TestAuditsReader(unittest.TestCase):
                 {
                     "conversation_id": cid_pref,
                     "label": "run-prefix-uuid",
-                    "project": "gravity-studio",
+                    "project": "gravity-workshop",
                     "cost_usd": 0.15,
                     "cost_2027_usd": 0.12,
                     "cache_hit_rate_pct": 90.0,
@@ -228,7 +228,7 @@ class TestAuditsReader(unittest.TestCase):
     def test_agents_scoping_relative_paths_and_code_exclusion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            ws = root / "gravity-studio"
+            ws = root / "gravity-workshop"
             agents_dir = ws / "audits" / "agents"
             code_dir = ws / "audits" / "code"
             agents_dir.mkdir(parents=True)
@@ -250,7 +250,7 @@ class TestAuditsReader(unittest.TestCase):
 
             db_path = root / "bridge" / "bridge.db"
             missing_db = root / "absent" / "bridge.db"
-            _create_workspaces_bridge_db(db_path, [("gravity-studio", ws, "Gravity Studio")])
+            _create_workspaces_bridge_db(db_path, [("gravity-workshop", ws, "Gravity Workshop")])
 
             # 1) workspace_dirs, include_cwd=True et bridge_db ciblent uniquement audits/agents/
             old_cwd = Path.cwd()
@@ -260,7 +260,7 @@ class TestAuditsReader(unittest.TestCase):
                     roots_cwd = discover_audit_roots(bridge_db=missing_db, include_cwd=True)
                     self.assertEqual(len(roots_cwd), 1)
                     self.assertEqual(roots_cwd[0]["path"], agents_dir.resolve())
-                    self.assertEqual(roots_cwd[0]["workspace"], "gravity-studio")
+                    self.assertEqual(roots_cwd[0]["workspace"], "gravity-workshop")
 
                     audits_ws, _ = list_audits(workspace_dirs=[ws], bridge_db=missing_db, include_cwd=False)
                     self.assertEqual(
@@ -273,20 +273,20 @@ class TestAuditsReader(unittest.TestCase):
 
                     # Chemins relatifs (".", "audits", "audits/agents", workspace_dirs=["."])
                     roots_rel_ws = discover_audit_roots(workspace_dirs=["."], bridge_db=missing_db, include_cwd=False)
-                    self.assertEqual(roots_rel_ws[0]["workspace"], "gravity-studio")
+                    self.assertEqual(roots_rel_ws[0]["workspace"], "gravity-workshop")
                     self.assertEqual(roots_rel_ws[0]["path"], agents_dir.resolve())
 
                     roots_rel_audits = discover_audit_roots(audits_dir="audits", include_cwd=False)
-                    self.assertEqual(roots_rel_audits[0]["workspace"], "gravity-studio")
+                    self.assertEqual(roots_rel_audits[0]["workspace"], "gravity-workshop")
                     self.assertEqual(roots_rel_audits[0]["path"], agents_dir.resolve())
 
                     roots_rel_agents = discover_audit_roots(audits_dir="audits/agents", include_cwd=False)
-                    self.assertEqual(roots_rel_agents[0]["workspace"], "gravity-studio")
+                    self.assertEqual(roots_rel_agents[0]["workspace"], "gravity-workshop")
                     self.assertEqual(roots_rel_agents[0]["path"], agents_dir.resolve())
 
                 os.chdir(agents_dir)
                 roots_dot_agents = discover_audit_roots(audits_dir=".", include_cwd=False)
-                self.assertEqual(roots_dot_agents[0]["workspace"], "gravity-studio")
+                self.assertEqual(roots_dot_agents[0]["workspace"], "gravity-workshop")
                 self.assertEqual(roots_dot_agents[0]["path"], agents_dir.resolve())
 
                 os.chdir(code_dir)
@@ -298,7 +298,7 @@ class TestAuditsReader(unittest.TestCase):
             with mock.patch.dict(os.environ, {"GRAVITY_AUDITS_DIR": str(ws / "audits")}, clear=False):
                 audits_env, roots_env = list_audits(include_cwd=False)
                 self.assertEqual(len(roots_env), 1)
-                self.assertEqual(roots_env[0]["workspace"], "gravity-studio")
+                self.assertEqual(roots_env[0]["workspace"], "gravity-workshop")
                 self.assertEqual(
                     {a["filename"] for a in audits_env},
                     {"2026-11-22-audit-01.md", "code.md"},
@@ -315,7 +315,7 @@ class TestAuditsReader(unittest.TestCase):
 
             with self.assertRaises((ValueError, FileNotFoundError)):
                 read_audit(
-                    "gravity-studio:../code/2026-11-22-audit-code-01.md",
+                    "gravity-workshop:../code/2026-11-22-audit-code-01.md",
                     workspace_dirs=[ws],
                     include_cwd=False,
                 )

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -89,16 +90,16 @@ class TestInstaller(unittest.TestCase):
             stdout="",
             stderr="[FAIL] synthetic error",
         )
-        with mock.patch.object(installer, "run_plugin_validation", return_value=failed_proc):
-            rc = installer.check_environment(
-                installer.PLUGIN_SOURCE, None, "global", "copy", strict=True
+        with mock.patch.object(installer.installer_core, "run_plugin_validation", return_value=failed_proc):
+            rc = installer.installer_core.check_environment(
+                installer.SPEC, None, "global", "copy", strict=True
             )
             self.assertEqual(rc, 1)
 
-        with mock.patch.object(installer.shutil, "which", return_value="/usr/bin/agy"):
+        with mock.patch.object(installer.installer_core.shutil, "which", return_value="/usr/bin/agy"):
             ok_proc = subprocess.CompletedProcess(args=["agy"], returncode=0, stdout="", stderr="")
-            with mock.patch.object(installer, "_run_subprocess", return_value=ok_proc) as run_mock:
-                rc_agy = installer.install_agy(installer.PLUGIN_SOURCE, dry_run=False)
+            with mock.patch.object(installer.installer_core, "_run_subprocess", return_value=ok_proc) as run_mock:
+                rc_agy = installer.installer_core.install_agy(installer.SPEC, dry_run=False)
                 self.assertEqual(rc_agy, 0)
                 first_cmd = run_mock.call_args_list[0].args[0]
                 self.assertEqual(
@@ -108,9 +109,8 @@ class TestInstaller(unittest.TestCase):
 
     def test_copy_install_upgrade_workspace_and_uninstall(self) -> None:
         source_hooks_before = SOURCE_HOOKS.read_text(encoding="utf-8")
-        source_mcp_before = SOURCE_MCP.read_text(encoding="utf-8")
         self.assertIn("python3 hooks/pre_invocation_metrics.py", source_hooks_before)
-        self.assertIn('"command": "python3"', source_mcp_before)
+        source_mcp_before = SOURCE_MCP.read_text(encoding="utf-8") if SOURCE_MCP.is_file() else None
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -122,18 +122,20 @@ class TestInstaller(unittest.TestCase):
             self.assertTrue((target / "config" / "module.json").is_file())
             self.assertTrue((target / "hooks" / "pre_invocation_metrics.py").is_file())
             self.assertTrue((target / "hooks" / "session_start_metrics.py").is_file())
-            self.assertTrue((target / "mcp_config.json").is_file())
-            self.assertTrue((target / "mcp" / "server.py").is_file())
+            self.assertTrue((target / "scripts" / "dashboard_provider.py").is_file())
             self.assertTrue((target / "skills" / "gravity-metrics" / "SKILL.md").is_file())
+            if os.name != "nt":
+                for rel in installer.EXEC_SCRIPTS:
+                    mode = (target / rel).stat().st_mode
+                    self.assertEqual(mode & 0o111, 0o111, f"Missing exec bits on {rel}")
 
             # Le dépôt source garde toujours 'python3' portable
             self.assertEqual(SOURCE_HOOKS.read_text(encoding="utf-8"), source_hooks_before)
-            self.assertEqual(SOURCE_MCP.read_text(encoding="utf-8"), source_mcp_before)
+            if source_mcp_before is not None:
+                self.assertEqual(SOURCE_MCP.read_text(encoding="utf-8"), source_mcp_before)
             if os.name == "nt" and not installer.has_real_python3():
                 installed_hooks = (target / "hooks.json").read_text(encoding="utf-8")
-                installed_mcp = (target / "mcp_config.json").read_text(encoding="utf-8")
                 self.assertNotIn('"python3 ', installed_hooks)
-                self.assertNotIn('"python3"', installed_mcp)
 
             # Refus sans --force
             r_dup = _run_install("--target", str(target))
@@ -174,6 +176,27 @@ class TestInstaller(unittest.TestCase):
                 installer.is_unsafe_target(installer.PLUGIN_SOURCE, installer.PLUGIN_SOURCE)
             )
 
+    def test_rollback_on_strict_validation_failure_and_exec_bits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "installed"
+            rc_ok = installer.installer_core.install_copy(installer.SPEC, target, skip_validate=True)
+            self.assertEqual(rc_ok, 0)
+            marker = target / "sentinel.txt"
+            marker.write_text("keep-me", encoding="utf-8")
+            if os.name != "nt":
+                for rel in installer.EXEC_SCRIPTS:
+                    self.assertTrue(bool((target / rel).stat().st_mode & stat.S_IXUSR), rel)
+
+            failed_proc = subprocess.CompletedProcess(
+                args=["validate.py", "--strict"], returncode=1, stdout="", stderr="strict failed"
+            )
+            with mock.patch.object(installer.installer_core, "run_plugin_validation", return_value=failed_proc):
+                rc_fail = installer.installer_core.install_copy(installer.SPEC, target, force=True)
+            self.assertEqual(rc_fail, 1)
+            self.assertTrue(marker.is_file())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep-me")
+
     def test_cp1252_env_and_validate_expanduser(self) -> None:
         cp1252_env = {"PYTHONUTF8": "0", "PYTHONIOENCODING": "cp1252"}
         with tempfile.TemporaryDirectory() as tmp:
@@ -207,20 +230,20 @@ class TestInstaller(unittest.TestCase):
             root = Path(tmp)
             empty_target = root / "empty-target"
             empty_target.mkdir()
-            rc_empty = installer.install_copy(installer.PLUGIN_SOURCE, empty_target)
+            rc_empty = installer.installer_core.install_copy(installer.SPEC, empty_target)
             self.assertEqual(rc_empty, 0)
             self.assertTrue((empty_target / "plugin.json").is_file())
 
             locked_target = root / "locked-target"
-            self.assertEqual(installer.install_copy(installer.PLUGIN_SOURCE, locked_target), 0)
+            self.assertEqual(installer.installer_core.install_copy(installer.SPEC, locked_target), 0)
             stale_top = locked_target / "stale.txt"
             stale_nested = locked_target / "metrics" / "stale_old.py"
             stale_top.write_text("old", encoding="utf-8")
             stale_nested.write_text("# old", encoding="utf-8")
 
-            with mock.patch.object(installer.os, "rename", side_effect=PermissionError("WinError 32 locked")):
-                rc_inplace = installer.install_copy(
-                    installer.PLUGIN_SOURCE, locked_target, force=True
+            with mock.patch.object(installer.installer_core.os, "rename", side_effect=PermissionError("WinError 32 locked")):
+                rc_inplace = installer.installer_core.install_copy(
+                    installer.SPEC, locked_target, force=True
                 )
             self.assertEqual(rc_inplace, 0)
             self.assertFalse(stale_top.exists())

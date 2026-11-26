@@ -1,6 +1,6 @@
 # Plugin Gravity Metrics
 
-Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque standard Python 3** pour collecter, archiver et visualiser en widget **MCP App** les coûts, tokens, taux de cache, jalons de cycle et signaux de fiabilité des sessions Google Antigravity unifiées (arbre natif + enfants Gravity Bridge).
+Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque standard Python 3.10+** pour collecter, enregistrer et exposer au tableau de bord unifié **`gravity` Core** (`open_gravity_dashboard`) les coûts, tokens, taux de cache, jalons de cycle, signaux techniques et audits agents des sessions Google Antigravity.
 
 > **Démarrage 2 min & Positionnement Écosystème**
 >
@@ -9,30 +9,23 @@ Module `metrics` (`config/module.json`, `id: "metrics"`) **100 % bibliothèque s
 > - **Hub `gravity/docs/` :** [Getting Started](https://github.com/BSourichanh/gravity/blob/main/docs/getting-started.md) · [User Journey](https://github.com/BSourichanh/gravity/blob/main/docs/user-journey.md)
 > - **Référence :** [Command Cheatsheet](https://github.com/BSourichanh/gravity/blob/main/docs/command-cheatsheet.md) · [Troubleshooting & Lifecycle](https://github.com/BSourichanh/gravity/blob/main/docs/troubleshooting-and-lifecycle.md)
 
-## Positionnement dans l'écosystème Gravity (Lot 4b)
+## Positionnement dans l'écosystème Gravity (`SPI-1..4`)
 
-- **[`gravity` Core](https://github.com/BSourichanh/gravity)** : socle d'initialisation (`$GRAVITY_HOME` / `~/.gemini/gravity/`), registre des modules (`config/module.json`) et futur hôte UI unifié.
+- **[`gravity` Core](https://github.com/BSourichanh/gravity)** : socle d'initialisation (`$GRAVITY_HOME` / `~/.gemini/gravity/`), registre des modules (`config/module.json`), SSOT `_shared/` et hôte UI unifié (`gravity_dashboard`).
 - **[`gravity-workflow`](https://github.com/BSourichanh/gravity-workflow)** (`/gravity-workflow`) : harnais d'orchestration multi-agents, garde-fous fail-closed, evals et `/caveman`.
-- **`gravity-metrics`** (`/gravity-metrics`) : produit les signaux `session-metrics` et `cost-telemetry` destinés aux futures optimisations du mode `auto` de `gravity-workflow`. Son design system sobre sert de référence pour `gravity` (`ui.mode: "transition-mcp"`, `ui.target: "gravity"`).
+- **`gravity-metrics`** (`/gravity-metrics`) : émet les signaux `session-metrics` via `_shared.signal_bus` (`SPI-3`) et délègue l'interface visuelle à `gravity` Core (`ui.mode: "none"`, `ui.target: "gravity"`, `scripts/dashboard_provider.py`).
 
 ## Cycle hybride & Commande `/gravity-metrics`
 
-- `/gravity-metrics` *(nu)* : ouvre le tableau de bord en **lecture seule** (`view="overview"`, zéro écriture ni mutation).
+- `/gravity-metrics` *(nu)* : ouvre le tableau de bord Gravity Core en **lecture seule** (`open_gravity_dashboard`, `view="metrics"`, `metrics_sub="overview"`, zéro écriture ni mutation).
 - `/gravity-metrics start [label]` : démarre une fenêtre explicite dans `active_captures.json` à **0 token LLM** (terminaison avant tour modèle).
-- `/gravity-metrics stop [label]` *(alias `finish`, ou `/gravity-metrics <label>` / `--full` / `--force`)* : scelle la fenêtre `[start_step .. courant]`, archive de façon immuable (`schema_version 2.1.0`, bloqué sauf `--force` si un job Bridge est actif) et ouvre la vue détail.
-- `/gravity-metrics archive <uuid_ou_prefixe> [label] [-n "note"] [--full] [--force]` : analyse et archive *a posteriori* une session existante.
-- `/gravity-metrics pending [--project <nom>]` : affiche la file des sessions Gravity racines non encore archivées et ouvre `Sessions → À archiver`.
-- **Hook `SessionStart` (`hooks/session_start_metrics.py`) :** enregistre la provenance `(conversation_id → cwd, project)` dans `session_meta.json`, complétée par `bridge.db` RO (`from_workspace` + `canonical_path`).
-- **Archivage automatique sur `/gravity-architect archive <slug>` :** archive la session avec label dérivé du slug et `project` résolu, tout en respectant le garde-fou `PendingBridgeJobsError`.
-- **4 jalons automatiques (0 token) :** `Conception` → `Production` → `Vérification & Push` → `Clôture / Archivé` (repli 2 jalons `Production → Clôture` en mono-dépôt), avec ventilation coûts/tokens par phase.
-
-## Widget MCP App sobre en 3 espaces (`open_metrics_dashboard`)
-
-- **Thème adaptatif :** hérite de `hostContext.styles.variables` (clair, sombre, Nord) avec repli graphite/zinc neutre, `tabular-nums`, header contextuel 1 ligne (1 `<select>` Projet, toggle `2026 / 2027` masqué si identique), et rendu JS incrémental sans perte d'état.
-- **3 espaces :**
-  - **`Synthèse` (`overview`) :** 4 KPIs utiles, répartition par projet (`>= 2` projets), courbe triée chronologiquement (`started_at`), barres HTML/CSS par catégorie et 5 dernières sessions.
-  - **`Sessions` (`sessions` / `pending` / `compare`) :** sous-onglets `Archivées` (Master-Detail, édition rapide `label`/`project`/`note`, jalons, ventilation workspace), `À archiver` (`En cours` vs `Terminée`, tiroir inline `Archiver…`, `Ignorer` / *Masquées* via `ignored.json`) et `Comparer` (A vs B préservé au polling).
-  - **`Audits Agents` (`audits`) :** bouton **`Index & Matrice`** (`README.md` hors liste/compteur/liens session), exclusion stricte de `_TEMPLATE.md`/`_*` et `audits/code/`, filtres verdicts canoniques colorés, lecteur Markdown `74ch` (`h1..h6`, callouts, listes imbriquées).
+- `/gravity-metrics stop [label]` *(alias `finish`, ou `/gravity-metrics <label>` / `--full` / `--update` / `--force`)* : scelle la fenêtre `[start_step .. courant]`, enregistre de façon immuable (`schema_version 2.1.0`, `--update` / `--force` pour mettre à jour) et ouvre `view="metrics"`, `metrics_sub="sessions"`.
+- `/gravity-metrics record <uuid_ou_prefixe> [label] [-n "note"] [--full] [--update] [--force]` *(alias `archive`, `--update-sealed`)* : analyse et enregistre (ou met à jour) *a posteriori* une session existante.
+- `/gravity-metrics pending [--project <nom>]` : affiche la file des sessions Gravity racines avec activité de travail non encore enregistrées (filtre anti-bruit actif par défaut ; `cli.py pending --all` réaffiche tout) et ouvre `open_gravity_dashboard` (`view="metrics"`, `metrics_sub="pending"`).
+- **Politique d'auto-capture `SPI-2` :** `hooks/pre_invocation_metrics.py` lit dynamiquement `capture_policy` dans `$GRAVITY_HOME/core/modules.json` pour démarrer une fenêtre idempotente à 0 token sans regex codée en dur.
+- **Hook `SessionStart` (`hooks/session_start_metrics.py`) :** désactivé par défaut dans `hooks.json` (`"enabled": false`) ; appelé directement, enregistre `(conversation_id → cwd, project)` dans `session_meta.json` (hors worktrees sous-agents `/.gemini/antigravity/worktrees/`).
+- **4 jalons automatiques (0 token) :** `Conception` → `Production` → `Vérification & Push` → `Clôture / Enregistrée` (repli 2 jalons `Production → Clôture` en mono-dépôt), avec ventilation coûts/tokens par phase.
+- **Signaux techniques & résolution `/swarm` (`workspace_resolver.py`, `technical_signals.py`) :** résolution hiérarchique du dépôt canonique avec normalisation des worktrees (`atelier` vs `code`), `thinking_*`, `compaction_count`, `latency_{avg,p50,p95}_ms` et suivi `cold_cache_waste`.
 
 ## Stockage centralisé
 
@@ -43,11 +36,15 @@ Toutes les données vivent sous **`$GRAVITY_METRICS_HOME` > `$GRAVITY_HOME/metri
 ## CLI non-interactif (`scripts/cli.py`)
 
 ```bash
-python scripts/cli.py list [--regen]
-python scripts/cli.py pending [--bridge-db <chemin>] [--json]
-python scripts/cli.py add --latest -l "mon-run" -n "Note" [--force]
-python scripts/cli.py archive <uuid_ou_prefixe> -l "mon-run" [--bridge-db <chemin>] [--force]
-python scripts/cli.py inspect <label_ou_uuid> [--bridge-db <chemin>]
-python scripts/cli.py remove <label_ou_uuid> --purge-reports
-python scripts/validate.py --strict       # Contrôles stdlib, contrat module et seuils D4 (rules <= 600/1000 o, SKILL <= 6000 o, LF sans BOM)
+python scripts/cli.py start <uuid_ou_prefixe> [-l "mon-run"] [--step N] [--json]
+python scripts/cli.py list [--regen] [--json]
+python scripts/cli.py pending [--all] [--json]
+python scripts/cli.py add --latest -l "mon-run" -n "Note" [--update] [--force] [--json]
+python scripts/cli.py record <uuid_ou_prefixe> -l "mon-run" [--update] [--force] [--json]  # alias: archive, --update-sealed
+python scripts/cli.py inspect <label_ou_uuid> [--json]
+python scripts/cli.py update-meta <label_ou_uuid> [-l LABEL] [-p PROJ] [-n NOTE] [--json]
+python scripts/cli.py ignore <uuid> [--reason "..."] [--json]
+python scripts/cli.py unignore <uuid> [--json]
+python scripts/cli.py remove <label_ou_uuid> --purge-reports [--json]
+python scripts/validate.py --strict       # Délègue à _shared.validator_core (stdlib, module.json, D4)
 ```

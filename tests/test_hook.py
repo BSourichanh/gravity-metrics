@@ -477,7 +477,7 @@ class TestPreInvocationHook(unittest.TestCase):
             bridge_home = root / "bridge"
             bridge_home.mkdir()
             db_path = bridge_home / "bridge.db"
-            ws = root / "GravityStudio"
+            ws = root / "GravityWorkshop"
             ws.mkdir()
 
             root_cid = "7777aaaa-1111-2222-3333-444455556666"
@@ -504,7 +504,7 @@ class TestPreInvocationHook(unittest.TestCase):
                                     "ToolName": '"send_message"',
                                     "Arguments": json.dumps(
                                         {
-                                            "from_workspace": "gravity-studio",
+                                            "from_workspace": "gravity-workshop",
                                             "to_workspace": "gravity-metrics",
                                             "msg_type": "handoff",
                                             "dispatch": True,
@@ -539,7 +539,7 @@ class TestPreInvocationHook(unittest.TestCase):
             )
             con.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-20261122-abc123", "gravity-studio", "gravity-metrics", "handoff", "open", child_cid, root_cid, "2026-11-22T13:00:15Z"),
+                ("thr-20261122-abc123", "gravity-workshop", "gravity-metrics", "handoff", "open", child_cid, root_cid, "2026-11-22T13:00:15Z"),
             )
             con.execute(
                 "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",

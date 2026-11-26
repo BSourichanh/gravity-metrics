@@ -311,7 +311,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             con = sqlite3.connect(str(db_path))
             con.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, msg_type TEXT, status TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, created_at TEXT)")
             con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, action TEXT, target_conversation_id TEXT, status TEXT, created_at TEXT)")
-            con.execute("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)", ("thr-arch", "gravity-studio", "gravity-metrics", "handoff", "open", child_cid, cid, "2026-11-23T14:00:15Z"))
+            con.execute("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)", ("thr-arch", "gravity-workshop", "gravity-metrics", "handoff", "open", child_cid, cid, "2026-11-23T14:00:15Z"))
             con.execute("INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)", ("job-arch", "thr-arch", "gravity-metrics", "new_conversation", child_cid, "claimed", "2026-11-23T14:00:15Z"))
             con.commit()
             con.close()

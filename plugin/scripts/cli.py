@@ -2,8 +2,11 @@
 """CLI unique pour mesurer, historiser et comparer les sessions Gravity (100 % stdlib)."""
 
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import sys
 from typing import List, Optional, Tuple
 
@@ -13,16 +16,18 @@ if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 from metrics import (  # noqa: E402
-    PendingBridgeJobsError,
     apply_remove,
     archive_conversation,
     collect_run_metrics,
     default_brain_dir,
     history_lock,
+    ignore_session,
     list_gravity_conversations,
     list_pending_sessions,
     load_history,
+    load_ignored_sessions,
     load_session_for_inspect,
+    next_step_index_in_transcript,
     read_gravity_profile_summary,
     record_session_metrics,
     regenerate_views,
@@ -31,6 +36,9 @@ from metrics import (  # noqa: E402
     render_terminal_table,
     resolve_conversation_id_in_brain,
     resolve_store_paths,
+    start_active_capture,
+    unignore_session,
+    update_session_metadata,
 )
 
 DEFAULT_CATALOG_PATH = PLUGIN_ROOT / "config" / "pricing_catalog.json"
@@ -46,27 +54,61 @@ def _configure_stdio() -> None:
                 pass
 
 
+def _workflow_home() -> Path:
+    env_wf = os.environ.get("GRAVITY_WORKFLOW_HOME", "").strip()
+    if env_wf:
+        return Path(env_wf).expanduser()
+    env_g = os.environ.get("GRAVITY_HOME", "").strip()
+    if env_g:
+        return Path(env_g).expanduser() / "workflow"
+    return Path.home() / ".gemini" / "gravity" / "workflow"
+
+
 def _discover_runs_jsonl(workspace: Optional[Path] = None) -> List[Path]:
-    candidates = [
-        Path.cwd() / ".agents" / "gravity" / "observability" / "runs.jsonl",
-        Path.cwd() / "gravity" / "observability" / "runs.jsonl",
-    ]
-    if workspace is not None:
-        candidates.insert(0, workspace / ".agents" / "gravity" / "observability" / "runs.jsonl")
-    return [p for p in candidates if p.is_file()]
+    """Découvre `runs.jsonl` dans `$GRAVITY_HOME/workflow/workspaces/<slug>-<sha256[:8]>/` et `.agents/`."""
+    candidates: List[Path] = []
+    wf_ws_dir = _workflow_home() / "workspaces"
+    targets: List[Path] = [workspace.expanduser()] if workspace is not None else [Path.cwd()]
+    for base in targets:
+        try:
+            resolved = base.resolve()
+        except OSError:
+            resolved = base
+        slug = re.sub(r"[^a-z0-9]+", "-", resolved.name.lower()).strip("-")[:32] or "workspace"
+        digest = hashlib.sha256(os.path.normcase(str(resolved)).encode("utf-8")).hexdigest()[:8]
+        candidates.append(wf_ws_dir / f"{slug}-{digest}" / "runs.jsonl")
+        candidates.append(base / ".agents" / "gravity-workflow" / "runs.jsonl")
+        candidates.append(base / ".agents" / "gravity-workflow" / "observability" / "runs.jsonl")
+        candidates.append(base / ".agents" / "gravity" / "observability" / "runs.jsonl")
+    if workspace is None:
+        if wf_ws_dir.is_dir():
+            try:
+                candidates.extend(sorted(wf_ws_dir.glob("*/runs.jsonl")))
+            except OSError:
+                pass
+        candidates.append(Path.cwd() / "gravity" / "observability" / "runs.jsonl")
+    seen: set[Path] = set()
+    found: List[Path] = []
+    for cand in candidates:
+        try:
+            rcand = cand.resolve()
+        except OSError:
+            rcand = cand
+        if rcand not in seen and cand.is_file():
+            seen.add(rcand)
+            found.append(cand)
+    return found
 
 
 def _pick_conversation_interactively(
     brain_dir: Path,
     include_all: bool,
     workspace: Optional[Path] = None,
-    bridge_db_path: Optional[Path] = None,
 ) -> Tuple[str, str]:
     convs = list_gravity_conversations(
         brain_dir,
         include_all=include_all,
         runs_jsonl_paths=_discover_runs_jsonl(workspace),
-        bridge_db_path=bridge_db_path,
     )
     if not convs:
         scope = "trouvée" if include_all else "liée à Gravity trouvée (essayez --all ou passez un UUID)"
@@ -97,17 +139,77 @@ def _print_archived_summary(
 
     if saved_rec.get("already_archived"):
         print(
-            f"[INFO] Session déjà archivée (immuable) : {saved_rec['label']} ({cid[:8]}) "
-            "— utilisez --force pour écraser"
+            f"[INFO] Session déjà enregistrée (immuable) : {saved_rec['label']} ({cid[:8]}) "
+            "— utilisez --update ou --force pour mettre à jour"
         )
     else:
-        print(f"[OK] Session archivée : {saved_rec['label']} ({cid[:8]})")
+        print(f"[OK] Session enregistrée : {saved_rec['label']} ({cid[:8]})")
     print(
         f"     Coût: ${saved_rec['cost_usd']:.4f} | "
         f"Agents: {saved_rec['agents']} | Appels: {saved_rec['llm_calls']} | "
         f"Cache: {saved_rec['cache_hit_rate_pct']:.1f}%"
     )
     print(f"     Historique global: {store_dir / 'METRICS.md'}" + reports_msg)
+
+
+def _emit_json(payload: object) -> None:
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def _emit_error(args: argparse.Namespace, msg: str, code: int = 1) -> int:
+    if getattr(args, "json", False):
+        _emit_json({"ok": False, "error": str(msg)})
+    else:
+        print(f"[ERREUR] {msg}", file=sys.stderr)
+    return code
+
+
+def _cmd_start(args: argparse.Namespace) -> int:
+    store_dir, _ = resolve_store_paths(args.history, args.store)
+    brain_dir = args.brain_dir.expanduser()
+    cid = str(args.cid or "").strip()
+    if not cid:
+        return _emit_error(args, "Identifiant de conversation vide.")
+
+    if brain_dir.is_dir():
+        try:
+            cid = resolve_conversation_id_in_brain(cid, brain_dir)
+        except ValueError as exc:
+            return _emit_error(args, str(exc))
+        except FileNotFoundError as exc:
+            if args.step is None:
+                return _emit_error(args, str(exc))
+    elif args.step is None:
+        return _emit_error(args, f"Répertoire des conversations introuvable : {brain_dir}")
+
+    start_step = (
+        max(0, args.step)
+        if args.step is not None
+        else next_step_index_in_transcript(
+            brain_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        )
+    )
+    project = args.workspace.expanduser().resolve().name if args.workspace else ""
+    cap = start_active_capture(
+        cid,
+        start_step=start_step,
+        label=args.label,
+        project=project,
+        store_dir=store_dir,
+        overwrite=True,
+    )
+    state_path = store_dir / "active_captures.json"
+    if args.json:
+        _emit_json({"ok": True, "conversation_id": cid, "capture": cap, "state_path": str(state_path)})
+        return 0
+    lbl_txt = cap.get("label") or "(auto)"
+    proj_txt = cap.get("project") or "(aucun)"
+    print(
+        f"[OK] Capture démarrée : {cid[:8]} | step={cap['start_step']} | "
+        f"label={lbl_txt} | projet={proj_txt}"
+    )
+    print(f"     État : {state_path}")
+    return 0
 
 
 def _cmd_add(args: argparse.Namespace) -> int:
@@ -118,7 +220,6 @@ def _cmd_add(args: argparse.Namespace) -> int:
     ws_path: Optional[Path] = args.workspace.expanduser().resolve() if args.workspace else None
     brain_dir = args.brain_dir.expanduser()
     catalog_path = args.catalog.expanduser()
-    bridge_db_path: Optional[Path] = args.bridge_db.expanduser() if args.bridge_db else None
 
     if cid is None:
         if args.latest:
@@ -126,28 +227,22 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 brain_dir,
                 include_all=args.all,
                 runs_jsonl_paths=_discover_runs_jsonl(ws_path),
-                bridge_db_path=bridge_db_path,
             )
             if not convs:
-                print(
-                    f"[ERREUR] Aucune session Gravity trouvée dans {brain_dir}.",
-                    file=sys.stderr,
-                )
-                return 1
+                return _emit_error(args, f"Aucune session Gravity trouvée dans {brain_dir}.")
             cid = convs[0]["conversation_id"]
             if not label:
                 label = f"session-{cid[:8]}"
+        elif args.json:
+            return _emit_error(args, "Identifiant de conversation ou --latest requis avec --json.")
         else:
             try:
-                cid, _title = _pick_conversation_interactively(
-                    brain_dir, args.all, ws_path, bridge_db_path
-                )
+                cid, _title = _pick_conversation_interactively(brain_dir, args.all, ws_path)
             except (EOFError, KeyboardInterrupt):
                 print("\nAnnulé.", file=sys.stderr)
                 return 1
             except Exception as exc:
-                print(f"[ERREUR] {exc}", file=sys.stderr)
-                return 1
+                return _emit_error(args, str(exc))
             if not label:
                 label = input(f"Label de la session [session-{cid[:8]}] : ").strip()
             if not note:
@@ -156,60 +251,85 @@ def _cmd_add(args: argparse.Namespace) -> int:
         try:
             cid = resolve_conversation_id_in_brain(cid, brain_dir)
         except (ValueError, FileNotFoundError) as exc:
-            print(f"[ERREUR] {exc}", file=sys.stderr)
-            return 1
+            return _emit_error(args, str(exc))
 
+    explicit_label = label
     if not label:
         label = f"session-{cid[:8]}"
 
     project = ws_path.name if ws_path else ""
     gravity_profile = read_gravity_profile_summary(ws_path)
     use_gravity_win = bool(args.gravity_window and not args.full)
+    caller_cid = os.environ.get("ANTIGRAVITY_CONVERSATION_ID", "").strip()
+    self_archiving = bool(getattr(args, "self_archiving", False)) or bool(caller_cid and caller_cid == cid)
 
-    metrics = collect_run_metrics(
-        root_id=cid,
-        brain_dir=brain_dir,
-        pricing_catalog_path=catalog_path,
-        pricing_profile=args.profile,
-        label=label,
-        gravity_window=use_gravity_win,
-        full_conversation=bool(args.full),
-        project=project,
-        gravity_profile=gravity_profile,
-        bridge_db_path=bridge_db_path,
-    )
     try:
+        metrics = collect_run_metrics(
+            root_id=cid,
+            brain_dir=brain_dir,
+            pricing_catalog_path=catalog_path,
+            pricing_profile=args.profile,
+            label=label,
+            gravity_window=use_gravity_win,
+            full_conversation=bool(args.full),
+            project=project,
+            gravity_profile=gravity_profile,
+            store_dir=store_dir,
+            self_archiving=self_archiving,
+        )
         saved_rec, _ = record_session_metrics(
             metrics,
             store_dir=store_dir,
             history_path=history_path,
-            label=label,
+            label=explicit_label if args.update_sealed else label,
             note=note,
             summary_only=args.summary_only,
             force=bool(args.force),
+            update_sealed=bool(args.update_sealed),
+            self_archiving=self_archiving,
         )
-    except PendingBridgeJobsError as exc:
-        print(f"[ERREUR] {exc}", file=sys.stderr)
-        return 1
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        return _emit_error(args, str(exc))
 
+    if args.json:
+        _emit_json(
+            {
+                "ok": True,
+                "conversation_id": cid,
+                "already_archived": bool(saved_rec.get("already_archived")),
+                "record": saved_rec,
+            }
+        )
+        return 0
     _print_archived_summary(saved_rec, cid, store_dir, summary_only=args.summary_only)
     return 0
 
 
 def _cmd_archive(args: argparse.Namespace) -> int:
+    from_step: Optional[int] = getattr(args, "from_step", None)
+    if from_step is not None:
+        if from_step < 0:
+            return _emit_error(args, "--from-step doit être >= 0.")
+        if bool(args.full):
+            return _emit_error(args, "--from-step est incompatible avec --full.")
+
     store_dir, history_path = resolve_store_paths(args.history, args.store)
     ws_path: Optional[Path] = args.workspace.expanduser().resolve() if args.workspace else None
     brain_dir = args.brain_dir.expanduser()
     catalog_path = args.catalog.expanduser()
-    bridge_db_path: Optional[Path] = args.bridge_db.expanduser() if args.bridge_db else None
 
     project = ws_path.name if ws_path else ""
     gravity_profile = read_gravity_profile_summary(ws_path)
     use_gravity_win = not bool(args.full)
+    caller_cid = os.environ.get("ANTIGRAVITY_CONVERSATION_ID", "").strip()
 
     try:
+        resolved_cid = resolve_conversation_id_in_brain(args.target, brain_dir)
+        self_archiving = bool(getattr(args, "self_archiving", False)) or bool(
+            caller_cid and caller_cid == resolved_cid
+        )
         saved_rec, _, metrics = archive_conversation(
-            args.target,
+            resolved_cid,
             store_dir=store_dir,
             history_path=history_path,
             brain_dir=brain_dir,
@@ -219,16 +339,27 @@ def _cmd_archive(args: argparse.Namespace) -> int:
             pricing_profile=args.profile,
             gravity_window=use_gravity_win,
             full_conversation=bool(args.full),
+            from_step=from_step,
             project=project,
             gravity_profile=gravity_profile,
             summary_only=args.summary_only,
             force=bool(args.force),
-            bridge_db_path=bridge_db_path,
+            update_sealed=bool(args.update_sealed),
+            self_archiving=self_archiving,
         )
-    except (PendingBridgeJobsError, FileNotFoundError, ValueError) as exc:
-        print(f"[ERREUR] {exc}", file=sys.stderr)
-        return 1
+    except (FileNotFoundError, ValueError) as exc:
+        return _emit_error(args, str(exc))
 
+    if args.json:
+        _emit_json(
+            {
+                "ok": True,
+                "conversation_id": metrics["root_conversation_id"],
+                "already_archived": bool(saved_rec.get("already_archived")),
+                "record": saved_rec,
+            }
+        )
+        return 0
     _print_archived_summary(
         saved_rec,
         metrics["root_conversation_id"],
@@ -239,16 +370,16 @@ def _cmd_archive(args: argparse.Namespace) -> int:
 
 
 def _cmd_pending(args: argparse.Namespace) -> int:
-    _store_dir, history_path = resolve_store_paths(args.history, args.store)
+    store_dir, history_path = resolve_store_paths(args.history, args.store)
     brain_dir = args.brain_dir.expanduser()
-    bridge_db_path: Optional[Path] = args.bridge_db.expanduser() if args.bridge_db else None
     pending = list_pending_sessions(
         brain_dir,
         history_path,
-        bridge_db_path=bridge_db_path,
+        store_dir=store_dir,
+        include_noise=bool(args.all),
     )
     if args.json:
-        print(json.dumps(pending, indent=2, ensure_ascii=False))
+        _emit_json(pending)
     else:
         print(render_pending_table(pending))
     return 0
@@ -262,7 +393,10 @@ def _cmd_list(args: argparse.Namespace) -> int:
             regenerate_views(store_dir, records)
     else:
         records = load_history(history_path)
-    print(render_terminal_table(records))
+    if args.json:
+        _emit_json({"ok": True, "count": len(records), "records": records})
+    else:
+        print(render_terminal_table(records))
     return 0
 
 
@@ -270,37 +404,110 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
     store_dir, history_path = resolve_store_paths(args.history, args.store)
     brain_dir = args.brain_dir.expanduser()
     catalog_path = args.catalog.expanduser()
-    bridge_db_path: Optional[Path] = args.bridge_db.expanduser() if args.bridge_db else None
     try:
-        metrics, _ = load_session_for_inspect(
+        metrics, slug = load_session_for_inspect(
             args.target,
             store_dir=store_dir,
             history_path=history_path,
             brain_dir=brain_dir,
             catalog_path=catalog_path,
             pricing_profile=args.profile,
-            bridge_db_path=bridge_db_path,
         )
     except (ValueError, FileNotFoundError) as exc:
-        print(f"[ERREUR] {exc}", file=sys.stderr)
-        return 1
-    print(render_inspect_text(metrics))
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "slug": slug, "metrics": metrics})
+    else:
+        print(render_inspect_text(metrics))
     return 0
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:
     store_dir, history_path = resolve_store_paths(args.history, args.store)
     try:
-        _, remaining = apply_remove(
+        removed_rec, remaining = apply_remove(
             args.target,
             store_dir=store_dir,
             history_path=history_path,
             purge_reports=args.purge_reports,
         )
     except (KeyError, ValueError) as exc:
-        print(f"[ERREUR] {exc}", file=sys.stderr)
-        return 1
-    print(f"[OK] Session supprimée ({remaining} restante(s)).")
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "removed": removed_rec, "remaining": remaining})
+    else:
+        print(f"[OK] Session supprimée ({remaining} restante(s)).")
+    return 0
+
+
+def _cmd_update_meta(args: argparse.Namespace) -> int:
+    store_dir, history_path = resolve_store_paths(args.history, args.store)
+    try:
+        updated_rec, _ = update_session_metadata(
+            args.target,
+            store_dir=store_dir,
+            history_path=history_path,
+            label=args.label,
+            project=args.project,
+            note=args.note,
+        )
+    except (KeyError, ValueError) as exc:
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "record": updated_rec})
+    else:
+        print(f"[OK] Métadonnées mises à jour : {updated_rec.get('label')}")
+    return 0
+
+
+def _resolve_target_cid(target: str, brain_dir: Path, known_ids: Optional[List[str]] = None) -> str:
+    raw = str(target or "").strip()
+    if not raw:
+        raise ValueError("Identifiant de conversation vide.")
+    if brain_dir.is_dir():
+        try:
+            return resolve_conversation_id_in_brain(raw, brain_dir)
+        except FileNotFoundError:
+            pass
+    if known_ids:
+        if raw in known_ids:
+            return raw
+        pref = [k for k in known_ids if k.startswith(raw)]
+        if len(pref) == 1:
+            return pref[0]
+        if len(pref) > 1:
+            raise ValueError(f"Préfixe ambigu ({len(pref)} correspondances) : {raw!r}")
+    return raw
+
+
+def _cmd_ignore(args: argparse.Namespace) -> int:
+    store_dir, _ = resolve_store_paths(args.history, args.store)
+    brain_dir = args.brain_dir.expanduser()
+    try:
+        cid = _resolve_target_cid(args.target, brain_dir)
+        entry = ignore_session(cid, reason=args.reason, store_dir=store_dir)
+    except ValueError as exc:
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "conversation_id": cid, "ignored": entry})
+    else:
+        print(f"[OK] Session masquée : {cid[:8]}")
+    return 0
+
+
+def _cmd_unignore(args: argparse.Namespace) -> int:
+    store_dir, _ = resolve_store_paths(args.history, args.store)
+    brain_dir = args.brain_dir.expanduser()
+    try:
+        ignored_ids = list(load_ignored_sessions(store_dir).keys())
+        cid = _resolve_target_cid(args.target, brain_dir, known_ids=ignored_ids)
+        removed = unignore_session(cid, store_dir=store_dir)
+    except ValueError as exc:
+        return _emit_error(args, str(exc))
+    if args.json:
+        _emit_json({"ok": True, "conversation_id": cid, "removed": bool(removed)})
+    else:
+        print(f"[OK] Session restaurée : {cid[:8]}" if removed else f"[INFO] Session non ignorée : {cid[:8]}")
     return 0
 
 
@@ -311,64 +518,114 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_add = sub.add_parser("add", help="Ajoute et archive une session Gravity dans l'historique.")
+    p_start = sub.add_parser("start", help="Démarre ou réinitialise une capture active pour une conversation.")
+    p_start.add_argument("cid", help="UUID ou préfixe unique de la conversation.")
+    p_start.add_argument("-l", "--label", default="", help="Label lisible de la capture.")
+    p_start.add_argument("--step", type=int, default=None, help="Step de départ explicite (défaut: max(step_index)+1 du transcript).")
+    p_start.add_argument("--workspace", type=Path, default=None, help="Workspace projet pour enregistrer le nom du projet.")
+    p_start.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
+    p_start.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
+    p_start.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_start.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
+    p_start.set_defaults(func=_cmd_start)
+
+    p_add = sub.add_parser("add", help="Ajoute et enregistre une session Gravity dans l'historique.")
     p_add.add_argument("conversation_id", nargs="?", default=None, help="UUID (ou préfixe) de la conversation (optionnel).")
     p_add.add_argument("-l", "--label", default="", help="Label lisible de la session.")
     p_add.add_argument("-n", "--note", default="", help="Note libre sur le changement testé.")
     p_add.add_argument("--latest", action="store_true", help="Sélectionne automatiquement la session Gravity la plus récente.")
-    p_add.add_argument("--all", action="store_true", help="Inclut aussi les conversations hors Gravity et enfants Bridge dans le menu.")
+    p_add.add_argument("--all", action="store_true", help="Inclut aussi les conversations hors Gravity dans le menu.")
     p_add.add_argument("--gravity-window", action="store_true", help="Mesure uniquement la fenêtre [début /gravity* → avant /gravity-metrics].")
     p_add.add_argument("--full", action="store_true", help="Mesure l'ensemble de la conversation.")
     p_add.add_argument("--workspace", type=Path, default=None, help="Workspace projet pour lire (en lecture seule) nom et profil Gravity.")
     p_add.add_argument("--profile", default="2026_nov_standard", help="Profil tarifaire (défaut: 2026_nov_standard).")
     p_add.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
-    p_add.add_argument("--bridge-db", type=Path, default=None, help="Chemin explicite vers bridge.db (lecture seule).")
     p_add.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH, help="Catalogue tarifaire JSON.")
     p_add.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_add.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_add.add_argument("--summary-only", action="store_true", help="N'écrit que dans l'historique global (sans fichiers reports/).")
-    p_add.add_argument("--force", action="store_true", help="Autorise l'écrasement d'une archive existante ou le contournement d'un job Bridge actif.")
+    p_add.add_argument(
+        "--update",
+        "--update-sealed",
+        dest="update_sealed",
+        action="store_true",
+        help="Met à jour une fenêtre déjà enregistrée.",
+    )
+    p_add.add_argument("--force", action="store_true", help="Autorise l'écrasement d'un enregistrement existant.")
+    p_add.add_argument(
+        "--self-recording",
+        "--self-archiving",
+        dest="self_archiving",
+        action="store_true",
+        help="Indique un auto-enregistrement depuis la session racine active (clean_termination=True).",
+    )
+    p_add.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_add.set_defaults(func=_cmd_add)
 
-    p_arch = sub.add_parser("archive", help="Analyse et archive a posteriori une session Gravity par UUID ou préfixe.")
+    p_arch = sub.add_parser(
+        "record",
+        aliases=["archive"],
+        help="Analyse et enregistre a posteriori une session Gravity par UUID ou préfixe.",
+    )
     p_arch.add_argument("target", help="UUID ou préfixe unique de la conversation.")
     p_arch.add_argument("-l", "--label", default="", help="Label lisible de la session (auto-généré si omis).")
     p_arch.add_argument("-n", "--note", default="", help="Note libre sur le changement testé.")
     p_arch.add_argument("--gravity-window", action="store_true", default=True, help="Mesure la fenêtre Gravity (défaut).")
     p_arch.add_argument("--full", action="store_true", help="Mesure l'ensemble de la conversation.")
+    p_arch.add_argument(
+        "--from-step",
+        type=int,
+        default=None,
+        help="Borne inférieure explicite de step_index (>= 0, incompatible avec --full).",
+    )
     p_arch.add_argument("--workspace", type=Path, default=None, help="Workspace projet pour lire nom et profil Gravity.")
     p_arch.add_argument("--profile", default="2026_nov_standard", help="Profil tarifaire.")
     p_arch.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
-    p_arch.add_argument("--bridge-db", type=Path, default=None, help="Chemin explicite vers bridge.db (lecture seule).")
     p_arch.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH, help="Catalogue tarifaire JSON.")
     p_arch.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
     p_arch.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_arch.add_argument("--summary-only", action="store_true", help="N'écrit que dans l'historique global.")
-    p_arch.add_argument("--force", action="store_true", help="Autorise le ré-archivage ou l'archivage avec job Bridge actif.")
+    p_arch.add_argument(
+        "--update",
+        "--update-sealed",
+        dest="update_sealed",
+        action="store_true",
+        help="Met à jour une fenêtre déjà enregistrée.",
+    )
+    p_arch.add_argument("--force", action="store_true", help="Autorise le ré-enregistrement d'une session existante.")
+    p_arch.add_argument(
+        "--self-recording",
+        "--self-archiving",
+        dest="self_archiving",
+        action="store_true",
+        help="Indique un auto-enregistrement depuis la session racine active (clean_termination=True).",
+    )
+    p_arch.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_arch.set_defaults(func=_cmd_archive)
 
-    p_pend = sub.add_parser("pending", help="Liste les sessions Gravity racines non encore archivées (zéro écriture).")
+    p_pend = sub.add_parser("pending", help="Liste les sessions Gravity racines non encore enregistrées (zéro écriture).")
     p_pend.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
-    p_pend.add_argument("--bridge-db", type=Path, default=None, help="Chemin explicite vers bridge.db (lecture seule).")
     p_pend.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
     p_pend.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_pend.add_argument("--all", action="store_true", help="Inclut aussi les sessions consultatives sans outil de travail.")
     p_pend.add_argument("--json", action="store_true", help="Affiche la liste au format JSON.")
     p_pend.set_defaults(func=_cmd_pending)
 
-    p_list = sub.add_parser("list", help="Affiche la liste historique des sessions archivées.")
+    p_list = sub.add_parser("list", help="Affiche la liste historique des sessions enregistrées.")
     p_list.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_list.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_list.add_argument("--regen", action="store_true", help="Régénère METRICS.md.")
+    p_list.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_list.set_defaults(func=_cmd_list)
 
     p_insp = sub.add_parser("inspect", help="Affiche le détail complet d'une session.")
     p_insp.add_argument("target", help="Label ou UUID (ou préfixe d'UUID) de la session.")
     p_insp.add_argument("--profile", default="2026_nov_standard", help="Profil tarifaire.")
     p_insp.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
-    p_insp.add_argument("--bridge-db", type=Path, default=None, help="Chemin explicite vers bridge.db (lecture seule).")
     p_insp.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH, help="Catalogue tarifaire JSON.")
     p_insp.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_insp.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_insp.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_insp.set_defaults(func=_cmd_inspect)
 
     p_rm = sub.add_parser("remove", help="Retire une session de l'historique.")
@@ -382,7 +639,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Supprime aussi les rapports détaillés dans reports/.",
     )
+    p_rm.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_rm.set_defaults(func=_cmd_remove)
+
+    p_meta = sub.add_parser("update-meta", help="Met à jour label, projet ou note d'une session enregistrée.")
+    p_meta.add_argument("target", help="Label ou UUID (ou préfixe) de la session.")
+    p_meta.add_argument("-l", "--label", default=None, help="Nouveau label.")
+    p_meta.add_argument("-p", "--project", default=None, help="Nouveau projet.")
+    p_meta.add_argument("-n", "--note", default=None, help="Nouvelle note.")
+    p_meta.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
+    p_meta.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_meta.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
+    p_meta.set_defaults(func=_cmd_update_meta)
+
+    p_ign = sub.add_parser("ignore", help="Masque une session en attente dans ignored.json.")
+    p_ign.add_argument("target", help="UUID ou préfixe unique de la conversation.")
+    p_ign.add_argument("-r", "--reason", default="", help="Raison du masquage.")
+    p_ign.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
+    p_ign.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
+    p_ign.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_ign.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
+    p_ign.set_defaults(func=_cmd_ignore)
+
+    p_unign = sub.add_parser("unignore", help="Restaure une session masquée depuis ignored.json.")
+    p_unign.add_argument("target", help="UUID ou préfixe unique de la conversation.")
+    p_unign.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
+    p_unign.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
+    p_unign.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
+    p_unign.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
+    p_unign.set_defaults(func=_cmd_unignore)
 
     return parser
 

@@ -181,7 +181,7 @@ class TestBridgeTreeAndWorkspaces(unittest.TestCase):
                                     "ToolName": '"send_message"',
                                     "Arguments": json.dumps(
                                         {
-                                            "from_workspace": "gravity-studio",
+                                            "from_workspace": "gravity-workshop",
                                             "to_workspace": "gravity-architect",
                                             "msg_type": "handoff",
                                             "dispatch": True,
@@ -214,7 +214,7 @@ class TestBridgeTreeAndWorkspaces(unittest.TestCase):
                                     "ToolName": '"send_message"',
                                     "Arguments": json.dumps(
                                         {
-                                            "from_workspace": "gravity-studio",
+                                            "from_workspace": "gravity-workshop",
                                             "to_workspace": "gravity-workflow",
                                             "msg_type": "question",
                                             "dispatch": True,
@@ -275,10 +275,10 @@ class TestBridgeTreeAndWorkspaces(unittest.TestCase):
             # Cas 1 : bridge.db v0.2.0+ (avec caller_conversation_id -> thr-br-1 + dédup thr-arch-1)
             con = _create_bridge_db(db_path, v2_schema=True)
             rows_threads = [
-                ("thr-pre-ignored", "gravity-studio", "gravity-architect", "handoff", "done", "pre-ignored-conv", root_id, "2026-11-22T18:00:12Z"),
-                ("thr-arch-1", "gravity-studio", "gravity-architect", "handoff", "done", arch_id, root_id, "2026-11-22T18:10:12Z"),
-                ("thr-wf-1", "gravity-studio", "gravity-workflow", "question", "done", wf_id, root_id, "2026-11-22T18:20:02Z"),
-                ("thr-br-1", "gravity-studio", "gravity-bridge", "info", "done", br_id, root_id, "2026-11-22T18:30:00Z"),
+                ("thr-pre-ignored", "gravity-workshop", "gravity-architect", "handoff", "done", "pre-ignored-conv", root_id, "2026-11-22T18:00:12Z"),
+                ("thr-arch-1", "gravity-workshop", "gravity-architect", "handoff", "done", arch_id, root_id, "2026-11-22T18:10:12Z"),
+                ("thr-wf-1", "gravity-workshop", "gravity-workflow", "question", "done", wf_id, root_id, "2026-11-22T18:20:02Z"),
+                ("thr-br-1", "gravity-workshop", "gravity-bridge", "info", "done", br_id, root_id, "2026-11-22T18:30:00Z"),
             ]
             con.executemany("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows_threads)
             for jid, tid, ws_t, cid_t, st_ts in (
@@ -305,7 +305,7 @@ class TestBridgeTreeAndWorkspaces(unittest.TestCase):
                 brain,
                 CATALOG_PATH,
                 gravity_window=True,
-                project="gravity-studio",
+                project="gravity-workshop",
                 bridge_db_path=db_path,
             )
             s = m["summary"]
@@ -317,13 +317,13 @@ class TestBridgeTreeAndWorkspaces(unittest.TestCase):
             self.assertIn("gravity", s["features_used"])
             self.assertNotIn("gemini-4-neon", m["by_model"])
 
-            # by_workspace : gravity-studio (root+sub_root=2), gravity-workflow (wf_id+wf_sub=2), gravity-architect (1), gravity-bridge (1)
+            # by_workspace : gravity-workshop (root+sub_root=2), gravity-workflow (wf_id+wf_sub=2), gravity-architect (1), gravity-bridge (1)
             by_ws = m["by_workspace"]
             self.assertEqual(
                 set(by_ws.keys()),
-                {"gravity-studio", "gravity-architect", "gravity-workflow", "gravity-bridge"},
+                {"gravity-workshop", "gravity-architect", "gravity-workflow", "gravity-bridge"},
             )
-            self.assertEqual(by_ws["gravity-studio"]["agents"], 2)
+            self.assertEqual(by_ws["gravity-workshop"]["agents"], 2)
             self.assertEqual(by_ws["gravity-workflow"]["agents"], 2)
             self.assertAlmostEqual(sum(v["cost_share_pct"] for v in by_ws.values()), 100.0, delta=0.1)
 
@@ -347,11 +347,11 @@ class TestBridgeTreeAndWorkspaces(unittest.TestCase):
             con1 = _create_bridge_db(db_v1, v2_schema=False)
             con1.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("thr-arch-1", "gravity-studio", "gravity-architect", "handoff", "done", arch_id, "2026-11-22T18:10:12Z"),
+                ("thr-arch-1", "gravity-workshop", "gravity-architect", "handoff", "done", arch_id, "2026-11-22T18:10:12Z"),
             )
             con1.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("thr-wf-1", "gravity-studio", "gravity-workflow", "question", "done", wf_id, "2026-11-22T18:20:02Z"),
+                ("thr-wf-1", "gravity-workshop", "gravity-workflow", "question", "done", wf_id, "2026-11-22T18:20:02Z"),
             )
             con1.commit()
             con1.close()
@@ -436,7 +436,7 @@ class TestEntrypointsExclusionSlugAndLifecycle(unittest.TestCase):
             con = _create_bridge_db(db_path, v2_schema=True)
             con.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-db-only", "gravity-studio", "gravity-metrics", "handoff", "open", cid_br_db, cid_root, "2026-11-22T15:02:00Z"),
+                ("thr-db-only", "gravity-workshop", "gravity-metrics", "handoff", "open", cid_br_db, cid_root, "2026-11-22T15:02:00Z"),
             )
             con.execute(
                 "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -484,8 +484,8 @@ class TestEntrypointsExclusionSlugAndLifecycle(unittest.TestCase):
             self.assertTrue(saved["archived_at"])
             self.assertEqual(saved["bridge_children_count"], 1)
             self.assertEqual(saved["bridge_workspaces"], ["gravity-metrics"])
-            self.assertEqual(saved["project"], "gravity-studio")
-            self.assertIn("gravity-studio", saved["workspace_share_pct"])
+            self.assertEqual(saved["project"], "gravity-workshop")
+            self.assertIn("gravity-workshop", saved["workspace_share_pct"])
             self.assertIn("gravity-metrics", saved["workspace_share_pct"])
 
             # Immuabilité : ré-archivage sans --force retourne already_archived=True sans écraser

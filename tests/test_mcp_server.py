@@ -352,7 +352,7 @@ class TestMcpServer(unittest.TestCase):
             )
             con.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-20261122-mcp1", "gravity-studio", "gravity-metrics", "handoff", "open", cid_bridge, cid_root, "2026-11-22T14:00:15Z"),
+                ("thr-20261122-mcp1", "gravity-workshop", "gravity-metrics", "handoff", "open", cid_bridge, cid_root, "2026-11-22T14:00:15Z"),
             )
             con.execute(
                 "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",

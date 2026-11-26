@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Tests unitaires isolés des contrôles D4 dans plugin/scripts/validate.py (100 % stdlib)."""
+"""Tests unitaires isolés des contrôles D4, SKILL.md, hooks.json et modules autorisés dans validate.py (100 % stdlib)."""
 
 import contextlib
 import io
+import json
 from pathlib import Path
 import shutil
 import sys
@@ -40,10 +41,7 @@ class TestValidateD4(unittest.TestCase):
 
     def _run_validate_fast(self, plugin_dir: Path) -> validate.Report:
         report = validate.Report()
-        with (
-            mock.patch.object(validate, "_run_hook_dry_runs"),
-            mock.patch.object(validate, "_run_mcp_dry_run"),
-        ):
+        with mock.patch.object(validate, "_run_hook_dry_runs"):
             validate.validate_plugin(plugin_dir, report)
         return report
 
@@ -54,7 +52,6 @@ class TestValidateD4(unittest.TestCase):
         if mock_dry_runs:
             with (
                 mock.patch.object(validate, "_run_hook_dry_runs"),
-                mock.patch.object(validate, "_run_mcp_dry_run"),
                 contextlib.redirect_stdout(buf),
             ):
                 rc = validate.main(list(argv))
@@ -62,6 +59,52 @@ class TestValidateD4(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 rc = validate.main(list(argv))
         return rc, buf.getvalue()
+
+    def test_allowed_modules_excludes_legacy_and_accepts_disabled_session_start(self) -> None:
+        for legacy_mod in ("mcp", "widget_html", "bridge_links", "hook_runtime"):
+            self.assertNotIn(legacy_mod, validate.ALLOWED_LOCAL_MODULES)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = self._make_plugin_copy(tmp)
+            # Simulate post-W10/W11/W12 tree without legacy mcp/bridge_links/hook_runtime
+            shutil.rmtree(plugin_dir / "mcp", ignore_errors=True)
+            (plugin_dir / "mcp_config.json").unlink(missing_ok=True)
+            (plugin_dir / "metrics" / "bridge_links.py").unlink(missing_ok=True)
+            (plugin_dir / "hooks" / "hook_runtime.py").unlink(missing_ok=True)
+            (plugin_dir / "hooks.json").write_text(
+                json.dumps(
+                    {
+                        "gravity-metrics-session": {
+                            "enabled": False,
+                            "SessionStart": [
+                                {"type": "command", "command": "python3 hooks/session_start_metrics.py", "timeout": 5}
+                            ],
+                        },
+                        "gravity-metrics-command": {
+                            "enabled": True,
+                            "PreInvocation": [
+                                {"type": "command", "command": "python3 hooks/pre_invocation_metrics.py", "timeout": 15}
+                            ],
+                        },
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rc, out = self._run_main_captured("--plugin-root", str(plugin_dir), "--strict", mock_dry_runs=False)
+            self.assertEqual(rc, 0, out)
+            self.assertIn("[PASS]", out)
+
+            # SKILL.md description > 160 chars must fail
+            skill_md = plugin_dir / "skills" / "gravity-metrics" / "SKILL.md"
+            skill_md.write_text(
+                f"---\nname: gravity-metrics\ndescription: {'x' * 161}\n---\n\n# Skill\n",
+                encoding="utf-8",
+            )
+            rep_desc = self._run_validate_fast(plugin_dir)
+            self.assertFalse(rep_desc.ok(strict=True))
+            self.assertTrue(any("160" in e for e in rep_desc.errors), rep_desc.errors)
 
     def test_rules_agents_up_to_600_bytes_passes_strict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
