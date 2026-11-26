@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Tests unitaires et d'intégration v0.4.2 : run_workflow, callback Bridge v0.2.0 et filtrage strict."""
+"""Tests unitaires et d'intégration v0.4.2 : run_workflow et filtrage strict."""
 
 import json
 from pathlib import Path
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -18,12 +17,9 @@ if str(PLUGIN_ROOT) not in sys.path:
 from metrics import (  # noqa: E402
     collect_run_metrics,
     discover_agent_tree,
-    discover_bridge_links,
     discover_workflow_children,
     list_gravity_conversations,
     list_pending_sessions,
-    load_bridge_caller_conversation_ids,
-    load_bridge_target_conversation_ids,
     load_known_child_conversation_ids,
     render_inspect_text,
     render_session_detail_markdown,
@@ -87,7 +83,6 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             brain = root / "brain"
-            db_path = root / "bridge.db"
 
             root_id = "11111111-1111-4111-8111-111111111111"
             bridge_cid = "22222222-2222-4222-8222-222222222222"
@@ -239,26 +234,6 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                     ],
                 )
 
-            con = sqlite3.connect(str(db_path))
-            con.execute(
-                "CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, "
-                "msg_type TEXT, status TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, created_at TEXT)"
-            )
-            con.execute(
-                "CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, "
-                "action TEXT, direction TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, status TEXT, created_at TEXT)"
-            )
-            con.execute(
-                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-wf-mix", "gravity-workshop", "gravity-metrics", "handoff", "done", bridge_cid, root_id, "2026-11-22T10:00:30Z"),
-            )
-            con.execute(
-                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("job-out", "thr-wf-mix", "gravity-metrics", "new_conversation", "outbound", bridge_cid, root_id, "completed", "2026-11-22T10:00:30Z"),
-            )
-            con.commit()
-            con.close()
-
             # Vérifier discover_workflow_children directement (déduplication & premier step valide)
             wf_children = discover_workflow_children(bridge_cid, brain)
             self.assertEqual(
@@ -276,236 +251,48 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
             self.assertNotIn(ignored_cmd_cid, by_wcid)
 
             metrics = collect_run_metrics(
-                root_id,
+                bridge_cid,
                 brain,
                 CATALOG_PATH,
-                gravity_window=True,
-                project="gravity-workshop",
-                bridge_db_path=db_path,
+                gravity_window=False,
+                project="gravity-metrics",
             )
             summary = metrics["summary"]
-            self.assertEqual(summary["total_agents"], 8)
-            self.assertEqual(summary["max_tree_depth"], 2)
+            self.assertEqual(summary["total_agents"], 7)
+            self.assertEqual(summary["max_tree_depth"], 1)
             self.assertEqual(summary["execution_mode"], "workflow")
             self.assertIn("workflow", summary["features_used"])
 
             wf_agents = [a for a in metrics["agents"] if a["source"] == "workflow"]
             self.assertEqual(len(wf_agents), 6)
             for wag in wf_agents:
-                self.assertEqual(wag["bridge_workspace"], "gravity-metrics")
-                self.assertEqual(wag["depth"], 2)
+                self.assertEqual(wag["depth"], 1)
 
-            self.assertEqual(metrics["by_workspace"]["gravity-workshop"]["agents"], 1)
             self.assertEqual(metrics["by_workspace"]["gravity-metrics"]["agents"], 7)
 
             self.assertEqual(metrics["by_category"]["orchestration"]["agents"], 3)
-            self.assertEqual(metrics["by_category"]["build"]["agents"], 3)
+            self.assertEqual(metrics["by_category"]["build"]["agents"], 2)
             self.assertEqual(metrics["by_category"]["verification"]["agents"], 2)
 
             inspect_txt = render_inspect_text(metrics)
             self.assertIn("[workflow]", inspect_txt)
 
             detail_md = render_session_detail_markdown(metrics)
-            self.assertIn("[workflow · d.2]", detail_md)
+            self.assertIn("[workflow · d.1]", detail_md)
 
-            known_children = load_known_child_conversation_ids(brain, bridge_db_path=db_path)
+            known_children = load_known_child_conversation_ids(brain)
             self.assertNotIn(root_id, known_children)
-            self.assertIn(bridge_cid, known_children)
             self.assertIn(wf_p1, known_children)
-
-    def test_bridge_v020_callback_and_v010_compatibility(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            brain = root / "brain"
-            db_v2 = root / "bridge-v2.db"
-            db_v1 = root / "bridge-v1.db"
-
-            root_id = "33333333-3333-4333-8333-333333333333"
-            child_id = "44444444-4444-4444-8444-444444444444"
-            root_no_out = "55555555-5555-4555-8555-555555555555"
-            child_no_out = "66666666-6666-4666-8666-666666666666"
-
-            # Root identifiée via caller_conversation_id (prompt sans commande /gravity)
-            _write_transcript(
-                brain / root_id,
-                [
-                    {
-                        "step_index": 0,
-                        "type": "USER_INPUT",
-                        "status": "DONE",
-                        "created_at": "2026-11-22T11:00:00Z",
-                        "content": "Dispatch vers metrics",
-                    },
-                    _planner_step(1, "2026-11-22T11:00:10Z"),
-                ],
-            )
-            _write_transcript(
-                brain / child_id,
-                [
-                    {
-                        "step_index": 0,
-                        "type": "USER_INPUT",
-                        "status": "DONE",
-                        "created_at": "2026-11-22T11:01:00Z",
-                        "content": "[GRAVITY-BRIDGE | thread=thr-cb-1]",
-                    },
-                    _planner_step(1, "2026-11-22T11:01:10Z"),
-                ],
-            )
-
-            _write_transcript(
-                brain / root_no_out,
-                [
-                    {
-                        "step_index": 0,
-                        "type": "USER_INPUT",
-                        "status": "DONE",
-                        "created_at": "2026-11-22T11:10:00Z",
-                        "content": "/gravity-bridge status",
-                    },
-                    _planner_step(1, "2026-11-22T11:10:10Z"),
-                ],
-            )
-            _write_transcript(
-                brain / child_no_out,
-                [
-                    {
-                        "step_index": 0,
-                        "type": "USER_INPUT",
-                        "status": "DONE",
-                        "created_at": "2026-11-22T11:11:00Z",
-                        "content": "[GRAVITY-BRIDGE | thread=thr-cb-2]",
-                    },
-                    _planner_step(1, "2026-11-22T11:11:10Z"),
-                ],
-            )
-
-            con = sqlite3.connect(str(db_v2))
-            con.execute(
-                "CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, "
-                "msg_type TEXT, status TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, created_at TEXT)"
-            )
-            con.execute(
-                "CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, "
-                "action TEXT, direction TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, status TEXT, created_at TEXT)"
-            )
-            con.execute(
-                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-cb-1", "gravity-workshop", "gravity-metrics", "handoff", "open", child_id, root_id, "2026-11-22T11:00:20Z"),
-            )
-            # Outbound terminé + callback actif pointant vers root_id avec caller=child_id
-            con.execute(
-                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("job-out-1", "thr-cb-1", "gravity-metrics", "new_conversation", "outbound", child_id, root_id, "completed", "2026-11-22T11:00:20Z"),
-            )
-            con.execute(
-                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("job-cb-1", "thr-cb-1", "gravity-workshop", "send_message", "callback", root_id, child_id, "dispatched", "2026-11-22T11:02:00Z"),
-            )
-
-            # Thread sans job outbound en base, mais avec callback actif uniquement
-            con.execute(
-                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-cb-2", "gravity-workshop", "gravity-bridge", "question", "open", child_no_out, root_no_out, "2026-11-22T11:10:20Z"),
-            )
-            con.execute(
-                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("job-cb-2", "thr-cb-2", "gravity-workshop", "send_message", "callback", root_no_out, child_no_out, "queued", "2026-11-22T11:12:00Z"),
-            )
-            con.commit()
-            con.close()
-
-            target_ids = load_bridge_target_conversation_ids(db_v2)
-            self.assertEqual(target_ids, {child_id, child_no_out})
-            self.assertNotIn(root_id, target_ids)
-            self.assertNotIn(root_no_out, target_ids)
-
-            caller_ids = load_bridge_caller_conversation_ids(db_v2)
-            self.assertEqual(caller_ids, {root_id, root_no_out})
-
-            convs = list_gravity_conversations(brain, include_all=False, bridge_db_path=db_v2)
-            self.assertEqual({c["conversation_id"] for c in convs}, {root_id, root_no_out})
-
-            pend = list_pending_sessions(brain, root / "history.jsonl", bridge_db_path=db_v2)
-            self.assertEqual({p["conversation_id"] for p in pend}, {root_id, root_no_out})
-
-            # discover_bridge_links sur root_id : garde child_id & gravity-metrics, expose callback actif
-            links_root = discover_bridge_links(
-                root_id,
-                brain / root_id / ".system_generated" / "logs" / "transcript.jsonl",
-                bridge_db=db_v2,
-            )
-            self.assertEqual(len(links_root), 1)
-            self.assertEqual(links_root[0]["thread_id"], "thr-cb-1")
-            self.assertEqual(links_root[0]["target_conversation_id"], child_id)
-            self.assertEqual(links_root[0]["to_workspace"], "gravity-metrics")
-            self.assertEqual(links_root[0]["created_at"], "2026-11-22T11:00:20Z")
-            self.assertTrue(links_root[0]["has_active_job"])
-            self.assertEqual(links_root[0]["job_id"], "job-cb-1")
-            self.assertEqual(links_root[0]["job_status"], "dispatched")
-            self.assertEqual(links_root[0]["job_action"], "send_message")
-
-            # discover_bridge_links sur root_no_out : fallback callback actif quand outbound absent
-            links_no_out = discover_bridge_links(
-                root_no_out,
-                brain / root_no_out / ".system_generated" / "logs" / "transcript.jsonl",
-                bridge_db=db_v2,
-            )
-            self.assertEqual(len(links_no_out), 1)
-            self.assertEqual(links_no_out[0]["target_conversation_id"], child_no_out)
-            self.assertEqual(links_no_out[0]["to_workspace"], "gravity-bridge")
-            self.assertTrue(links_no_out[0]["has_active_job"])
-            self.assertEqual(links_no_out[0]["job_id"], "job-cb-2")
-            self.assertEqual(links_no_out[0]["job_status"], "queued")
-            self.assertEqual(links_no_out[0]["job_action"], "send_message")
-
-            # discover_bridge_links sur child_id : le callback ne réinjecte pas thr-cb-1
-            links_child = discover_bridge_links(
-                child_id,
-                brain / child_id / ".system_generated" / "logs" / "transcript.jsonl",
-                bridge_db=db_v2,
-            )
-            self.assertEqual(links_child, [])
-
-            # Tolérance schéma v0.1.0 sans colonne direction ni caller_conversation_id
-            con1 = sqlite3.connect(str(db_v1))
-            con1.execute(
-                "CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, "
-                "msg_type TEXT, status TEXT, target_conversation_id TEXT, created_at TEXT)"
-            )
-            con1.execute(
-                "CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, "
-                "action TEXT, target_conversation_id TEXT, status TEXT, created_at TEXT)"
-            )
-            con1.execute(
-                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("thr-v1", "gravity-workshop", "gravity-metrics", "handoff", "open", child_id, "2026-11-22T11:00:20Z"),
-            )
-            con1.execute(
-                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("job-v1-out", "thr-v1", "gravity-metrics", "new_conversation", child_id, "completed", "2026-11-22T11:00:20Z"),
-            )
-            con1.execute(
-                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("job-v1-cb", "thr-v1", "gravity-workshop", "send_message", root_id, "dispatched", "2026-11-22T11:02:00Z"),
-            )
-            con1.commit()
-            con1.close()
-
-            self.assertEqual(load_bridge_target_conversation_ids(db_v1), {child_id})
-            self.assertEqual(load_bridge_caller_conversation_ids(db_v1), set())
 
     def test_strict_pending_filtering_and_root_cycle_non_regression(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             brain = root / "brain"
-            db_path = root / "bridge.db"
             runs_file = root / "runs.jsonl"
 
             cid_slash = "grav-slash"
             cid_sub_cycle = "sub-1"
             cid_runs = "77777777-7777-4777-8777-777777777777"
-            cid_caller = "88888888-8888-4888-8888-888888888888"
             cid_bridge_child = "99999999-9999-4999-8999-999999999999"
             cid_wf_child_user = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
             cid_noise_install = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
@@ -554,24 +341,11 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                         "created_at": "2026-11-22T12:01:00Z",
                         "content": "Implémenter feature run",
                     },
-                    _planner_step(1, "2026-11-22T12:01:10Z"),
+                    _planner_step(1, "2026-11-22T12:01:10Z", tool_calls=[{"name": "write_file"}]),
                 ],
             )
 
-            # 3. Racine via caller_conversation_id dans bridge.db
-            _write_transcript(
-                brain / cid_caller,
-                [
-                    {
-                        "step_index": 0,
-                        "type": "USER_INPUT",
-                        "status": "DONE",
-                        "created_at": "2026-11-22T12:02:00Z",
-                        "content": "Session sans slash mais appelant Bridge",
-                    },
-                    _planner_step(1, "2026-11-22T12:02:10Z"),
-                ],
-            )
+            # 3. Enfant legacy marqué [GRAVITY-BRIDGE | dans le transcript -> exclu sans bridge.db
             _write_transcript(
                 brain / cid_bridge_child,
                 [
@@ -585,26 +359,6 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                     _planner_step(1, "2026-11-22T12:02:30Z"),
                 ],
             )
-
-            con = sqlite3.connect(str(db_path))
-            con.execute(
-                "CREATE TABLE threads (id TEXT PRIMARY KEY, from_workspace TEXT, to_workspace TEXT, "
-                "msg_type TEXT, status TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, created_at TEXT)"
-            )
-            con.execute(
-                "CREATE TABLE jobs (id TEXT PRIMARY KEY, thread_id TEXT, target_workspace TEXT, "
-                "action TEXT, direction TEXT, target_conversation_id TEXT, caller_conversation_id TEXT, status TEXT, created_at TEXT)"
-            )
-            con.execute(
-                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-strict-1", "studio", "gravity-metrics", "handoff", "done", cid_bridge_child, cid_caller, "2026-11-22T12:02:15Z"),
-            )
-            con.execute(
-                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("job-strict-1", "thr-strict-1", "gravity-metrics", "new_conversation", "outbound", cid_bridge_child, cid_caller, "completed", "2026-11-22T12:02:15Z"),
-            )
-            con.commit()
-            con.close()
 
             # 4. Enfant run_workflow ayant un USER_INPUT -> strictement exclu
             tasks_dir = brain / cid_slash / ".system_generated" / "tasks"
@@ -675,33 +429,30 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                 ],
             )
 
-            known_children = load_known_child_conversation_ids(brain, bridge_db_path=db_path)
+            known_children = load_known_child_conversation_ids(brain)
             self.assertNotIn(cid_slash, known_children)
             self.assertIn(cid_sub_cycle, known_children)
             self.assertIn(cid_wf_child_user, known_children)
-            self.assertIn(cid_bridge_child, known_children)
             self.assertIn(cid_noise_sub_uri, known_children)
 
             # Anti-cycle discover_agent_tree sans boucle
-            tree = discover_agent_tree(cid_slash, brain, bridge_db_path=db_path)
+            tree = discover_agent_tree(cid_slash, brain)
             self.assertEqual(
                 {n["conversation_id"] for n in tree},
                 {cid_slash, cid_sub_cycle, cid_wf_child_user},
             )
 
-            expected_roots = {cid_slash, cid_runs, cid_caller}
+            expected_roots = {cid_slash, cid_runs}
             convs = list_gravity_conversations(
                 brain,
                 include_all=False,
                 runs_jsonl_paths=[runs_file],
-                bridge_db_path=db_path,
             )
             self.assertEqual({c["conversation_id"] for c in convs}, expected_roots)
 
             pend = list_pending_sessions(
                 brain,
                 root / "history.jsonl",
-                bridge_db_path=db_path,
                 runs_jsonl_paths=[runs_file],
             )
             self.assertEqual({p["conversation_id"] for p in pend}, expected_roots)
