@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Collector SRP Split & `_shared` Sync (`TASK-MET-01a`, `plugin/metrics/`):**
+  - Synced read-only `plugin/_shared/` and `plugin/.shared_manifest.json` from `gravity/shared/gravity_shared/`.
+  - Split `plugin/metrics/collector.py` into 5 modules strictly `< 750` lines (`prompt_classifier.py`, `transcript_index.py`, `agent_tree.py`, `milestone_analyzer.py`, `collector.py` façade), delegating transcript/worktree/ISO/shell-exit helpers to `_shared.transcript_reader`, removing `bridge_links` coupling, preserving `dev` collector fixes (`invalid_steps`, `shell_nonzero_steps`, `cold_cache_waste`, `technical_signals`, `by_workspace`, anti-noise `pending`, `self_archiving`), and adding `$GRAVITY_HOME/workflow/workspaces/<slug>-<sha256[:8]>/profile.json` resolution (`T3-P25`).
+
 ## [0.5.1] - 2026-11-24
 
 ### Added

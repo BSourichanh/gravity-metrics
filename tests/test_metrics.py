@@ -1124,6 +1124,74 @@ class TestReconciliationAndCompliance(unittest.TestCase):
             self.assertNotEqual(proc_bad.returncode, 0)
             self.assertIn("schema_version", proc_bad.stdout)
 
+    def test_centralized_workflow_profile_slug_hash_t3_p25(self) -> None:
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "My Very Long Workspace Name With Spaces & Caps!"
+            ws.mkdir()
+            grav_home = root / "gravity_home"
+            resolved = ws.resolve()
+            slug = re.sub(r"[^a-z0-9]+", "-", resolved.name.lower()).strip("-")[:32] or "workspace"
+            digest8 = hashlib.sha256(os.path.normcase(str(resolved)).encode("utf-8")).hexdigest()[:8]
+            prof_file = grav_home / "workflow" / "workspaces" / f"{slug}-{digest8}" / "profile.json"
+            prof_file.parent.mkdir(parents=True)
+            prof_file.write_text(json.dumps({"mode": "deep"}), encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"GRAVITY_HOME": str(grav_home)}, clear=False):
+                os.environ.pop("GRAVITY_WORKFLOW_HOME", None)
+                self.assertEqual(read_gravity_profile_summary(ws), "deep")
+
+                prof_file.write_text(
+                    json.dumps({"mode": "evo", "current_level": "high", "pace": "fast", "verification": "safe"}),
+                    encoding="utf-8",
+                )
+                self.assertEqual(read_gravity_profile_summary(ws), "evo→high · fast · safe")
+
+    def test_split_collector_dev_anomalies_cold_cache_and_zero_bridge(self) -> None:
+        from metrics import collector as col_mod
+
+        for attr in ("METRICS_MARKER", "METRICS_OPEN_MARKER", "slugify_label", "collect_run_metrics", "resolve_gravity_window", "suggest_auto_label"):
+            self.assertTrue(hasattr(col_mod, attr), f"Missing collector facade attribute: {attr}")
+
+        for fname in ("collector.py", "prompt_classifier.py", "transcript_index.py", "agent_tree.py", "milestone_analyzer.py"):
+            src = (PLUGIN_ROOT / "metrics" / fname).read_text(encoding="utf-8")
+            self.assertNotIn("bridge_links", src, f"Unexpected bridge_links reference in {fname}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = Path(tmp) / "brain"
+            cid = "dev-feat-0001-0000-0000-000000000001"
+            _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:00:00Z", "content": "/gravity-workflow deep fix"},
+                    {
+                        "step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:05Z",
+                        "model": "gemini-3.8-flash-tiered", "input_tokens": 20_000, "cache_read_tokens": 0, "output_tokens": 200,
+                        "thinking": "Reasoning trace", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "pytest"}}],
+                    },
+                    {"step_index": 2, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-26T10:00:08Z", "content": "Command exited with code 2\nCommand output:\nfailed"},
+                    {"step_index": 3, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-26T10:00:09Z", "content": "Showing lines 1-5\nCommand exited with code 9"},
+                    {"step_index": 4, "type": "GENERIC", "status": "INVALID", "created_at": "2026-11-26T10:00:10Z", "content": "Bad tool payload"},
+                    {
+                        "step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:12Z",
+                        "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 9000, "output_tokens": 50,
+                        "tool_calls": [{"name": "run_command", "args": {"CommandLine": f"python3 plugin/scripts/cli.py record {cid[:8]}"}}],
+                    },
+                ],
+            )
+            m = collect_run_metrics(cid, brain, CATALOG_PATH, gravity_window=True, project="gravity-metrics")
+            s = m["summary"]
+            self.assertEqual(s["total_invalid_steps"], 1)
+            self.assertEqual(s["total_shell_nonzero_steps"], 1)
+            self.assertEqual(s["total_anomalies"], 2)
+            self.assertEqual(s["thinking_calls"], 1)
+            self.assertEqual(m["efficiency_and_waste"]["cold_cache_waste"]["calls"], 1)
+            self.assertEqual(m["efficiency_and_waste"]["cold_cache_waste"]["input_tokens"], 20_000)
+            self.assertTrue(m["agents"][0]["clean_termination"])
+            self.assertIn("gravity-metrics", m["by_workspace"])
+
 
 if __name__ == "__main__":
     unittest.main()
