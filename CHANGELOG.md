@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **Legacy MCP Core Retirement Lot 1 (`TASK-MET-03b`):**
+  - Removed standalone legacy MCP core modules (`plugin/mcp/__init__.py`, `plugin/mcp/server.py`, `plugin/mcp/widget_html.py`, `plugin/mcp/ui/__init__.py`, `plugin/mcp/ui/app_js.py`) superseded by the unified `gravity_dashboard` MCP App (`DEC-ARCH-01`, `SPI-1`).
+  - Removed obsolete `tests/test_mcp_server.py` (retaining `plugin/mcp/ui/{charts,markdown_view,styles}.py`, `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` for Wave W11 `TASK-MET-03c`).
+
 ### Changed
 - **Installer, Validator, CLI, Workspace Resolver & `SKILL.md` (`TASK-MET-03a`, `install.py`, `plugin/`):**
   - Slimmed `install.py` (`89` lines) onto `_shared.installer_core` preserving all 11 CLI flags (`--scope`, `--workspace`, `--target`, `--method`, `--force`, `--skip-validate`, `--strict`, `--no-fix-python`, `--dry-run`, `--check`, `--uninstall`), `0755` POSIX exec bits on `EXEC_SCRIPTS`, Windows `"python3"` rewriting, and rollback on `validate.py --strict` failure.
