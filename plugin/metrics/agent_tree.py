@@ -233,10 +233,8 @@ def discover_workflow_children(
 
 def load_known_child_conversation_ids(
     brain_dir: Union[Path, str],
-    bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> Set[str]:
     """Agrège tous les identifiants connus de conversations enfants (subagents, workflow)."""
-    _ = bridge_db_path
     child_ids: Set[str] = set()
     base = Path(brain_dir)
     if not base.is_dir():
@@ -302,10 +300,8 @@ def is_bridge_child_conversation(
     first_prompt_raw: Optional[str] = None,
     bridge_target_ids: Optional[Set[str]] = None,
     brain_dir: Optional[Union[Path, str]] = None,
-    bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> bool:
     """Retourne True si la conversation porte un marqueur transcript délégué `[GRAVITY-BRIDGE |`."""
-    _ = bridge_db_path
     cid = str(conversation_id or "").strip()
     if not cid:
         return False
@@ -356,10 +352,8 @@ def list_gravity_conversations(
     brain_dir: Union[Path, str],
     include_all: bool = False,
     runs_jsonl_paths: Optional[List[Path]] = None,
-    bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Liste les conversations racines récentes, en excluant les enfants par défaut."""
-    _ = bridge_db_path
     base = Path(brain_dir)
     if not base.is_dir():
         return []
@@ -513,10 +507,8 @@ def _discover_direct_subagent_children(conv_dir: Path) -> List[Dict[str, Any]]:
 def discover_agent_tree(
     root_id: str,
     brain_dir: Union[Path, str],
-    bridge_db_path: Optional[Union[Path, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Découvre l'arbre complet (sous-agents natifs + run_workflow) par BFS anti-cycles."""
-    _ = bridge_db_path
     base = Path(brain_dir)
     visited: Set[str] = set()
     enqueued: Set[str] = {root_id}

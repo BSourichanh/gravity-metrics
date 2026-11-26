@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - **Hook Runtime & Compat Stubs Retirement (`TASK-MET-03d`):**
   - Removed duplicated `plugin/hooks/hook_runtime.py` (`147` lines, superseded by `_shared.hook_runtime`).
-  - Removed temporary `PendingBridgeJobsError` and `bridge_db_path` / `bridge_db` no-op compatibility stubs from `plugin/metrics/store.py`, `plugin/metrics/audits_reader.py`, and `plugin/metrics/collector.py`.
+  - Removed temporary `PendingBridgeJobsError` and `bridge_db_path` / `bridge_db` no-op compatibility stubs from `plugin/metrics/store.py`, `plugin/metrics/audits_reader.py`, `plugin/metrics/collector.py`, `plugin/metrics/milestone_analyzer.py`, and `plugin/metrics/agent_tree.py`.
 - **Legacy MCP UI, Config & Bridge Links Retirement (`TASK-MET-03c`):**
   - Removed the remaining legacy MCP UI modules (`plugin/mcp/ui/charts.py`, `plugin/mcp/ui/markdown_view.py`, `plugin/mcp/ui/styles.py`, removing `plugin/mcp/` completely), standalone `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` (`575` lines).
 - **Legacy MCP Core Retirement Lot 1 (`TASK-MET-03b`):**
@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Removed obsolete `tests/test_mcp_server.py` (retaining `plugin/mcp/ui/{charts,markdown_view,styles}.py`, `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` for Wave W11 `TASK-MET-03c`).
 
 ### Changed
+- **Rules/AGENTS Alignment, `evo`/`--no-verify` Bypass & Portability Remediation (`TASK-MET-03d`):**
+  - Updated `plugin/rules/AGENTS.md` (`<= 600` B) and root `AGENTS.md` (`<= 2500` B) to remove retired legacy references (`open_metrics_dashboard`, `mcp/server.py`, `mcp_config.json`, `transition-mcp`, `cost-telemetry`, active `SessionStart`, Bridge guard) and align with `open_gravity_dashboard` (`gravity_dashboard`), disabled `SessionStart`, `SPI-1..4`, `ui.mode: "none"`, `_shared/` SSOT, and `refonte/socle`.
+  - Updated `plugin/hooks/pre_invocation_metrics.py` (`_match_capture_policy`) to strip/bypass leading `evo` / `--no-verify` modifiers under `consultative_bypass`, aligned `plugin/metrics/collector.py` fallback (`endswith("-studio")`), and guarded POSIX `fcntl` contention in `tests/test_metrics.py` for Windows compatibility (`R4`), with new `SPI-2` modifier tests in `tests/test_hook.py`.
 - **Split `SessionStart` Disabled in `plugin/hooks.json` & W12 Tests (`TASK-MET-03d`, `plugin/hooks.json`, `tests/`):**
   - Separated `SessionStart` (`hooks/session_start_metrics.py`) into dedicated `"gravity-metrics-session"` entry with `"enabled": false` while keeping `PreInvocation` (`hooks/pre_invocation_metrics.py`) active (`"enabled": true`) in `"gravity-metrics-command"`.
   - Added explicit `hooks.json` / `hook_runtime.py` retirement assertions in `tests/test_hook.py` and `tests/test_lifecycle_and_ux_v050.py`, tightened `tests/test_metrics.py::test_stdlib_only_and_no_forbidden_jargon` (`hook_runtime` disallowed), and removed `bridge_db` args from `tests/test_audits_reader.py`.

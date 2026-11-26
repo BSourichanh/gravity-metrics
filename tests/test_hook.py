@@ -633,7 +633,7 @@ class TestPreInvocationHook(unittest.TestCase):
             )
             env_g = {"GRAVITY_HOME": str(g_home)}
 
-            # invocationNum=1/True, bare command, excluded subcommands, consultative prompt, auto_start=False -> no capture
+            # invocationNum=1/True, bare command, excluded subcommands, consultative/evo/--no-verify bypass, auto_start=False -> no capture
             for payload in (
                 {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 1, "lastUserInput": "/atelier-cmd spec x"},
                 {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": True, "lastUserInput": "/atelier-cmd spec x"},
@@ -641,10 +641,45 @@ class TestPreInvocationHook(unittest.TestCase):
                 {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd init"},
                 {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd status"},
                 {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd pourquoi ce module ?"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd evo"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd evo why is this slow?"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd --no-verify"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd --no-verify explain this"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd evo status"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd evo --no-verify"},
                 {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/silent-cmd build feature"},
             ):
                 self.assertEqual(_run_hook(json.dumps(payload), store, brain, extra_env=env_g), {})
             self.assertEqual(load_active_captures(store), {})
+
+            # Action command preceded by evo / --no-verify still captures when not excluded/consultative
+            cid_evo_act = "7777cccc-1111-2222-3333-444455558888"
+            tpath_evo_act = _write_transcript(
+                brain / cid_evo_act,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Intro"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                ],
+            )
+            self.assertEqual(
+                _run_hook(
+                    json.dumps({
+                        "conversationId": cid_evo_act,
+                        "transcriptPath": str(tpath_evo_act),
+                        "cwd": str(ws),
+                        "invocationNum": 0,
+                        "lastUserInput": "/atelier-cmd evo build feature X",
+                    }),
+                    store,
+                    brain,
+                    extra_env=env_g,
+                ),
+                {},
+            )
+            caps_evo = load_active_captures(store)
+            self.assertIn(cid_evo_act, caps_evo)
+            self.assertEqual(caps_evo[cid_evo_act]["source"], "atelier_auto")
+            self.assertEqual(caps_evo[cid_evo_act]["label"], "atelier-build-feature")
 
             # Action override in consultative question -> captured
             out_ok = _run_hook(

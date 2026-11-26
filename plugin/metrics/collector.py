@@ -162,7 +162,7 @@ except ImportError:
             rp = Path(root_workspace_path)
             if rp.is_dir():
                 return "atelier" if ((rp / "projects.json").is_file() or (rp / "specs").is_dir()) else "code"
-        return "atelier" if ws_clean.lower() == "gravity-studio" else "code"
+        return "atelier" if ws_clean.lower().endswith("-studio") else "code"
 
     def resolve_agent_workspace(
         node: Dict[str, Any],

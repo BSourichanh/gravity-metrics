@@ -553,13 +553,27 @@ def _match_capture_policy(cleaned: str) -> Optional[Tuple[str, str]]:
             args_text = m.group(1).strip()
             if not args_text or args_text.startswith("/"):
                 continue
-            first_tok = args_text.split(None, 1)[0].strip().lower()
+            effective_args = args_text
+            if policy["consultative_bypass"]:
+                while True:
+                    parts = effective_args.split(None, 1)
+                    if not parts:
+                        break
+                    if parts[0].strip().lower() in ("evo", "--no-verify"):
+                        effective_args = parts[1].strip() if len(parts) > 1 else ""
+                        continue
+                    break
+                if not effective_args:
+                    return None
+                if effective_args.startswith("/"):
+                    continue
+            first_tok = effective_args.split(None, 1)[0].strip().lower()
             if first_tok in policy["exclude_subcommands"]:
                 return None
-            if policy["consultative_bypass"] and _CONSULT_HEAD_RE.match(args_text):
-                if _ACTION_OVERRIDE_RE.search(args_text) is None:
+            if policy["consultative_bypass"] and _CONSULT_HEAD_RE.match(effective_args):
+                if _ACTION_OVERRIDE_RE.search(effective_args) is None:
                     return None
-            return policy["label_prefix"], args_text
+            return policy["label_prefix"], effective_args
     return None
 
 

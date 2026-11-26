@@ -1193,7 +1193,6 @@ class TestReconciliationAndCompliance(unittest.TestCase):
             self.assertIn("gravity-metrics", m["by_workspace"])
 
     def test_locks_fail_closed_timeout_posix_and_simulated_windows(self) -> None:
-        import fcntl
         import importlib
         import types
         from metrics.history import history_lock
@@ -1207,23 +1206,47 @@ class TestReconciliationAndCompliance(unittest.TestCase):
             spath = root / "session_meta.json"
             slock = spath.with_suffix(".lock")
 
-            with hlock.open("a+b") as holder:
-                fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                try:
-                    with self.assertRaises(TimeoutError):
-                        with history_lock(hpath, timeout_s=0.05):
-                            pass
-                finally:
-                    fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            if os.name != "nt":
+                import fcntl
 
-            with slock.open("a+b") as holder:
-                fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                try:
-                    with self.assertRaises(TimeoutError):
-                        with state_file_lock(spath, timeout_s=0.05):
-                            pass
-                finally:
-                    fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+                with hlock.open("a+b") as holder:
+                    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try:
+                        with self.assertRaises(TimeoutError):
+                            with history_lock(hpath, timeout_s=0.05):
+                                pass
+                    finally:
+                        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+                with slock.open("a+b") as holder:
+                    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try:
+                        with self.assertRaises(TimeoutError):
+                            with state_file_lock(spath, timeout_s=0.05):
+                                pass
+                    finally:
+                        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            else:
+                import msvcrt
+
+                for lock_file, lock_ctx in (
+                    (hlock, lambda: history_lock(hpath, timeout_s=0.05)),
+                    (slock, lambda: state_file_lock(spath, timeout_s=0.05)),
+                ):
+                    with lock_file.open("a+b") as holder:
+                        holder.seek(0, os.SEEK_END)
+                        if holder.tell() == 0:
+                            holder.write(b"\x00")
+                            holder.flush()
+                        holder.seek(0)
+                        msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 1)
+                        try:
+                            with self.assertRaises(TimeoutError):
+                                with lock_ctx():
+                                    pass
+                        finally:
+                            holder.seek(0)
+                            msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, 1)
 
             fake_msvcrt = types.SimpleNamespace(
                 LK_NBLCK=1,

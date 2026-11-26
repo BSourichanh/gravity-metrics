@@ -525,14 +525,12 @@ def list_pending_sessions(
     brain_dir: Union[Path, str],
     history_path: Optional[Union[Path, str]] = None,
     *,
-    bridge_db_path: Optional[Union[Path, str]] = None,
     runs_jsonl_paths: Optional[List[Path]] = None,
     store_dir: Optional[Union[Path, str]] = None,
     include_ignored: bool = False,
     include_noise: bool = False,
 ) -> List[Dict[str, Any]]:
     """Liste les sessions Gravity racines ayant de l'activité LLM non encore archivée."""
-    _ = bridge_db_path
     base = Path(brain_dir)
     if not base.is_dir():
         return []
