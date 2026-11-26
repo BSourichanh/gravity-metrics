@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Removed
+- **Hook Runtime & Compat Stubs Retirement (`TASK-MET-03d`):**
+  - Removed duplicated `plugin/hooks/hook_runtime.py` (`147` lines, superseded by `_shared.hook_runtime`).
+  - Removed temporary `PendingBridgeJobsError` and `bridge_db_path` / `bridge_db` no-op compatibility stubs from `plugin/metrics/store.py`, `plugin/metrics/audits_reader.py`, and `plugin/metrics/collector.py`.
 - **Legacy MCP UI, Config & Bridge Links Retirement (`TASK-MET-03c`):**
   - Removed the remaining legacy MCP UI modules (`plugin/mcp/ui/charts.py`, `plugin/mcp/ui/markdown_view.py`, `plugin/mcp/ui/styles.py`, removing `plugin/mcp/` completely), standalone `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` (`575` lines).
 - **Legacy MCP Core Retirement Lot 1 (`TASK-MET-03b`):**
@@ -15,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Removed obsolete `tests/test_mcp_server.py` (retaining `plugin/mcp/ui/{charts,markdown_view,styles}.py`, `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` for Wave W11 `TASK-MET-03c`).
 
 ### Changed
+- **Split `SessionStart` Disabled in `plugin/hooks.json` & W12 Tests (`TASK-MET-03d`, `plugin/hooks.json`, `tests/`):**
+  - Separated `SessionStart` (`hooks/session_start_metrics.py`) into dedicated `"gravity-metrics-session"` entry with `"enabled": false` while keeping `PreInvocation` (`hooks/pre_invocation_metrics.py`) active (`"enabled": true`) in `"gravity-metrics-command"`.
+  - Added explicit `hooks.json` / `hook_runtime.py` retirement assertions in `tests/test_hook.py` and `tests/test_lifecycle_and_ux_v050.py`, tightened `tests/test_metrics.py::test_stdlib_only_and_no_forbidden_jargon` (`hook_runtime` disallowed), and removed `bridge_db` args from `tests/test_audits_reader.py`.
 - **Legacy Test Suite Cleanup & `dashboard_provider` Migration (`TASK-MET-03c`, `tests/`):**
   - Migrated `tests/test_bridge_v030.py`, `tests/test_workflow_and_pending_v042.py`, `tests/test_lifecycle_and_ux_v050.py`, and `tests/test_metrics.py` onto `dev` `list_pending_sessions` and `SPI-1` `dashboard_provider` semantics (removing `bridge_links`, `PendingBridgeJobsError`, `plugin/mcp/server.py`, and `markdown_view` assertions while preserving RO historical compatibility, strict pending filtering, and `record --from-step` tests).
 - **Installer, Validator, CLI, Workspace Resolver & `SKILL.md` (`TASK-MET-03a`, `install.py`, `plugin/`):**

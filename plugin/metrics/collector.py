@@ -289,12 +289,10 @@ def collect_run_metrics(
     to_step: Optional[int] = None,
     project: str = "",
     gravity_profile: str = "",
-    bridge_db_path: Optional[Union[Path, str]] = None,
     store_dir: Optional[Union[Path, str]] = None,
     self_archiving: bool = False,
 ) -> Dict[str, Any]:
     """Collecte et agrège les métriques et coûts complets d'un arbre de conversation."""
-    _ = bridge_db_path
     catalog = load_pricing_catalog(pricing_catalog_path)
     nodes = discover_agent_tree(root_id, brain_dir)
     if not nodes:

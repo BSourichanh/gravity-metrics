@@ -1,13 +1,16 @@
 {
-  "gravity-metrics-command": {
-    "enabled": true,
+  "gravity-metrics-session": {
+    "enabled": false,
     "SessionStart": [
       {
         "type": "command",
         "command": "python3 hooks/session_start_metrics.py",
         "timeout": 5
       }
-    ],
+    ]
+  },
+  "gravity-metrics-command": {
+    "enabled": true,
     "PreInvocation": [
       {
         "type": "command",

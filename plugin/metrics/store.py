@@ -40,10 +40,6 @@ from .markdown_report import render_metrics_markdown, render_session_detail_mark
 from .pricing import default_store_dir
 
 
-class PendingBridgeJobsError(RuntimeError):
-    """Temporary compat stub until W12 after W8-W10 drop callers."""
-
-
 def _normalize_signal_slug(project: str) -> str:
     raw = str(project or "").strip() or "global"
     return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-") or "default"
@@ -323,10 +319,8 @@ def archive_conversation(
     full_conversation: bool = False, from_step: Optional[int] = None,
     project: str = "", gravity_profile: str = "", summary_only: bool = False,
     force: bool = False, update_sealed: bool = False, self_archiving: bool = False,
-    bridge_db_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     """Résout un UUID ou préfixe, collecte la session et l'enregistre avec garde-fous."""
-    _ = bridge_db_path  # temporary compat stub until W12 after W8-W10 drop callers
     cid = resolve_conversation_id_in_brain(target, brain_dir)
     eff_from_step, eff_full, eff_label, eff_project = from_step, bool(full_conversation), label, project
     if not eff_full and eff_from_step is None:
@@ -365,10 +359,8 @@ def archive_conversation(
 def load_session_for_inspect(
     target: str, *, store_dir: Path, history_path: Path, brain_dir: Path,
     catalog_path: Path, pricing_profile: str = "2026_nov_standard",
-    bridge_db_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, Any], str]:
     """Charge une session depuis `reports/<slug>.json` (hors-ligne) ou la recalcule depuis `brain_dir`."""
-    _ = bridge_db_path  # temporary compat stub until W12 after W8-W10 drop callers
     records = load_history(history_path)
     cid, label, slug = target.strip(), "", ""
     if records:

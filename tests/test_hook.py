@@ -757,6 +757,42 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertIn("ws-cid-1", meta)
             self.assertEqual(meta["ws-cid-1"]["project"], "my-repo")
 
+    def test_hooks_json_session_start_disabled_and_hook_runtime_retired(self) -> None:
+        self.assertFalse((PLUGIN_ROOT / "hooks" / "hook_runtime.py").exists())
+        hooks_cfg = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))
+
+        self.assertIn("gravity-metrics-session", hooks_cfg)
+        sess_grp = hooks_cfg["gravity-metrics-session"]
+        self.assertIs(sess_grp.get("enabled"), False)
+        self.assertNotIn("PreInvocation", sess_grp)
+        self.assertEqual(
+            [h.get("command") for h in sess_grp.get("SessionStart", [])],
+            ["python3 hooks/session_start_metrics.py"],
+        )
+
+        self.assertIn("gravity-metrics-command", hooks_cfg)
+        cmd_grp = hooks_cfg["gravity-metrics-command"]
+        self.assertIs(cmd_grp.get("enabled"), True)
+        self.assertNotIn("SessionStart", cmd_grp)
+        self.assertEqual(
+            [h.get("command") for h in cmd_grp.get("PreInvocation", [])],
+            ["python3 hooks/pre_invocation_metrics.py"],
+        )
+
+        # T4-S16 contract invariants
+        self.assertTrue(
+            any(
+                isinstance(v, dict)
+                and "SessionStart" in v
+                and v.get("enabled") is False
+                and "PreInvocation" not in v
+                for v in hooks_cfg.values()
+            )
+        )
+        for v in hooks_cfg.values():
+            if isinstance(v, dict) and "PreInvocation" in v:
+                self.assertIsNot(v.get("enabled"), False)
+
 
 if __name__ == "__main__":
     unittest.main()

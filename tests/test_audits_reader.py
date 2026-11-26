@@ -4,7 +4,6 @@
 import json
 import os
 from pathlib import Path
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -26,20 +25,8 @@ from metrics import (  # noqa: E402
 )
 
 
-def _create_workspaces_bridge_db(db_path: Path, workspaces: list) -> None:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(db_path))
-    con.execute(
-        "CREATE TABLE workspaces (slug TEXT PRIMARY KEY, canonical_path TEXT UNIQUE NOT NULL, display_name TEXT NOT NULL)"
-    )
-    for slug, cpath, dname in workspaces:
-        con.execute("INSERT INTO workspaces VALUES (?, ?, ?)", (slug, str(cpath), dname))
-    con.commit()
-    con.close()
-
-
 class TestAuditsReader(unittest.TestCase):
-    def test_discovery_precedence_and_bridge_ro(self) -> None:
+    def test_discovery_precedence_and_ro_isolation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             env_audits = root / "env-audits"
@@ -52,33 +39,19 @@ class TestAuditsReader(unittest.TestCase):
             (ws_local / "audits" / "code").mkdir(parents=True)
             (ws_local / "audits" / "code" / "ignored-local.md").write_text("# Audit Code Local\n", encoding="utf-8")
 
-            ws_bridge = root / "bridge-ws"
-            (ws_bridge / "audits" / "agents").mkdir(parents=True)
-            (ws_bridge / "audits" / "agents" / "bridge.md").write_text("# Audit Bridge\n", encoding="utf-8")
-            (ws_bridge / "audits" / "code").mkdir(parents=True)
-            (ws_bridge / "audits" / "code" / "ignored-bridge.md").write_text("# Audit Code Bridge\n", encoding="utf-8")
-
-            db_path = root / "bridge" / "bridge.db"
-            _create_workspaces_bridge_db(
-                db_path,
-                [("bridge-ws", ws_bridge, "Bridge WS"), ("missing-ws", root / "missing", "Missing")],
-            )
-
             # 1) $GRAVITY_AUDITS_DIR prioritaire et isolé
             with mock.patch.dict(os.environ, {"GRAVITY_AUDITS_DIR": str(env_audits)}, clear=False):
                 roots_env = discover_audit_roots(
                     workspace_dirs=[ws_local],
-                    bridge_db=db_path,
                     include_cwd=False,
                 )
                 self.assertEqual(len(roots_env), 1)
                 self.assertEqual(roots_env[0]["path"], env_audits.resolve())
 
-            # 2) Sans $GRAVITY_AUDITS_DIR : uniquement <workspace>/audits/agents/ (audits/code/ ignoré, zéro lecture SQLite bridge.db)
+            # 2) Sans $GRAVITY_AUDITS_DIR : uniquement <workspace>/audits/agents/ (audits/code/ ignoré)
             with mock.patch.dict(os.environ, {"GRAVITY_AUDITS_DIR": ""}, clear=False):
                 roots_ws = discover_audit_roots(
                     workspace_dirs=[ws_local],
-                    bridge_db=db_path,
                     include_cwd=False,
                 )
                 self.assertEqual(
@@ -89,25 +62,13 @@ class TestAuditsReader(unittest.TestCase):
                 )
                 audits_ws, _ = list_audits(
                     workspace_dirs=[ws_local],
-                    bridge_db=db_path,
                     include_cwd=False,
                 )
                 self.assertEqual({a["filename"] for a in audits_ws}, {"local.md"})
                 self.assertEqual(
-                    discover_audit_roots(workspace_dirs=[], bridge_db=db_path, include_cwd=False),
+                    discover_audit_roots(workspace_dirs=[], include_cwd=False),
                     [],
                 )
-
-            # 3) Base bridge.db absente tolérée sans création
-            missing_db = root / "absent" / "bridge.db"
-            with mock.patch.dict(os.environ, {"GRAVITY_AUDITS_DIR": ""}, clear=False):
-                roots_no_db = discover_audit_roots(
-                    workspace_dirs=[],
-                    bridge_db=missing_db,
-                    include_cwd=False,
-                )
-                self.assertEqual(roots_no_db, [])
-                self.assertFalse(missing_db.exists())
 
     def test_security_anti_traversal_md_only_and_symlink_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -248,31 +209,24 @@ class TestAuditsReader(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            db_path = root / "bridge" / "bridge.db"
-            missing_db = root / "absent" / "bridge.db"
-            _create_workspaces_bridge_db(db_path, [("gravity-workshop", ws, "Gravity Workshop")])
-
-            # 1) workspace_dirs, include_cwd=True et bridge_db ciblent uniquement audits/agents/
+            # 1) workspace_dirs et include_cwd=True ciblent uniquement audits/agents/
             old_cwd = Path.cwd()
             try:
                 os.chdir(ws)
                 with mock.patch.dict(os.environ, {"GRAVITY_AUDITS_DIR": ""}, clear=False):
-                    roots_cwd = discover_audit_roots(bridge_db=missing_db, include_cwd=True)
+                    roots_cwd = discover_audit_roots(include_cwd=True)
                     self.assertEqual(len(roots_cwd), 1)
                     self.assertEqual(roots_cwd[0]["path"], agents_dir.resolve())
                     self.assertEqual(roots_cwd[0]["workspace"], "gravity-workshop")
 
-                    audits_ws, _ = list_audits(workspace_dirs=[ws], bridge_db=missing_db, include_cwd=False)
+                    audits_ws, _ = list_audits(workspace_dirs=[ws], include_cwd=False)
                     self.assertEqual(
                         {a["filename"] for a in audits_ws},
                         {"2026-11-22-audit-01.md", "code.md"},
                     )
 
-                    audits_bridge, _ = list_audits(bridge_db=db_path, include_cwd=False)
-                    self.assertEqual(audits_bridge, [])
-
                     # Chemins relatifs (".", "audits", "audits/agents", workspace_dirs=["."])
-                    roots_rel_ws = discover_audit_roots(workspace_dirs=["."], bridge_db=missing_db, include_cwd=False)
+                    roots_rel_ws = discover_audit_roots(workspace_dirs=["."], include_cwd=False)
                     self.assertEqual(roots_rel_ws[0]["workspace"], "gravity-workshop")
                     self.assertEqual(roots_rel_ws[0]["path"], agents_dir.resolve())
 

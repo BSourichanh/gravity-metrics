@@ -1062,7 +1062,7 @@ class TestReconciliationAndCompliance(unittest.TestCase):
 
     def test_stdlib_only_and_no_forbidden_jargon(self) -> None:
         stdlib_names = set(getattr(sys, "stdlib_module_names", set()))
-        allowed = stdlib_names | {"_shared", "metrics", "dashboard_provider", "hook_runtime", "cli", "validate", "install"}
+        allowed = stdlib_names | {"_shared", "metrics", "dashboard_provider", "cli", "validate", "install"}
         forbidden_re = re.compile(r"\bMod" + r"ule\s+0?\d\b", re.IGNORECASE)
         forbidden_term_re = re.compile(r"\bbench" + r"marks?\b", re.IGNORECASE)
 

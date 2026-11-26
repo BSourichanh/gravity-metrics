@@ -101,11 +101,9 @@ def discover_audit_roots(
     *,
     audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
     workspace_dirs: Optional[Sequence[Union[Path, str]]] = None,
-    bridge_db: Optional[Union[Path, str]] = None,
     include_cwd: bool = True,
 ) -> List[Dict[str, Any]]:
     """Découvre les dossiers `audits/agents/` en lecture seule selon la priorité Gravity."""
-    _ = bridge_db
     candidates: List[Tuple[str, Path, str, bool]] = []
 
     if audits_dir is not None:
@@ -452,14 +450,12 @@ def list_audits_bundle(
     records: Sequence[Dict[str, Any]] = (),
     audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
     workspace_dirs: Optional[Sequence[Union[Path, str]]] = None,
-    bridge_db: Optional[Union[Path, str]] = None,
     include_cwd: bool = True,
 ) -> Dict[str, Any]:
     """Découvre les audits `.md` (`audits/agents/`) en séparant `README.md` (`index_audit`) et excluant `_*`."""
     roots = discover_audit_roots(
         audits_dir=audits_dir,
         workspace_dirs=workspace_dirs,
-        bridge_db=bridge_db,
         include_cwd=include_cwd,
     )
     regular_raw: List[Dict[str, Any]] = []
@@ -528,7 +524,6 @@ def list_audits(
     records: Sequence[Dict[str, Any]] = (),
     audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
     workspace_dirs: Optional[Sequence[Union[Path, str]]] = None,
-    bridge_db: Optional[Union[Path, str]] = None,
     include_cwd: bool = True,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     """Liste les fichiers `.md` découverts dans les dossiers `audits/agents/` (hors `audits/code/`, `README.md` et `_*`)."""
@@ -536,7 +531,6 @@ def list_audits(
         records=records,
         audits_dir=audits_dir,
         workspace_dirs=workspace_dirs,
-        bridge_db=bridge_db,
         include_cwd=include_cwd,
     )
     return bundle["audits"], bundle["roots"]
@@ -548,14 +542,12 @@ def read_audit(
     records: Sequence[Dict[str, Any]] = (),
     audits_dir: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
     workspace_dirs: Optional[Sequence[Union[Path, str]]] = None,
-    bridge_db: Optional[Union[Path, str]] = None,
     include_cwd: bool = True,
 ) -> Dict[str, Any]:
     """Lit en toute sécurité un audit Markdown (anti-traversal, .md only, plafond 256 Ko)."""
     roots = discover_audit_roots(
         audits_dir=audits_dir,
         workspace_dirs=workspace_dirs,
-        bridge_db=bridge_db,
         include_cwd=include_cwd,
     )
     if not roots:

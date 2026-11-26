@@ -174,7 +174,16 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             ws.mkdir()
             cid = "a1b2c3d4-1111-2222-3333-444455556666"
 
-            # 1) SessionStart hook : stdin invalide -> {} sans crash, stdin valide -> session_meta.json sans toucher ws
+            # 0) hooks.json désactive SessionStart dans un groupe dédié tout en gardant PreInvocation actif
+            hooks_cfg = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))
+            self.assertIs(hooks_cfg["gravity-metrics-session"].get("enabled"), False)
+            self.assertNotIn("PreInvocation", hooks_cfg["gravity-metrics-session"])
+            self.assertIn("SessionStart", hooks_cfg["gravity-metrics-session"])
+            self.assertIs(hooks_cfg["gravity-metrics-command"].get("enabled"), True)
+            self.assertNotIn("SessionStart", hooks_cfg["gravity-metrics-command"])
+            self.assertIn("PreInvocation", hooks_cfg["gravity-metrics-command"])
+
+            # 1) SessionStart hook (appel direct) : stdin invalide -> {} sans crash, stdin valide -> session_meta.json sans toucher ws
             res_bad = _run_py_hook(START_HOOK, "{broken-json", store_dir=store, brain_dir=brain)
             self.assertEqual(res_bad, {})
             res_ok = _run_py_hook(
