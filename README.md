@@ -122,7 +122,7 @@ python plugin/scripts/cli.py unignore <uuid> [--json]
 python plugin/scripts/cli.py remove <label_or_uuid> --purge-reports [--json]
 
 python plugin/scripts/validate.py --strict
-agy plugin validate ./plugin
+agy plugin validate ./plugin --strict
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
