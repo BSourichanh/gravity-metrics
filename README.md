@@ -113,13 +113,13 @@ Workflow profile & `runs.jsonl` lookup reads `$GRAVITY_WORKFLOW_HOME` / `$GRAVIT
 python plugin/scripts/cli.py start <uuid_or_prefix> [-l "my-run"] [--step N] [--json]
 python plugin/scripts/cli.py list [--regen] [--json]
 python plugin/scripts/cli.py pending [--all] [--json]
-python plugin/scripts/cli.py add --latest -l "my-run" -n "Short note" [--update] [--json]
-python plugin/scripts/cli.py record <uuid_or_prefix> -l "my-run" [--update] [--json]  # alias: archive, --update-sealed
+python plugin/scripts/cli.py add --latest -l "my-run" -n "Short note" [--update] [--force] [--json]
+python plugin/scripts/cli.py record <uuid_or_prefix> -l "my-run" [--update] [--force] [--json]  # alias: archive, --update-sealed
 python plugin/scripts/cli.py inspect <label_or_uuid> [--json]
 python plugin/scripts/cli.py update-meta <label_or_uuid> [-l LABEL] [-p PROJ] [-n NOTE] [--json]
 python plugin/scripts/cli.py ignore <uuid> [--reason "..."] [--json]
 python plugin/scripts/cli.py unignore <uuid> [--json]
-python plugin/scripts/cli.py remove <label_or_uuid> --purge-reports [--json]
+python plugin/scripts/cli.py remove <label_or_uuid> [--purge-reports] [--purge-state] [--if-exists] [--json]
 
 python plugin/scripts/validate.py --strict
 agy plugin validate ./plugin --strict

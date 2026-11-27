@@ -17,8 +17,8 @@ description: >-
 
 For end-of-cycle CLI updates (`scripts/cli.py`, all 10 subcommands supporting `--json`):
 - `cli.py start <uuid_or_prefix> [-l LABEL] [--step N] [--json]`: starts or resets a capture window from the CLI.
-- `cli.py record <uuid_or_prefix> --update` / `cli.py add <uuid_or_prefix> --update` (aliases `archive`, `--update-sealed`, optional `--self-recording` / `--self-archiving`): refreshes an already-recorded window without duplicates.
-- `cli.py list [--regen] [--json]`, `cli.py inspect <target> [--json]`, `cli.py remove <target> [--purge-reports] [--json]`.
+- `cli.py record <uuid_or_prefix> [--update] [--force]` / `cli.py add <uuid_or_prefix> [--update] [--force]` (aliases `archive`, `--update-sealed`, optional `--self-recording` / `--self-archiving`): refreshes or overwrites an already-recorded window without duplicates.
+- `cli.py list [--regen] [--json]`, `cli.py inspect <target> [--json]`, `cli.py remove <target> [--purge-reports] [--purge-state] [--if-exists] [--json]`.
 - `cli.py update-meta <target> [-l LABEL] [-p PROJECT] [-n NOTE] [--json]`, `cli.py ignore <uuid> [--reason R] [--json]`, `cli.py unignore <uuid> [--json]`.
 - `cli.py pending [--all] [--json]`: lists unrecorded sessions (`--all` includes consultative sessions without work tools).
 

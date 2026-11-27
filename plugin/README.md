@@ -45,6 +45,6 @@ python scripts/cli.py inspect <label_ou_uuid> [--json]
 python scripts/cli.py update-meta <label_ou_uuid> [-l LABEL] [-p PROJ] [-n NOTE] [--json]
 python scripts/cli.py ignore <uuid> [--reason "..."] [--json]
 python scripts/cli.py unignore <uuid> [--json]
-python scripts/cli.py remove <label_ou_uuid> --purge-reports [--json]
+python scripts/cli.py remove <label_ou_uuid> [--purge-reports] [--purge-state] [--if-exists] [--json]
 python scripts/validate.py --strict       # Délègue à _shared.validator_core (stdlib, module.json, D4)
 ```

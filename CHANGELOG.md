@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `--purge-state` and `--if-exists` flags to `plugin/scripts/cli.py remove` while keeping strict failure behavior by default.
 
 ### Changed
+- **Manifests, CLI Docs & `dev`/`evo` Alignment (`TASK-DOC-02e`):**
+  - Updated `plugin/plugin.json` description (`<= 160` chars) to reflect delegation to unified `gravity` Core dashboard (`open_gravity_dashboard`) and clarified first `suggestedPrompts` entry as read-only (`/gravity-metrics — Ouvrir le dashboard coûts/cache en lecture seule`).
+  - Updated `plugin/config/module.json` `"role"` from `mode auto` to `mode evo` while preserving `dashboard.views` (`["metrics", "session-detail", "audit-detail", "health", "live-meta"]`).
+  - Switched active branch reference in `AGENTS.md` from `refonte/socle` to `dev`.
+  - Documented `[--force]` (`add`/`record`) and `[--purge-state] [--if-exists]` (`remove`) in `README.md`, `plugin/README.md`, and `plugin/skills/gravity-metrics/SKILL.md`.
+  - Deduplicated `### Changed` sections under `## [Unreleased]` and corrected `dashboard_provider.py` size reference to `< 800` lines.
 - **Collector Dead Import Fallbacks Removal (`TASK-ARCH-02b`):**
   - Replaced dead `try/except ImportError:` blocks in `plugin/metrics/collector.py` with direct imports from `.technical_signals` and `.workspace_resolver`, and removed orphaned `math`, `re`, `_shared_discover_known_repos`, and `_shared_normalize_worktree_path`.
 - **SPI-1 Provider Pending Alignment & Idempotent Remove (`TASK-MET-06c`):**
@@ -25,18 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Detail-Slug Resolution, Lifecycle Cleanup & Confined Orphan Removal (`TASK-MET-06a`):**
   - Extended `plugin/metrics/history.py::resolve_session_index` to match `detail_slug` (exact then case-insensitive) alongside `label` and `conversation_id`, fixing `remove` and `update-meta` when `detail_slug != label`.
   - Extended `plugin/metrics/store.py::apply_remove` (`conversation_id`, `purge_state`, `if_exists`) to purge `active_captures.json`, `ignored.json`, and `session_meta.json` when removing the last remaining window for a `conversation_id`, purge orphan lifecycle/report artifacts under strict `_shared.path_safety` confinement, and return `already_absent` + `cleaned_sources`.
-
-### Removed
-- **Hook Runtime & Compat Stubs Retirement (`TASK-MET-03d`):**
-  - Removed duplicated `plugin/hooks/hook_runtime.py` (`147` lines, superseded by `_shared.hook_runtime`).
-  - Removed temporary `PendingBridgeJobsError` and `bridge_db_path` / `bridge_db` no-op compatibility stubs from `plugin/metrics/store.py`, `plugin/metrics/audits_reader.py`, `plugin/metrics/collector.py`, `plugin/metrics/milestone_analyzer.py`, and `plugin/metrics/agent_tree.py`.
-- **Legacy MCP UI, Config & Bridge Links Retirement (`TASK-MET-03c`):**
-  - Removed the remaining legacy MCP UI modules (`plugin/mcp/ui/charts.py`, `plugin/mcp/ui/markdown_view.py`, `plugin/mcp/ui/styles.py`, removing `plugin/mcp/` completely), standalone `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` (`575` lines).
-- **Legacy MCP Core Retirement Lot 1 (`TASK-MET-03b`):**
-  - Removed standalone legacy MCP core modules (`plugin/mcp/__init__.py`, `plugin/mcp/server.py`, `plugin/mcp/widget_html.py`, `plugin/mcp/ui/__init__.py`, `plugin/mcp/ui/app_js.py`) superseded by the unified `gravity_dashboard` MCP App (`DEC-ARCH-01`, `SPI-1`).
-  - Removed obsolete `tests/test_mcp_server.py` (retaining `plugin/mcp/ui/{charts,markdown_view,styles}.py`, `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` for Wave W11 `TASK-MET-03c`).
-
-### Changed
 - **Rules/AGENTS Alignment, `evo`/`--no-verify` Bypass & Portability Remediation (`TASK-MET-03d`):**
   - Updated `plugin/rules/AGENTS.md` (`<= 600` B) and root `AGENTS.md` (`<= 2500` B) to remove retired legacy references (`open_metrics_dashboard`, `mcp/server.py`, `mcp_config.json`, `transition-mcp`, `cost-telemetry`, active `SessionStart`, Bridge guard) and align with `open_gravity_dashboard` (`gravity_dashboard`), disabled `SessionStart`, `SPI-1..4`, `ui.mode: "none"`, `_shared/` SSOT, and `refonte/socle`.
   - Updated `plugin/hooks/pre_invocation_metrics.py` (`_match_capture_policy`) to strip/bypass leading `evo` / `--no-verify` modifiers under `consultative_bypass`, aligned `plugin/metrics/collector.py` fallback (`endswith("-studio")`), and guarded POSIX `fcntl` contention in `tests/test_metrics.py` for Windows compatibility (`R4`), with new `SPI-2` modifier tests in `tests/test_hook.py`.
@@ -53,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Trimmed `plugin/skills/gravity-metrics/SKILL.md` description `<= 160` chars (EN) reflecting `SessionStart` disabled and `open_gravity_dashboard` (`gravity_dashboard`); cleaned `gravity-studio` residuals from `README.md`, `plugin/README.md`, and `tests/`; added `tests/test_technical_and_workspace.py`.
 - **Hooks `_shared.hook_runtime`, `SPI-2` Capture Policy, `SPI-1` Dashboard Provider, `audits_reader` & `module.json` (`TASK-MET-02`, `plugin/`):**
   - Migrated `plugin/hooks/pre_invocation_metrics.py` and `plugin/hooks/session_start_metrics.py` onto `_shared.hook_runtime` (zero local `hook_runtime` imports); replaced hardcoded `/gravity-architect` regexes, `collector._extract_label_keywords`, and `PendingBridgeJobsError` with dynamic `SPI-2` `capture_policy` resolution from `$GRAVITY_HOME/core/modules.json` (supporting both `validator_core` list and `T3-P14` dict schemas); switched dashboard handoff wording to `open_gravity_dashboard` (`gravity_dashboard`) and ported `dev` `record`/`--update` command handling; retained `_is_subagent_worktree` wrapper in `session_start_metrics.py` delegating to `_shared.transcript_reader.is_worktree_path` (`T3-P29`).
-  - Added `plugin/scripts/dashboard_provider.py` (`SPI-1`, `< 550` lines) implementing `--view metrics|session-detail|audit-detail`, `--since-signature`, and lifecycle `--action` (`record`, `update`, `update-meta`, `ignore`, `unignore`, `remove`) JSON/CLI contracts consumed by `gravity`.
+  - Added `plugin/scripts/dashboard_provider.py` (`SPI-1`, `< 800` lines) implementing `--view metrics|session-detail|audit-detail`, `--since-signature`, and lifecycle `--action` (`record`, `update`, `update-meta`, `ignore`, `unignore`, `remove`) JSON/CLI contracts consumed by `gravity`.
   - Cleaned `plugin/metrics/audits_reader.py` to remove `.bridge_links`/`sqlite3` coupling while enforcing strict read-only `audits/agents/*.md` access (excluding `audits/code/`, symlinks, and NTFS junctions via `_shared.path_safety`).
   - Updated `plugin/config/module.json` with `ui.mode: "none"`, `dashboard` (`SPI-1`), and `signals.produces: ["session-metrics"]` (`SPI-3`), plus unit tests in `tests/test_hook.py`, `tests/test_audits_reader.py`, and `tests/test_dashboard_provider.py`.
 - **Locks, Atomic I/O, `SPI-3` Signals, `technical_signals` & Pricing (`TASK-MET-01b`, `plugin/metrics/`, `plugin/config/`):**
@@ -63,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Collector SRP Split & `_shared` Sync (`TASK-MET-01a`, `plugin/metrics/`):**
   - Synced read-only `plugin/_shared/` and `plugin/.shared_manifest.json` from `gravity/shared/gravity_shared/`.
   - Split `plugin/metrics/collector.py` into 5 modules strictly `< 750` lines (`prompt_classifier.py`, `transcript_index.py`, `agent_tree.py`, `milestone_analyzer.py`, `collector.py` façade), delegating transcript/worktree/ISO/shell-exit helpers to `_shared.transcript_reader`, removing `bridge_links` coupling, preserving `dev` collector fixes (`invalid_steps`, `shell_nonzero_steps`, `cold_cache_waste`, `technical_signals`, `by_workspace`, anti-noise `pending`, `self_archiving`), and adding `$GRAVITY_HOME/workflow/workspaces/<slug>-<sha256[:8]>/profile.json` resolution (`T3-P25`).
+
+### Removed
+- **Hook Runtime & Compat Stubs Retirement (`TASK-MET-03d`):**
+  - Removed duplicated `plugin/hooks/hook_runtime.py` (`147` lines, superseded by `_shared.hook_runtime`).
+  - Removed temporary `PendingBridgeJobsError` and `bridge_db_path` / `bridge_db` no-op compatibility stubs from `plugin/metrics/store.py`, `plugin/metrics/audits_reader.py`, `plugin/metrics/collector.py`, `plugin/metrics/milestone_analyzer.py`, and `plugin/metrics/agent_tree.py`.
+- **Legacy MCP UI, Config & Bridge Links Retirement (`TASK-MET-03c`):**
+  - Removed the remaining legacy MCP UI modules (`plugin/mcp/ui/charts.py`, `plugin/mcp/ui/markdown_view.py`, `plugin/mcp/ui/styles.py`, removing `plugin/mcp/` completely), standalone `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` (`575` lines).
+- **Legacy MCP Core Retirement Lot 1 (`TASK-MET-03b`):**
+  - Removed standalone legacy MCP core modules (`plugin/mcp/__init__.py`, `plugin/mcp/server.py`, `plugin/mcp/widget_html.py`, `plugin/mcp/ui/__init__.py`, `plugin/mcp/ui/app_js.py`) superseded by the unified `gravity_dashboard` MCP App (`DEC-ARCH-01`, `SPI-1`).
+  - Removed obsolete `tests/test_mcp_server.py` (retaining `plugin/mcp/ui/{charts,markdown_view,styles}.py`, `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` for Wave W11 `TASK-MET-03c`).
 
 ## [0.5.1] - 2026-11-24
 

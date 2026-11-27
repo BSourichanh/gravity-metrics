@@ -6,7 +6,7 @@
 - **Stockage centralisé :** `$GRAVITY_METRICS_HOME` > `$GRAVITY_HOME/metrics` > `~/.gemini/gravity/metrics/` (`data/history.jsonl`, `METRICS.md`, `reports/*.{json,md}`) ; 0 fichier workspace, 0 `.html` sur disque.
 
 ## Invariants
-- **Git & versioning :** travail sur `refonte/socle` (jamais `main` ni `archive/pre-refonte-*` sans accord humain) ; *Conventional Commits*, SemVer (`plugin/plugin.json` + `CHANGELOG.md`) ; ne jamais éditer `plugin/_shared/` manuellement (`sync_shared.py`).
+- **Git & versioning :** travail sur `dev` (jamais `main` ni `archive/pre-refonte-*` sans accord humain) ; *Conventional Commits*, SemVer (`plugin/plugin.json` + `CHANGELOG.md`) ; ne jamais éditer `plugin/_shared/` manuellement (`sync_shared.py`).
 - **Qualité & stdlib :** KISS, YAGNI, DRY, SOLID, CUPID ; 100 % stdlib Python 3.10+ (`plugin/`, `install.py`, `tests/`), fichiers `< 800` L, UTF-8 sans BOM, LF, compatibilité Linux & Windows.
 - **Portabilité & docs :** garder `"python3"` dans `plugin/hooks.json` (`install.py` adapte sous Windows) ; synchroniser `README.md`, `plugin/README.md`, `CHANGELOG.md`.
 - **CLI & fenêtrage :** `cli.py add` exige UUID ou `--latest` ; préserver `--gravity-window` (`/gravity`, `/gravity-workflow`), 0 terme interdit.
