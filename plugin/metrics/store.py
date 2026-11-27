@@ -16,6 +16,7 @@ if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
 _atomic_io = importlib.import_module("_shared.atomic_io")
+_path_safety = importlib.import_module("_shared.path_safety")
 _signal_bus = importlib.import_module("_shared.signal_bus")
 
 from .collector import (
@@ -29,15 +30,23 @@ from .history import (
     find_archived_session,
     history_lock,
     load_history,
-    remove_session,
     resolve_session_index,
     save_history,
     to_session_record,
     upsert_session,
 )
-from .lifecycle import load_active_captures, pop_active_capture, unignore_session
+from .lifecycle import (
+    load_active_captures,
+    load_ignored_sessions,
+    load_session_meta,
+    pop_active_capture,
+    purge_lifecycle_state,
+    unignore_session,
+)
 from .markdown_report import render_metrics_markdown, render_session_detail_markdown
 from .pricing import default_store_dir
+
+_SAFE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _normalize_signal_slug(project: str) -> str:
@@ -133,16 +142,34 @@ def write_session_details(store_dir: Path, slug: str, metrics: Dict[str, Any]) -
     return reports_dir
 
 
-def purge_session_details(store_dir: Path, rec: Dict[str, Any]) -> None:
-    """Supprime les rapports détaillés d'une session dans `<store_dir>/reports/`."""
-    slug = rec.get("detail_slug") or slugify_label(
-        str(rec.get("label") or ""), f"session-{str(rec.get('conversation_id') or '')[:8]}",
-    )
+def purge_session_details(store_dir: Path, rec: Dict[str, Any]) -> bool:
+    """Supprime les rapports détaillés d'une session dans `<store_dir>/reports/` sous confinement strict."""
+    raw_slug = str(rec.get("detail_slug") or "").strip()
+    if raw_slug:
+        if not _SAFE_SLUG_RE.match(raw_slug) or ".." in raw_slug:
+            return False
+        slug = raw_slug
+    else:
+        raw_lbl = str(rec.get("label") or "").strip()
+        cid_prefix = re.sub(r"[^A-Za-z0-9._-]+", "", str(rec.get("conversation_id") or ""))[:8]
+        fallback = f"session-{cid_prefix}" if cid_prefix else ""
+        slug = slugify_label(raw_lbl, fallback) if (raw_lbl or fallback) else ""
+    if not slug or not _SAFE_SLUG_RE.match(slug) or ".." in slug:
+        return False
     reports_dir = store_dir / "reports"
+    if not reports_dir.is_dir() or _path_safety.is_symlink_or_junction(reports_dir):
+        return False
+    removed = False
     for ext in (".json", ".md", ".html"):
         fpath = reports_dir / f"{slug}{ext}"
-        if fpath.is_file():
+        if (
+            _path_safety.is_within_root(reports_dir, fpath)
+            and not _path_safety.is_symlink_or_junction(fpath)
+            and fpath.is_file()
+        ):
             fpath.unlink()
+            removed = True
+    return removed
 
 
 def _harmonize_project_name(project: str, records: List[Dict[str, Any]]) -> str:
@@ -439,19 +466,142 @@ def update_session_metadata(
     return dict(rec), records
 
 
+def _resolve_lifecycle_cid_for_remove(store_dir: Path, candidate: str) -> str:
+    clean = str(candidate or "").strip()
+    if not clean:
+        return ""
+    known = sorted(
+        set(load_active_captures(store_dir))
+        | set(load_ignored_sessions(store_dir))
+        | set(load_session_meta(store_dir))
+    )
+    if clean in known:
+        return clean
+    low = clean.lower()
+    pref = [k for k in known if k.lower().startswith(low)]
+    if len(pref) == 1:
+        return pref[0]
+    if len(pref) > 1:
+        raise ValueError(f"Plusieurs sessions correspondent à {candidate!r} ; précisez l'identifiant complet.")
+    return clean
+
+
 def apply_remove(
-    target: str, *, store_dir: Path, history_path: Path, purge_reports: bool = False,
+    target: str,
+    *,
+    store_dir: Path,
+    history_path: Path,
+    purge_reports: bool = False,
+    conversation_id: str = "",
+    purge_state: bool = False,
+    if_exists: bool = False,
 ) -> Tuple[Dict[str, Any], int]:
-    """Retire une session sous verrou, purge optionnellement `reports/` et régénère les vues."""
+    """Retire une session sous verrou, purge lifecycle/rapports confinés et régénère les vues."""
+    clean_target = str(target or "").strip()
+    clean_cid = str(conversation_id or "").strip()
+    lookup_key = clean_target or clean_cid
+    if not lookup_key:
+        raise KeyError("Clé de session vide.")
+
     with history_lock(history_path):
         records = load_history(history_path)
-        if not records:
-            raise ValueError("Historique vide.")
-        idx = resolve_session_index(records, target)
-        target_rec = records[idx]
-        updated = remove_session(records, target)
-        if purge_reports:
-            purge_session_details(store_dir, target_rec)
-        save_history(history_path, updated)
-        regenerate_views(store_dir, updated)
-    return target_rec, len(updated)
+        idx: Optional[int] = None
+        if records:
+            try:
+                idx = resolve_session_index(records, lookup_key)
+            except KeyError:
+                idx = None
+
+        if idx is not None:
+            target_rec = dict(records[idx])
+            cid = str(target_rec.get("conversation_id") or "").strip()
+            updated = [dict(r) for i, r in enumerate(records) if i != idx]
+            reports_cleaned = bool(purge_session_details(store_dir, target_rec)) if purge_reports else False
+            save_history(history_path, updated)
+            regenerate_views(store_dir, updated)
+
+            has_other_window = bool(
+                cid and any(str(r.get("conversation_id") or "").strip() == cid for r in updated)
+            )
+            if cid and not has_other_window:
+                lc = purge_lifecycle_state(cid, store_dir=store_dir)
+            else:
+                lc = {"active_captures": False, "ignored": False, "session_meta": False}
+
+            target_rec["already_absent"] = False
+            target_rec["cleaned_sources"] = {
+                "history": True,
+                "reports": reports_cleaned,
+                **lc,
+            }
+            return target_rec, len(updated)
+
+        if not purge_state and not if_exists:
+            if not records:
+                raise ValueError("Historique vide.")
+            raise KeyError(f"Session introuvable : {target!r}")
+
+        resolved_cid = (
+            _resolve_lifecycle_cid_for_remove(store_dir, clean_cid or clean_target)
+            if purge_state
+            else clean_cid
+        )
+        lc = {"active_captures": False, "ignored": False, "session_meta": False}
+        reports_cleaned = False
+
+        if purge_state:
+            if resolved_cid:
+                has_other_window = any(
+                    str(r.get("conversation_id") or "").strip() == resolved_cid for r in records
+                )
+                if has_other_window:
+                    lc = {
+                        "active_captures": pop_active_capture(resolved_cid, store_dir=store_dir) is not None,
+                        "ignored": unignore_session(resolved_cid, store_dir=store_dir),
+                        "session_meta": False,
+                    }
+                else:
+                    lc = purge_lifecycle_state(resolved_cid, store_dir=store_dir)
+            if purge_reports:
+                orphan_rec: Dict[str, Any] = {}
+                if (
+                    clean_target
+                    and "/" not in clean_target
+                    and "\\" not in clean_target
+                    and ".." not in clean_target
+                    and "\x00" not in clean_target
+                ):
+                    if _SAFE_SLUG_RE.match(clean_target):
+                        orphan_rec = {"detail_slug": clean_target, "label": clean_target, "conversation_id": resolved_cid}
+                    else:
+                        orphan_rec = {"detail_slug": "", "label": clean_target, "conversation_id": resolved_cid}
+                elif resolved_cid and _SAFE_SLUG_RE.match(resolved_cid) and ".." not in resolved_cid:
+                    orphan_rec = {"detail_slug": "", "label": "", "conversation_id": resolved_cid}
+                if orphan_rec:
+                    reports_cleaned = bool(purge_session_details(store_dir, orphan_rec))
+
+        cleaned_sources = {
+            "history": False,
+            "reports": reports_cleaned,
+            **lc,
+        }
+        any_cleaned = any(cleaned_sources.values())
+        if not any_cleaned and not if_exists:
+            if not records:
+                raise ValueError("Historique vide.")
+            raise KeyError(f"Session introuvable : {target!r}")
+
+        synthetic_slug = (
+            clean_target
+            if (clean_target and _SAFE_SLUG_RE.match(clean_target) and ".." not in clean_target)
+            else (f"session-{resolved_cid[:8]}" if resolved_cid else "")
+        )
+        synthetic_rec = {
+            "label": clean_target or (resolved_cid[:8] if resolved_cid else ""),
+            "detail_slug": synthetic_slug,
+            "conversation_id": resolved_cid,
+            "orphan": True,
+            "already_absent": not any_cleaned,
+            "cleaned_sources": cleaned_sources,
+        }
+        return synthetic_rec, len(records)

@@ -128,6 +128,45 @@ def record_session_meta(
     return entry
 
 
+def remove_session_meta(
+    conversation_id: str,
+    *,
+    store_dir: Optional[Union[Path, str]] = None,
+) -> bool:
+    """Retire `conversation_id` de `session_meta.json` sous verrou atomique. Retourne True si présent."""
+    cid = str(conversation_id or "").strip()
+    if not cid:
+        return False
+    s_dir = _resolve_dir(store_dir)
+    meta_path = s_dir / "session_meta.json"
+    if not meta_path.is_file():
+        return False
+    with state_file_lock(meta_path):
+        raw = _read_json_dict(meta_path)
+        sessions = raw.get("sessions") if isinstance(raw.get("sessions"), dict) else {}
+        removed = sessions.pop(cid, None)
+        if removed is not None:
+            _atomic_write_json(meta_path, {"schema_version": 1, "sessions": sessions})
+            return True
+    return False
+
+
+def purge_lifecycle_state(
+    conversation_id: str,
+    *,
+    store_dir: Optional[Union[Path, str]] = None,
+) -> Dict[str, bool]:
+    """Purge atomiquement `conversation_id` de `active_captures.json`, `ignored.json` et `session_meta.json`."""
+    cid = str(conversation_id or "").strip()
+    if not cid:
+        return {"active_captures": False, "ignored": False, "session_meta": False}
+    return {
+        "active_captures": pop_active_capture(cid, store_dir=store_dir) is not None,
+        "ignored": unignore_session(cid, store_dir=store_dir),
+        "session_meta": remove_session_meta(cid, store_dir=store_dir),
+    }
+
+
 def next_step_index_in_transcript(
     transcript_path: Optional[Union[Path, str]],
 ) -> int:

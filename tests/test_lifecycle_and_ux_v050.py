@@ -549,6 +549,111 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(payload_ok["record"]["window_start_step"], 54)
             self.assertEqual(payload_ok["record"]["input_tokens"], 12_000)
 
+    def test_remove_orphan_purge_state_if_exists_and_cli_flags(self) -> None:
+        import metrics as metrics_pkg
+        from metrics import (
+            apply_remove,
+            purge_lifecycle_state,
+            record_session_meta,
+            remove_session_meta,
+            start_active_capture,
+        )
+
+        self.assertIn("remove_session_meta", metrics_pkg.__all__)
+        self.assertIn("purge_lifecycle_state", metrics_pkg.__all__)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            hist_path = store / "data" / "history.jsonl"
+            cli_script = PLUGIN_ROOT / "scripts" / "cli.py"
+            cid_1 = "orphan11-1111-4111-8111-111111111111"
+            cid_2 = "orphan22-2222-4222-8222-222222222222"
+
+            # 1) remove_session_meta & purge_lifecycle_state atomiques
+            record_session_meta(cid_1, cwd=str(root / "Proj"), project="Proj", store_dir=store)
+            self.assertTrue(remove_session_meta(cid_1, store_dir=store))
+            self.assertFalse(remove_session_meta(cid_1, store_dir=store))
+            self.assertNotIn(cid_1, load_session_meta(store))
+
+            record_session_meta(cid_1, cwd=str(root / "Proj"), project="Proj", store_dir=store)
+            start_active_capture(cid_1, start_step=0, label="orphan-slug", store_dir=store)
+            ignore_session(cid_1, reason="stale", store_dir=store)
+            reports_dir = store / "reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            (reports_dir / "orphan-slug.json").write_text("{}", encoding="utf-8")
+            (reports_dir / "orphan-slug.md").write_text("# orphan\n", encoding="utf-8")
+
+            # Mode strict par défaut sur historique vide -> ValueError
+            with self.assertRaises(ValueError):
+                apply_remove("orphan-slug", store_dir=store, history_path=hist_path)
+
+            # CLI remove strict échoue sans --if-exists / --purge-state
+            proc_strict = subprocess.run(
+                [sys.executable, "-B", str(cli_script), "remove", "orphan-slug", "--store", str(store), "--history", str(hist_path), "--json"],
+                capture_output=True, text=True, encoding="utf-8", check=False,
+            )
+            self.assertNotEqual(proc_strict.returncode, 0)
+
+            # apply_remove avec purge_state=True & purge_reports=True nettoie orphelins lifecycle + rapports
+            removed_orp, rem_orp = apply_remove(
+                "orphan-slug",
+                store_dir=store,
+                history_path=hist_path,
+                conversation_id=cid_1,
+                purge_reports=True,
+                purge_state=True,
+                if_exists=True,
+            )
+            self.assertEqual(rem_orp, 0)
+            self.assertFalse(removed_orp["already_absent"])
+            self.assertEqual(
+                removed_orp["cleaned_sources"],
+                {"history": False, "reports": True, "active_captures": True, "ignored": True, "session_meta": True},
+            )
+            self.assertFalse((reports_dir / "orphan-slug.json").exists())
+            self.assertFalse((reports_dir / "orphan-slug.md").exists())
+            self.assertEqual(load_active_captures(store), {})
+            self.assertEqual(load_ignored_sessions(store), {})
+            self.assertEqual(load_session_meta(store), {})
+
+            # Second appel idempotent (if_exists=True) -> already_absent=True
+            removed_idemp, _ = apply_remove(
+                "orphan-slug",
+                store_dir=store,
+                history_path=hist_path,
+                conversation_id=cid_1,
+                purge_reports=True,
+                purge_state=True,
+                if_exists=True,
+            )
+            self.assertTrue(removed_idemp["already_absent"])
+            self.assertFalse(any(removed_idemp["cleaned_sources"].values()))
+
+            # 2) CLI --purge-state & --if-exists sur préfixe d'UUID orphelin
+            record_session_meta(cid_2, cwd=str(root / "Proj2"), project="Proj2", store_dir=store)
+            ignore_session(cid_2, reason="orphan-cli", store_dir=store)
+            proc_purge = subprocess.run(
+                [sys.executable, "-B", str(cli_script), "remove", cid_2[:8], "--store", str(store), "--history", str(hist_path), "--purge-state", "--json"],
+                capture_output=True, text=True, encoding="utf-8", check=False,
+            )
+            self.assertEqual(proc_purge.returncode, 0, msg=proc_purge.stderr or proc_purge.stdout)
+            out_purge = json.loads(proc_purge.stdout)
+            self.assertTrue(out_purge["ok"])
+            self.assertFalse(out_purge["already_absent"])
+            self.assertTrue(out_purge["cleaned_sources"]["ignored"])
+            self.assertTrue(out_purge["cleaned_sources"]["session_meta"])
+
+            proc_if_exists = subprocess.run(
+                [sys.executable, "-B", str(cli_script), "remove", cid_2[:8], "--store", str(store), "--history", str(hist_path), "--if-exists", "--json"],
+                capture_output=True, text=True, encoding="utf-8", check=False,
+            )
+            self.assertEqual(proc_if_exists.returncode, 0, msg=proc_if_exists.stderr or proc_if_exists.stdout)
+            out_ie = json.loads(proc_if_exists.stdout)
+            self.assertTrue(out_ie["ok"])
+            self.assertTrue(out_ie["already_absent"])
+            self.assertEqual(purge_lifecycle_state(cid_2, store_dir=store), {"active_captures": False, "ignored": False, "session_meta": False})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -430,13 +430,26 @@ def _cmd_remove(args: argparse.Namespace) -> int:
             store_dir=store_dir,
             history_path=history_path,
             purge_reports=args.purge_reports,
+            purge_state=args.purge_state,
+            if_exists=args.if_exists,
         )
     except (KeyError, ValueError) as exc:
         return _emit_error(args, str(exc))
     if args.json:
-        _emit_json({"ok": True, "removed": removed_rec, "remaining": remaining})
+        _emit_json(
+            {
+                "ok": True,
+                "removed": removed_rec,
+                "remaining": remaining,
+                "already_absent": bool(removed_rec.get("already_absent", False)),
+                "cleaned_sources": removed_rec.get("cleaned_sources") or {},
+            }
+        )
     else:
-        print(f"[OK] Session supprimée ({remaining} restante(s)).")
+        if removed_rec.get("already_absent"):
+            print(f"[INFO] Session déjà absente ({remaining} restante(s)).")
+        else:
+            print(f"[OK] Session supprimée ({remaining} restante(s)).")
     return 0
 
 
@@ -638,6 +651,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="purge_reports",
         action="store_true",
         help="Supprime aussi les rapports détaillés dans reports/.",
+    )
+    p_rm.add_argument(
+        "--purge-state",
+        action="store_true",
+        help="Purge aussi les états lifecycle orphelins (active_captures, ignored, session_meta).",
+    )
+    p_rm.add_argument(
+        "--if-exists",
+        action="store_true",
+        help="Ne lève pas d'erreur si la session est déjà absente (idempotent).",
     )
     p_rm.add_argument("--json", action="store_true", help="Sortie structurée au format JSON.")
     p_rm.set_defaults(func=_cmd_remove)

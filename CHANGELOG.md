@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Lifecycle Purge Helpers & Idempotent Remove Flags (`TASK-MET-06a`):**
+  - Added atomic `remove_session_meta` and `purge_lifecycle_state` in `plugin/metrics/lifecycle.py` (exported from `plugin/metrics/__init__.py`).
+  - Added `--purge-state` and `--if-exists` flags to `plugin/scripts/cli.py remove` while keeping strict failure behavior by default.
+
+### Changed
+- **Detail-Slug Resolution, Lifecycle Cleanup & Confined Orphan Removal (`TASK-MET-06a`):**
+  - Extended `plugin/metrics/history.py::resolve_session_index` to match `detail_slug` (exact then case-insensitive) alongside `label` and `conversation_id`, fixing `remove` and `update-meta` when `detail_slug != label`.
+  - Extended `plugin/metrics/store.py::apply_remove` (`conversation_id`, `purge_state`, `if_exists`) to purge `active_captures.json`, `ignored.json`, and `session_meta.json` when removing the last remaining window for a `conversation_id`, purge orphan lifecycle/report artifacts under strict `_shared.path_safety` confinement, and return `already_absent` + `cleaned_sources`.
+
 ### Removed
 - **Hook Runtime & Compat Stubs Retirement (`TASK-MET-03d`):**
   - Removed duplicated `plugin/hooks/hook_runtime.py` (`147` lines, superseded by `_shared.hook_runtime`).

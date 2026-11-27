@@ -274,20 +274,26 @@ def save_history(history_path: Union[Path, str], records: List[Dict[str, Any]]) 
 
 
 def resolve_session_index(records: List[Dict[str, Any]], key: str) -> int:
-    """Trouve l'indice d'une session par label exact, UUID exact ou préfixe unique d'UUID."""
+    """Trouve l'indice d'une session par label, detail_slug, UUID exact ou préfixe unique d'UUID."""
     target = key.strip()
     if not target:
         raise KeyError("Clé de session vide.")
 
     for idx, rec in enumerate(records):
-        if rec.get("label") == target or rec.get("conversation_id") == target:
+        if (
+            rec.get("label") == target
+            or rec.get("detail_slug") == target
+            or rec.get("conversation_id") == target
+        ):
             return idx
 
+    t_low = target.lower()
     matches = [
         idx
         for idx, rec in enumerate(records)
-        if str(rec.get("conversation_id", "")).lower().startswith(target.lower())
-        or str(rec.get("label", "")).lower() == target.lower()
+        if str(rec.get("conversation_id") or "").lower().startswith(t_low)
+        or str(rec.get("label") or "").lower() == t_low
+        or str(rec.get("detail_slug") or "").lower() == t_low
     ]
     if not matches:
         raise KeyError(f"Session introuvable : {key!r}")

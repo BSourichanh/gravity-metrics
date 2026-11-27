@@ -36,7 +36,9 @@ from .lifecycle import (
     load_session_meta,
     next_step_index_in_transcript,
     pop_active_capture,
+    purge_lifecycle_state,
     record_session_meta,
+    remove_session_meta,
     start_active_capture,
     unignore_session,
 )
@@ -153,6 +155,8 @@ __all__ = [
     "remove_session",
     "load_session_meta",
     "record_session_meta",
+    "remove_session_meta",
+    "purge_lifecycle_state",
     "load_active_captures",
     "current_turn_start_step_in_transcript",
     "next_step_index_in_transcript",

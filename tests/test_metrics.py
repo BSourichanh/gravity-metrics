@@ -1566,6 +1566,109 @@ class TestReconciliationAndCompliance(unittest.TestCase):
         self.assertFalse(fb_agy_27)
         self.assertEqual((p_agy_27["input"], p_agy_27["cache_read"], p_agy_27["output"]), (1.5, 0.15, 7.5))
 
+    def test_resolve_detail_slug_and_apply_remove_lifecycle_multi_window(self) -> None:
+        from metrics.history import resolve_session_index
+        from metrics.lifecycle import (
+            ignore_session,
+            load_active_captures,
+            load_ignored_sessions,
+            load_session_meta,
+            record_session_meta,
+            start_active_capture,
+        )
+        from metrics.store import apply_remove, purge_session_details, update_session_metadata
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            hist = store / "data" / "history.jsonl"
+            cid = "d0001111-2222-3333-4444-555566667777"
+            cid2 = "d0002222-2222-3333-4444-555566667777"
+
+            rec_w1 = {
+                "label": "Run Alpha Phase 1",
+                "detail_slug": "run-alpha-phase-1",
+                "conversation_id": cid,
+                "window_start_step": 0,
+                "status": "archived",
+                "project": "Gravity",
+                "cost_usd": 1.0,
+            }
+            rec_w2 = {
+                "label": "Run Alpha Phase 2",
+                "detail_slug": "run-alpha-phase-2",
+                "conversation_id": cid,
+                "window_start_step": 10,
+                "status": "archived",
+                "project": "Gravity",
+                "cost_usd": 2.0,
+            }
+            rec_other = {
+                "label": "Run Beta",
+                "detail_slug": "run-beta",
+                "conversation_id": cid2,
+                "window_start_step": 0,
+                "status": "archived",
+                "project": "Gravity",
+                "cost_usd": 0.5,
+            }
+            save_history(hist, [rec_w1, rec_w2, rec_other])
+
+            # detail_slug != label : exact et case-insensitive, plus ambiguïté préservée
+            recs = load_history(hist)
+            self.assertEqual(resolve_session_index(recs, "run-alpha-phase-1"), 0)
+            self.assertEqual(resolve_session_index(recs, "RUN-ALPHA-PHASE-2"), 1)
+            with self.assertRaises(ValueError):
+                resolve_session_index(recs, "d000")
+
+            # update_session_metadata via detail_slug
+            updated_meta, _ = update_session_metadata(
+                "run-alpha-phase-1",
+                note="maj via slug",
+                store_dir=store,
+                history_path=hist,
+            )
+            self.assertEqual(updated_meta["note"], "maj via slug")
+
+            # Confinement purge_session_details : rejette la traversée ../
+            outside = root / "outside.json"
+            outside.write_text("{}", encoding="utf-8")
+            self.assertFalse(purge_session_details(store, {"detail_slug": "../outside"}))
+            self.assertTrue(outside.is_file())
+
+            # Prépare états lifecycle pour cid (multi-fenêtres)
+            record_session_meta(cid, cwd=str(root / "Gravity"), project="Gravity", store_dir=store)
+            start_active_capture(cid, start_step=20, label="next", store_dir=store)
+            ignore_session(cid, reason="test", store_dir=store)
+
+            # Suppression fenêtre 1 via detail_slug : fenêtre 2 reste -> lifecycle préservé
+            removed_1, rem_1 = apply_remove(
+                "run-alpha-phase-1", store_dir=store, history_path=hist, purge_reports=True,
+            )
+            self.assertEqual(removed_1["conversation_id"], cid)
+            self.assertEqual(rem_1, 2)
+            self.assertFalse(removed_1["already_absent"])
+            self.assertEqual(
+                removed_1["cleaned_sources"],
+                {"history": True, "reports": False, "active_captures": False, "ignored": False, "session_meta": False},
+            )
+            self.assertIn(cid, load_session_meta(store))
+            self.assertIn(cid, load_active_captures(store))
+            self.assertIn(cid, load_ignored_sessions(store))
+
+            # Suppression fenêtre 2 (dernière du cid) -> lifecycle purgé (zéro résurrection)
+            removed_2, rem_2 = apply_remove(
+                "RUN-ALPHA-PHASE-2", store_dir=store, history_path=hist, purge_reports=True,
+            )
+            self.assertEqual(rem_2, 1)
+            self.assertEqual(
+                removed_2["cleaned_sources"],
+                {"history": True, "reports": False, "active_captures": True, "ignored": True, "session_meta": True},
+            )
+            self.assertNotIn(cid, load_session_meta(store))
+            self.assertNotIn(cid, load_active_captures(store))
+            self.assertNotIn(cid, load_ignored_sessions(store))
+
 
 if __name__ == "__main__":
     unittest.main()
