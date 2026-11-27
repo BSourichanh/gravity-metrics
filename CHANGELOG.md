@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-27
+
 ### Added
 - **SPI-1 `health` & `live-meta` Views (`TASK-ARCH-02b`):**
   - Added read-only `get_health_view` (`--view health`) and `get_live_meta_view` (`--view live-meta`, with `--since-signature` fast-path, worktree filtering, and `_path_safety.is_symlink_or_junction` guards) to `plugin/scripts/dashboard_provider.py`.

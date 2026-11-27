@@ -21,7 +21,7 @@
 gravity-metrics/
 ├── install.py                              # Thin 11-flag installer / uninstaller onto _shared.installer_core
 ├── plugin/                                 # Standalone plugin ready to install
-│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.5.1)
+│   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.6.0)
 │   ├── hooks.json                          # PreInvocation (active) & SessionStart ("enabled": false)
 │   ├── README.md                           # Plugin documentation (French)
 │   ├── _shared/                            # Read-only SSOT primitives synced from gravity/shared/gravity_shared/
@@ -130,7 +130,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 ## 5. Documentation & Releases
 
-- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0` – `v0.5.1` + `[Unreleased]`)
+- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.1.0` – `v0.6.0` + `[Unreleased]`)
 - [`plugin/README.md`](plugin/README.md) — Plugin documentation (French)
 - [`AGENTS.md`](AGENTS.md) — Repository invariants and verification commands
 
