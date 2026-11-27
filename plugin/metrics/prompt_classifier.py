@@ -73,8 +73,15 @@ _GRAVITY_METRICS_ARGS_RE = re.compile(
     r"^/gravity-metrics(?::gravity-metrics)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL
 )
 _SWARM_CMD_RE = re.compile(r"^/swarm(?::swarm)?(?:\s|$)", re.IGNORECASE)
+_GRAVITY_CONSULTATIVE_SUBCMDS = frozenset(
+    {"status", "doctor", "dashboard", "modules", "help", "overview"}
+)
+_GRAVITY_CORE_ONLY_RE = re.compile(
+    r"^/gravity(?::gravity)?(?:\s+(.*))?$",
+    re.IGNORECASE | re.DOTALL,
+)
 _GRAVITY_CMD_RE = re.compile(
-    r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity-architect(?::gravity-architect)?|gravity-bridge(?::gravity-bridge)?|gravity(?::gravity)?)(?:\s|$)",
+    r"^/(?:gravity-workflow(?::gravity-workflow)?|gravity-architect(?::gravity-architect)?|gravity-bridge(?::gravity-bridge)?|gravity(?::gravity)?(?!\s*$)(?!\s+(?:status|doctor|dashboard|modules|help|overview)(?:\s|$)))(?:\s|$)",
     re.IGNORECASE,
 )
 _GRAVITY_LEADING_AXES_RE = re.compile(
@@ -325,9 +332,19 @@ def is_gravity_metrics_capture_prompt(raw: str) -> bool:
 
 
 def is_gravity_session_prompt(raw: str) -> bool:
-    """Retourne True si le prompt lance `/gravity`, `/gravity-workflow`, `/gravity-architect` ou `/gravity-bridge`."""
+    """Retourne True si le prompt lance `/gravity` non consultatif, `/gravity-workflow`, `/gravity-architect` ou `/gravity-bridge`."""
     txt = extract_user_request_text(raw)
-    return bool(_GRAVITY_CMD_RE.match(txt)) and not is_gravity_metrics_prompt(txt)
+    if not _GRAVITY_CMD_RE.match(txt) or is_gravity_metrics_prompt(txt):
+        return False
+    m_core = _GRAVITY_CORE_ONLY_RE.match(txt)
+    if m_core is not None:
+        rest = (m_core.group(1) or "").strip()
+        if not rest:
+            return False
+        first_tok = rest.split(None, 1)[0].strip().lower()
+        if first_tok in _GRAVITY_CONSULTATIVE_SUBCMDS:
+            return False
+    return True
 
 
 def _default_workflow_home() -> Path:

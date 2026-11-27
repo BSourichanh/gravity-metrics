@@ -602,6 +602,7 @@ def _maybe_auto_start_policy_capture(payload: Dict[str, Any], cleaned: str) -> N
     try:
         from metrics import (
             default_brain_dir,
+            load_active_captures,
             resolve_store_paths,
             slugify_label,
             start_active_capture,
@@ -609,6 +610,8 @@ def _maybe_auto_start_policy_capture(payload: Dict[str, Any], cleaned: str) -> N
         from metrics.lifecycle import current_turn_start_step_in_transcript
 
         store_dir, _ = resolve_store_paths()
+        if isinstance(load_active_captures(store_dir).get(cid), dict):
+            return
         brain_dir = _hook_rt.resolve_brain_dir(payload) or default_brain_dir()
         tpath = _resolve_transcript_path(payload, brain_dir, cid)
         start_step = current_turn_start_step_in_transcript(tpath, expected_prompt=cleaned)

@@ -53,14 +53,43 @@ def to_session_record(
     else:
         primary_model = "unknown"
 
-    models_compact = {
-        m_name: {"calls": m_data["calls"], "cost_usd": m_data["cost_usd"]["total_usd"]}
-        for m_name, m_data in by_model.items()
-    }
+    models_compact: Dict[str, Dict[str, Any]] = {}
+    for m_name, m_data in by_model.items():
+        if not isinstance(m_data, dict):
+            continue
+        m_in = int(m_data.get("input_tokens") or 0)
+        m_cache = int(m_data.get("cache_read_tokens") or 0)
+        m_out = int(m_data.get("output_tokens") or 0)
+        m_tot = int(m_data["total_tokens"]) if m_data.get("total_tokens") is not None else (m_in + m_cache + m_out)
+        m_useful = int(m_data["useful_tokens"]) if m_data.get("useful_tokens") is not None else (m_in + m_out)
+        m_cost = m_data.get("cost_usd")
+        m_cost_val = float(m_cost.get("total_usd") or 0.0) if isinstance(m_cost, dict) else float(m_cost or 0.0)
+        m_agents = m_data.get("agents_using") if m_data.get("agents_using") is not None else m_data.get("agents")
+        models_compact[m_name] = {
+            "calls": int(m_data.get("calls") or 0),
+            "agents": int(m_agents or 0),
+            "tokens": m_tot,
+            "useful_tokens": m_useful,
+            "cost_usd": m_cost_val,
+        }
     cat_shares = {
         cat: data["cost_share_pct"]
         for cat, data in (metrics.get("by_category") or {}).items()
     }
+    cat_tokens: Dict[str, Dict[str, int]] = {}
+    for cat, data in (metrics.get("by_category") or {}).items():
+        if not isinstance(data, dict):
+            continue
+        c_in = int(data.get("input_tokens") or 0)
+        c_cache = int(data.get("cache_read_tokens") or 0)
+        c_out = int(data.get("output_tokens") or 0)
+        c_tot = int(data["total_tokens"]) if data.get("total_tokens") is not None else (c_in + c_cache + c_out)
+        c_useful = int(data["useful_tokens"]) if data.get("useful_tokens") is not None else (c_in + c_out)
+        cat_tokens[cat] = {
+            "agents": int(data.get("agents") or 0),
+            "tokens": c_tot,
+            "useful_tokens": c_useful,
+        }
 
     cid = metrics["root_conversation_id"]
     resolved_label = (label or metrics.get("label") or f"run-{cid[:8]}").strip()
@@ -107,6 +136,7 @@ def to_session_record(
                     "status": str(ph.get("status") or "pending"),
                     "agents": int(ph.get("agents") or 0),
                     "llm_calls": int(ph.get("llm_calls") or 0),
+                    "tokens": int(ph.get("tokens") or 0),
                     "cost_usd": float(ph.get("cost_usd") or 0.0),
                     "cost_2027_usd": float(ph.get("cost_2027_usd") or 0.0),
                     "cost_share_pct": float(ph.get("cost_share_pct") or 0.0),
@@ -168,6 +198,7 @@ def to_session_record(
         "cache_savings_usd": c["cache_savings_usd"],
         "cost_2027_usd": p.get("total_usd", 0.0),
         "category_share_pct": cat_shares,
+        "category_tokens": cat_tokens,
         "duplicate_spawns": eff["duplicate_role_spawns"]["duplicate_agent_count"],
         "rewind_calls": eff["rewind_waste"]["rewind_calls"],
         "interrupted_agents": eff["interrupted_agents"]["count"],
@@ -223,11 +254,13 @@ def find_archived_session(
     records: List[Dict[str, Any]],
     conversation_id: str,
     window_start_step: Optional[int],
+    window_end_step: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Retourne l'enregistrement archivé correspondant à `(conversation_id, window_start_step)` (tolérance ±2 steps) ou couvert par `--full`."""
+    """Retourne l'enregistrement archivé correspondant à `(conversation_id, window_start_step)` (tolérance ±2 steps ou chevauchement d'intervalle scellé) ou couvert par `--full`."""
     exact_match: Optional[Dict[str, Any]] = None
     tolerant_match: Optional[Dict[str, Any]] = None
     tolerant_dist = 3
+    overlap_match: Optional[Dict[str, Any]] = None
     full_match: Optional[Dict[str, Any]] = None
     any_match: Optional[Dict[str, Any]] = None
 
@@ -246,6 +279,15 @@ def find_archived_session(
             if dist <= 2 and dist < tolerant_dist:
                 tolerant_dist = dist
                 tolerant_match = dict(rec)
+            rec_end = rec.get("root_last_step_index")
+            if _is_int_step(rec_end) and rec_end >= rec_wstep and overlap_match is None:
+                eff_win_end = (
+                    window_end_step
+                    if (_is_int_step(window_end_step) and window_end_step >= window_start_step)
+                    else window_start_step
+                )
+                if window_start_step <= rec_end and eff_win_end >= rec_wstep:
+                    overlap_match = dict(rec)
         if rec_wstep is None and full_match is None:
             full_match = dict(rec)
         if any_match is None:
@@ -255,6 +297,8 @@ def find_archived_session(
         return exact_match
     if tolerant_match is not None:
         return tolerant_match
+    if overlap_match is not None:
+        return overlap_match
     if full_match is not None:
         return full_match
     if window_start_step is None and any_match is not None:

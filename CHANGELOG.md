@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Session Continuity, Sealed Interval Overlap & 4-Phase Token Alignment (`TASK-UX-01`):**
+  - Excluded bare `/gravity` and consultative subcommands (`status`, `doctor`, `dashboard`, `modules`, `help`, `overview`) from `plugin/metrics/prompt_classifier.py::is_gravity_session_prompt` so consultative calls do not anchor phantom `step=0` windows.
+  - Added fast-path idempotent active-capture reuse (`overwrite=False`) in `plugin/hooks/pre_invocation_metrics.py::_maybe_auto_start_policy_capture` without resetting existing capture windows.
+  - Excluded ecosystem documentation edits (`ECOSYSTEM.md`, `ROADMAP.md`, `CHANGELOG.md`, `docs/`, `audits/`) from `plugin/metrics/transcript_index.py::has_direct_edit_tool` to preserve `verif_step` during Phase 4 validation.
+  - Aligned `plugin/metrics/milestone_analyzer.py` on the 4 cycle phases (`conception`, `planification`, `production`, `validation`) with `planner`/`reviewer`/`builder` + token distribution, and checked sealed `[window_start_step..root_last_step_index]` overlap in `_is_window_archived` and `plugin/metrics/history.py::find_archived_session`.
+  - Persisted per-phase `tokens`, `category_tokens` (`{agents, tokens, useful_tokens}`), and extended `models` (`agents`, `tokens`, `useful_tokens`) in `plugin/metrics/history.py::to_session_record` with full backward compatibility for legacy `history.jsonl` records.
+
 ## [0.6.0] - 2026-11-27
 
 ### Added

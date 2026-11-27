@@ -186,6 +186,19 @@ _GIT_PUSH_RE = re.compile(r"\bgit\b[^\n;|&]*\bpush\b", re.IGNORECASE)
 _DIRECT_EDIT_TOOL_NAMES = frozenset(
     {"write_file", "write_to_file", "edit_file", "replace_file_content", "multi_replace_file_content"}
 )
+_ECOSYSTEM_DOC_PATH_RE = re.compile(
+    r"(?:^|/)(?:(?:docs|audits)/|(?:ECOSYSTEM|ROADMAP|CHANGELOG)\.md$)",
+    re.IGNORECASE,
+)
+
+
+def _is_excluded_edit_doc_path(raw_path: str) -> bool:
+    """Retourne True pour les docs atelier/écosystème exclus de `has_direct_edit_tool`."""
+    if not raw_path:
+        return False
+    if _is_atelier_doc_path(raw_path):
+        return True
+    return bool(_ECOSYSTEM_DOC_PATH_RE.search(raw_path.replace("\\", "/").strip()))
 _WORK_TOOL_NAMES = _DIRECT_EDIT_TOOL_NAMES | frozenset({"run_workflow", "invoke_subagent", "swarm"})
 _VERIF_CMD_TOKENS = ("git push", "validate.py", "unittest", "pytest", "audit_ecosystem.py", "ecosystem_install.py")
 _CLEAN_TERMINAL_TOOLS = frozenset({"finish", "post_message", "swarm_wait"})
@@ -303,7 +316,7 @@ def _get_transcript_index(transcript_path: Union[Path, str]) -> Dict[str, Any]:
                                     targs.get("Path") or targs.get("TargetFile")
                                     or targs.get("path") or targs.get("file_path") or targs.get("target_file") or ""
                                 ).strip()
-                                if not _is_atelier_doc_path(tpath_arg):
+                                if not _is_excluded_edit_doc_path(tpath_arg):
                                     has_direct_edit_tool = True
                         if tname.lower() in ("run_command", "execute_command", "bash", "shell"):
                             cmd_raw = _extract_shell_command_str(tc)

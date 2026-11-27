@@ -308,7 +308,7 @@ class TestWorkflowAndPendingV042(unittest.TestCase):
                         "type": "USER_INPUT",
                         "status": "DONE",
                         "created_at": "2026-11-22T12:00:00Z",
-                        "content": "<USER_REQUEST>\n/gravity status\n</USER_REQUEST>",
+                        "content": "<USER_REQUEST>\n/gravity run\n</USER_REQUEST>",
                     },
                     _planner_step(1, "2026-11-22T12:00:10Z"),
                 ],

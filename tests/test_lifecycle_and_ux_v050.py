@@ -293,7 +293,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(len(recs), 1)
             self.assertEqual(saved_rec["label"], "mon-lot")
             self.assertEqual(saved_rec["project"], "Atelier")
-            self.assertEqual([m["id"] for m in saved_rec["milestones"]["phases"]], ["conception", "production", "verification", "cloture"])
+            self.assertEqual([m["id"] for m in saved_rec["milestones"]["phases"]], ["conception", "planification", "production", "validation"])
             self.assertEqual(saved_rec["current_phase"], "Clôture / Enregistrée")
 
     def test_ignore_unignore_and_update_session_metadata(self) -> None:
