@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -173,7 +174,16 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             ws.mkdir()
             cid = "a1b2c3d4-1111-2222-3333-444455556666"
 
-            # 1) SessionStart hook : stdin invalide -> {} sans crash, stdin valide -> session_meta.json sans toucher ws
+            # 0) hooks.json désactive SessionStart dans un groupe dédié tout en gardant PreInvocation actif
+            hooks_cfg = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))
+            self.assertIs(hooks_cfg["gravity-metrics-session"].get("enabled"), False)
+            self.assertNotIn("PreInvocation", hooks_cfg["gravity-metrics-session"])
+            self.assertIn("SessionStart", hooks_cfg["gravity-metrics-session"])
+            self.assertIs(hooks_cfg["gravity-metrics-command"].get("enabled"), True)
+            self.assertNotIn("SessionStart", hooks_cfg["gravity-metrics-command"])
+            self.assertIn("PreInvocation", hooks_cfg["gravity-metrics-command"])
+
+            # 1) SessionStart hook (appel direct) : stdin invalide -> {} sans crash, stdin valide -> session_meta.json sans toucher ws
             res_bad = _run_py_hook(START_HOOK, "{broken-json", store_dir=store, brain_dir=brain)
             self.assertEqual(res_bad, {})
             res_ok = _run_py_hook(
@@ -341,6 +351,52 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(updated["note"], "updated note")
             self.assertEqual(updated["cost_usd"], cost_before)
 
+            # Migration SPI-1 : dashboard_provider ignore/unignore/update-meta & fast unchanged poll (< 50 ms)
+            from metrics import record_session_meta
+
+            scripts_dir = str(PLUGIN_ROOT / "scripts")
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            import dashboard_provider
+
+            record_session_meta(cid_pend, cwd=str(root / "ProjBeta"), project="ProjBeta", store_dir=store)
+            view_0 = dashboard_provider.get_metrics_view(m_home=store)
+            self.assertEqual(len(view_0["pending_sessions"]), 1)
+            self.assertEqual(len(view_0["ignored_sessions"]), 0)
+
+            res_ign = dashboard_provider.run_action(
+                "ignore", {"target": cid_pend, "reason": "bruit-spi1"}, m_home=store, brain_dir=brain
+            )
+            self.assertTrue(res_ign["ok"])
+            view_1 = dashboard_provider.get_metrics_view(m_home=store)
+            self.assertEqual(len(view_1["pending_sessions"]), 0)
+            self.assertEqual(len(view_1["ignored_sessions"]), 1)
+            self.assertEqual(view_1["ignored_sessions"][0]["ignored_reason"], "bruit-spi1")
+
+            res_unign = dashboard_provider.run_action(
+                "unignore", {"target": cid_pend}, m_home=store, brain_dir=brain
+            )
+            self.assertTrue(res_unign["ok"])
+            res_meta = dashboard_provider.run_action(
+                "update-meta",
+                {"target": "renamed-run", "label": "renamed-spi1", "project": "ProjGamma", "note": "spi1 note"},
+                m_home=store,
+                brain_dir=brain,
+            )
+            self.assertTrue(res_meta["ok"])
+            self.assertEqual(res_meta["record"]["label"], "renamed-spi1")
+            self.assertEqual(res_meta["record"]["cost_usd"], cost_before)
+
+            view_2 = dashboard_provider.get_metrics_view(m_home=store)
+            sig = view_2["signature"]
+            t0 = time.perf_counter()
+            fast_res = dashboard_provider.get_metrics_view(since_signature=sig, m_home=store)
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            self.assertFalse(fast_res["changed"])
+            self.assertTrue(fast_res["unchanged"])
+            self.assertEqual(fast_res["signature"], sig)
+            self.assertLess(dt_ms, 50.0)
+
     def test_current_turn_start_step_and_tolerant_history_upsert(self) -> None:
         from metrics.history import to_session_record, upsert_session
         from metrics.lifecycle import (
@@ -415,16 +471,16 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(merged[0]["label"], "new-lbl")
             self.assertEqual(merged[0]["window_start_step"], 72)
 
-            # Vague 2 : exports publics, badge "enregistrée" et tableau terminal sans troncature
+            # Exports publics, badge "archivé" et tableau terminal/pending
             import metrics as metrics_pkg
 
             self.assertIs(metrics_pkg.record_conversation, archive_conversation)
             self.assertIn("current_turn_start_step_in_transcript", metrics_pkg.__all__)
             self.assertIn("record_conversation", metrics_pkg.__all__)
-            self.assertEqual(metrics_pkg.render_terminal_table([rec_new]).count("enregistrée"), 2)
-            self.assertIn("Statut      ", metrics_pkg.render_terminal_table([rec_new]))
-            self.assertIn("cli.py record <id>", metrics_pkg.render_pending_table([{"conversation_id": cid_h, "updated_at": "2026-11-25T10:00:00Z", "llm_calls": 2, "window_mode": "gravity_session", "title": "t"}]))
-            self.assertIn("tout est enregistré", metrics_pkg.render_pending_markdown([]))
+            self.assertEqual(metrics_pkg.render_terminal_table([rec_new]).count("archivé"), 2)
+            self.assertIn("Statut   ", metrics_pkg.render_terminal_table([rec_new]))
+            self.assertIn("cli.py archive <id>", metrics_pkg.render_pending_table([{"conversation_id": cid_h, "updated_at": "2026-11-25T10:00:00Z", "llm_calls": 2, "window_mode": "gravity_session", "title": "t"}]))
+            self.assertIn("tout est archivé", metrics_pkg.render_pending_markdown([]))
 
     def test_expected_prompt_anchoring_and_cli_from_step(self) -> None:
         from metrics.lifecycle import current_turn_start_step_in_transcript

@@ -1,61 +1,34 @@
 #!/usr/bin/env python3
-"""Gestion de l'historique multi-sessions JSONL et verrous (100 % stdlib)."""
+"""Gestion de l'historique multi-sessions JSONL et verrous fail-closed (100 % stdlib)."""
 
 import contextlib
 from datetime import datetime, timezone
+import importlib
 import json
-import os
 from pathlib import Path
-import time
+import sys
 from typing import Any, Dict, Iterator, List, Optional, Union
+
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+
+_atomic_io = importlib.import_module("_shared.atomic_io")
+_file_lock = importlib.import_module("_shared.file_lock")
 
 from .collector import _fmt_iso_utc, slugify_label
 from .pricing import SCHEMA_VERSION
 
 
 @contextlib.contextmanager
-def history_lock(history_path: Union[Path, str]) -> Iterator[None]:
-    """Verrou fichier inter-processus léger (Windows msvcrt / POSIX fcntl) pour history.jsonl."""
+def history_lock(
+    history_path: Union[Path, str],
+    timeout_s: float = 5.0,
+) -> Iterator[None]:
+    """Verrou fichier inter-processus fail-closed (Windows/POSIX) pour history.jsonl."""
     lock_path = Path(history_path).with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = lock_path.open("a+b")
-    locked = False
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            for _ in range(100):
-                try:
-                    fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                    locked = True
-                    break
-                except OSError:
-                    time.sleep(0.02)
-        else:
-            import fcntl
-
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            locked = True
+    with _file_lock.exclusive_file_lock(lock_path, timeout_s=timeout_s):
         yield
-    finally:
-        if locked:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            except Exception:
-                pass
-        try:
-            fh.close()
-        except Exception:
-            pass
 
 
 def to_session_record(
@@ -120,9 +93,7 @@ def to_session_record(
         for ws, data in (metrics.get("by_workspace") or {}).items()
         if isinstance(data, dict)
     }
-    tech_sig = metrics.get("technical_signals") or {}
-    if not tech_sig:
-        tech_sig = s
+    tech_sig = metrics.get("technical_signals") or s
     ms_raw = metrics.get("milestones") or {}
     ms_compact = None
     if isinstance(ms_raw, dict) and isinstance(ms_raw.get("phases"), list):
@@ -206,21 +177,13 @@ def to_session_record(
         None,
     )
     root_last_step = metrics.get("root_last_step_index")
-    if not isinstance(root_last_step, int) or isinstance(root_last_step, bool):
+    if not _is_int_step(root_last_step):
         cand_step = root_ag.get("last_step_index") if isinstance(root_ag, dict) else None
-        root_last_step = (
-            cand_step
-            if isinstance(cand_step, int) and not isinstance(cand_step, bool)
-            else None
-        )
+        root_last_step = cand_step if _is_int_step(cand_step) else None
     root_llm_calls = metrics.get("root_llm_calls")
-    if not isinstance(root_llm_calls, int) or isinstance(root_llm_calls, bool):
+    if not _is_int_step(root_llm_calls):
         cand_calls = root_ag.get("llm_calls") if isinstance(root_ag, dict) else None
-        root_llm_calls = (
-            int(cand_calls)
-            if isinstance(cand_calls, int) and not isinstance(cand_calls, bool)
-            else None
-        )
+        root_llm_calls = int(cand_calls) if _is_int_step(cand_calls) else None
     if root_last_step is not None:
         rec_out["root_last_step_index"] = root_last_step
     if root_llm_calls is not None:
@@ -300,14 +263,14 @@ def find_archived_session(
 
 
 def save_history(history_path: Union[Path, str], records: List[Dict[str, Any]]) -> None:
-    """Sauvegarde la liste des sessions dans history.jsonl (UTF-8)."""
+    """Sauvegarde atomiquement la liste des sessions dans history.jsonl (UTF-8 sans BOM, LF)."""
     hpath = Path(history_path)
-    hpath.parent.mkdir(parents=True, exist_ok=True)
-    if not records:
-        hpath.write_text("", encoding="utf-8")
-        return
-    payload = "\n".join(json.dumps(rec, ensure_ascii=False) for rec in records) + "\n"
-    hpath.write_text(payload, encoding="utf-8")
+    payload = (
+        "\n".join(json.dumps(rec, ensure_ascii=False) for rec in records) + "\n"
+        if records
+        else ""
+    )
+    _atomic_io.write_text_atomic(hpath, payload)
 
 
 def resolve_session_index(records: List[Dict[str, Any]], key: str) -> int:

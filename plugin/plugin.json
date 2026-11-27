@@ -2,14 +2,14 @@
   "name": "gravity-metrics",
   "displayName": "Gravity Metrics",
   "version": "0.5.1",
-  "description": "Capture /gravity-metrics, historique centralisé et signaux techniques (tokens, cache, coûts) pour le tableau de bord Gravity Core.",
+  "description": "Capture /gravity-metrics, historique centralisé et widget MCP App interactif des coûts, tokens et cache Antigravity.",
   "logo": "assets/logo.svg",
   "homepage": "https://github.com/BSourichanh/gravity-metrics",
   "repository": "https://github.com/BSourichanh/gravity-metrics.git",
   "suggestedPrompts": [
-    "/gravity-metrics — Ouvrir le dashboard coûts/cache en lecture seule",
-    "/gravity-metrics pending — Lister les sessions en attente d'enregistrement",
-    "/gravity-metrics start — Démarrer une fenêtre de capture à 0 token"
+    "/gravity-metrics — Capturer les métriques et ouvrir le dashboard coûts/cache",
+    "/gravity-metrics pending — Lister les sessions en attente d'archivage",
+    "Analyser les coûts, économies de cache et tendances de mes sessions Gravity"
   ],
   "author": {
     "name": "Gravity Contributors"

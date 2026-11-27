@@ -97,7 +97,7 @@ class TestHistoricalBridgeReportsROCompat(unittest.TestCase):
                     },
                 ],
             )
-            _write_subagent(brain / root_id, sub_root, "research", "Studio Explorer", spawn_step=1)
+            _write_subagent(brain / root_id, sub_root, "research", "Atelier Explorer", spawn_step=1)
             _write_transcript(
                 brain / sub_root,
                 [{"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-22T18:10:15Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 90_000, "output_tokens": 500, "tool_calls": []}],
@@ -110,7 +110,7 @@ class TestHistoricalBridgeReportsROCompat(unittest.TestCase):
             self.assertEqual(classify_agent("bridge", "bridge:x"), "orchestration")
 
             # Collecte native (zéro lecture bridge.db)
-            m = collect_run_metrics(root_id, brain, CATALOG_PATH, gravity_window=True, project="gravity-studio")
+            m = collect_run_metrics(root_id, brain, CATALOG_PATH, gravity_window=True, project="gravity-workshop")
             self.assertEqual(m["summary"]["total_agents"], 2)
             self.assertEqual(m["bridge_pending_jobs"], [])
             tree = discover_agent_tree(root_id, brain)
@@ -124,9 +124,9 @@ class TestHistoricalBridgeReportsROCompat(unittest.TestCase):
                 "workspaces": ["gravity-architect", "gravity-workflow"],
                 "pending_jobs": [],
             }
-            ws_base = dict(m["by_workspace"]["gravity-studio"])
+            ws_base = dict(m["by_workspace"]["gravity-workshop"])
             archived_compat["by_workspace"] = {
-                "gravity-studio": {**ws_base, "cost_share_pct": 40.0},
+                "gravity-workshop": {**ws_base, "cost_share_pct": 40.0},
                 "gravity-architect": {**ws_base, "cost_share_pct": 35.0},
                 "gravity-workflow": {**ws_base, "cost_share_pct": 25.0},
             }
@@ -281,7 +281,7 @@ class TestEntrypointsExclusionSlugAndLegacySchema(unittest.TestCase):
                 "cost_usd": 1.0,
                 "bridge_children_count": 1,
                 "bridge_workspaces": ["gravity-metrics"],
-                "workspace_share_pct": {"gravity-studio": 60.0, "gravity-metrics": 40.0},
+                "workspace_share_pct": {"gravity-workshop": 60.0, "gravity-metrics": 40.0},
             }
             save_history(hist_path, [legacy_rec])
             loaded_legacy = load_history(hist_path)
@@ -289,12 +289,12 @@ class TestEntrypointsExclusionSlugAndLegacySchema(unittest.TestCase):
             self.assertEqual(loaded_legacy[0]["bridge_children_count"], 1)
             self.assertIn("bridge:1", render_metrics_markdown(loaded_legacy))
 
-            m = collect_run_metrics(cid_root, brain, CATALOG_PATH, gravity_window=True, project="gravity-studio")
+            m = collect_run_metrics(cid_root, brain, CATALOG_PATH, gravity_window=True, project="gravity-workshop")
             saved, _ = record_session_metrics(m, store_dir=store, history_path=hist_path, label="arch-1", force=False)
             self.assertEqual(saved["schema_version"], SCHEMA_VERSION)
             self.assertEqual(saved["status"], "archived")
             self.assertTrue(saved["archived_at"])
-            self.assertEqual(saved["project"], "gravity-studio")
+            self.assertEqual(saved["project"], "gravity-workshop")
 
             saved_again, _ = record_session_metrics(m, store_dir=store, history_path=hist_path, label="autre-label", force=False)
             self.assertTrue(saved_again.get("already_archived"))

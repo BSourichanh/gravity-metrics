@@ -7,119 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **Targeted Re-Archiving (`plugin/scripts/cli.py`, tests):**
-  - Added `--from-step <N>` (`>= 0`, mutually exclusive with `--full`) to `cli.py record` / `archive` and forwarded `from_step` to `archive_conversation()`.
-- **Install Source Provenance (`install.py`, `tests/test_install.py`):**
-  - Added atomic provenance recording (`_record_install_source`, `_atomic_write_json`, `_probe_git_metadata`, `resolve_gravity_home`) in `$GRAVITY_HOME/core/sources.json` (UTF-8 without BOM, LF, schema v1) upon successful real global installs (`rc == 0`, `not dry_run`, `scope == "global"`, `target is None`) while preserving existing module entries, tolerating missing `git`/`.git`, and keeping the installed plugin directory untouched.
-
-### Fixed
-- **Capture Start-Step Anchoring on Reactive Wakeup (`plugin/metrics/lifecycle.py`, `plugin/hooks/pre_invocation_metrics.py`, tests):**
-  - Added keyword-only `expected_prompt` and `_normalize_user_prompt()` to `current_turn_start_step_in_transcript()` so `/gravity-architect` auto-capture (`_maybe_auto_start_architect_capture`) anchors on the matching `USER_INPUT` even across intermediate `PLANNER_RESPONSE`/`SYSTEM_MESSAGE` steps, while preserving exact fallback behavior when `expected_prompt` is omitted or absent.
-- **Auto-Capture Hygiene & Retroactive Worktree Purge (`plugin/metrics/lifecycle.py`, `plugin/hooks/pre_invocation_metrics.py`, `plugin/metrics/collector.py`, tests):**
-  - Added `source` (`"manual"` by default, `"architect_auto"` from `/gravity-architect`) to `start_active_capture()` and guarded `_maybe_auto_start_architect_capture()` against purely consultative `/gravity-architect` questions while preserving `handoff`, `spec`, `task`, and action prompts.
-  - Updated `list_pending_sessions()` anti-noise filter to treat `source == "architect_auto"` without work activity as noise (while keeping explicit/manual captures intact).
-  - Added `_is_worktree_path()` and retroactive worktree filtering/purging in `load_session_meta()` and `record_session_meta()`.
-
-### Changed
-- **MCP Server & Widget Retirement into Unified Gravity Core (`plugin/config/module.json`, `plugin/hooks/pre_invocation_metrics.py`, `plugin/scripts/validate.py`, `install.py`, docs & tests):**
-  - Switched `plugin/config/module.json` `ui.mode` from `"transition-mcp"` to `"none"` (`ui.target: "gravity"`).
-  - Updated `plugin/hooks/pre_invocation_metrics.py` (`_build_handoff_system_message`, `_run_metrics_command`) to hand off `/gravity-metrics` commands to `open_gravity_dashboard` on server `gravity_dashboard` (`view="metrics"` with `metrics_sub` and `target` / `project` when applicable).
-  - Cleaned up `plugin/scripts/validate.py` (`_validate_mcp_config`, `_run_mcp_dry_run`, `"mcp"`/`"widget_html"` checks removed; hook dry-run updated for `open_gravity_dashboard`) and `install.py` (`mcp/server.py` removed from `EXEC_SCRIPTS`).
-  - Synchronized `plugin/rules/AGENTS.md` (`<= 600` B), `plugin/skills/gravity-metrics/SKILL.md` (`<= 6000` B), `AGENTS.md` (`<= 2500` B), `plugin/README.md`, `README.md`, `plugin/plugin.json`, and unit tests.
-
 ### Removed
-- **Standalone MCP Server & UI (`plugin/mcp_config.json`, `plugin/mcp/`, `tests/test_mcp_server.py`):**
-  - Deleted `plugin/mcp_config.json`, the entire `plugin/mcp/` package (`server.py`, `widget_html.py`, `ui/*`), and `tests/test_mcp_server.py` now that Gravity Core hosts the unified dashboard.
-
-### Added
-- **Canonical Workspace Resolution, Technical Signals & Full `--json` CLI (`plugin/metrics/workspace_resolver.py`, `plugin/metrics/technical_signals.py`, `plugin/metrics/collector.py`, `plugin/metrics/history.py`, `plugin/scripts/cli.py`, `tests/test_technical_and_workspace.py`):**
-  - Added `workspace_resolver.py` (`resolve_agent_workspace`, `normalize_worktree_path`, `classify_workspace_kind`) with 5-tier priority resolution (`bridge_workspace` > write/shell `cd`/`git -C` > read outside `root_workspace` `specs/`/`tasks/` > non-inherit `workspaceUris` > `root_workspace`), worktree normalization (`gravity-worktrees/<repo>-wN`, `.gemini/antigravity/worktrees/<repo>-*`, `.worktrees/<repo>-*`), and `"atelier"` vs `"code"` classification.
-  - Added `technical_signals.py` (`extract_technical_signals`, `aggregate_technical_signals`, `TechnicalSignalAccumulator`) computing `thinking_{calls,chars,est_tokens}`, `compaction_count` (`ctx < 0.55 * prev_ctx` with `prev_ctx > 40k` or `/compact`), and bounded step latencies (`latency_{avg,p50,p95}_ms`), exposed in `reports/<slug>.json` and `history.jsonl` (`thinking_est_tokens`, `compaction_count`, `latency_p95_ms`, `workspace_kinds`) while preserving all legacy fields and shrinking `collector.py` line count.
-  - Added `--json` support across all `cli.py` subcommands (`start`, `add`, `record`/`archive`, `pending`, `list`, `inspect`, `remove`) plus new `update-meta`, `ignore`, and `unignore` subcommands.
-
-### Fixed
-- **`/swarm` Clean Termination, Reviewer Classification & POSIX Worktree Filtering (`ACT-05-02` in `plugin/metrics/collector.py`, `plugin/metrics/pricing.py`, `plugin/hooks/session_start_metrics.py`):**
-  - Added `_has_clean_terminal_tool_call()` (`finish`, `post_message`, `swarm_wait`) and `trailing_after_planner` tracking in `parse_agent_transcript()` (plus `subagent_state` propagation from `collect_run_metrics()`) so `/swarm` workers finishing via `post_message` + `swarm_wait` with consecutive clean `GENERIC(DONE)` steps are no longer marked `INTERRUPTED` even when `subagent_state == "SUBAGENT_STATE_KILLED"`.
-  - Prioritized `reviewer|challenger|auditor` ahead of `worker|builder` in `classify_agent()` so `Swarm Worker (*-reviewer)` classifies as `verification` instead of `build`.
-  - Extended `_is_subagent_worktree()` to ignore POSIX `/gravity-worktrees/` and `/worktrees/` paths in `SessionStart`.
-
-### Added
-- **Session Freshness & In-Place MCP/UI Updates (`R5` in `plugin/mcp/server.py`, `plugin/mcp/ui/app_js.py`):**
-  - Extended `_compute_pending_source_sig`, `_compute_hist_source_sig`, and `_fast_unchanged_signature` to include `subagents/*.json`, `tasks/task-*.log`, and recorded transcript `stat()` tokens so polling invalidates immediately on child or post-record activity.
-  - Added pure in-memory `_compute_recorded_freshness(rec, brain_dir)` (stat fast-path vs `archived_at`/`ended_at`, then RAM-cached `_get_transcript_index`, counting post-`ended_at` / `root_last_step_index` `PLANNER_RESPONSE` calls outside `/gravity-metrics` plus post-`archived_at` `subagents/*.json` / `tasks/task-*.log` files) and enriched `records` copies in `_load_state_snapshot` and `metrics_get_session` (`freshness`) without mutating `history.jsonl`.
-  - Added `update_sealed` / `update` boolean parameters to `metrics_archive_session`, registered canonical alias `metrics_record_session` in `_TOOL_DISPATCH` and `_tool_definitions`, and added the **« Mettre à jour »** action button (`updateRecordedSession`) plus discrete `+N appels` / `MAJ` indicators in the widget detail and `Enregistrées` list.
-- **Native 4-Phase Detection & `record` Lifecycle (`R1–R4` in `plugin/metrics/`, `plugin/hooks/`, `plugin/scripts/cli.py`):**
-  - Added `current_turn_start_step_in_transcript()` (`lifecycle.py`) for `/gravity-architect` auto-capture anchoring, `±2` step deduplication (`find_archived_session`, `upsert_session`, `resolve_sealed_update_target`), `/swarm` + `subagents/*.json` + direct non-studio edit detection for `Production`, and double-quoted `CommandLine` unescaping + `audit_ecosystem.py` / `ecosystem_install.py` / `git ... push` detection for `Vérification & Push`.
-  - Added `cli.py record` (with `archive` alias), `--update` (with `--update-sealed` alias), `record_conversation` export (`metrics/__init__.py`), and `Clôture / Enregistrée` milestone wording.
+- **Hook Runtime & Compat Stubs Retirement (`TASK-MET-03d`):**
+  - Removed duplicated `plugin/hooks/hook_runtime.py` (`147` lines, superseded by `_shared.hook_runtime`).
+  - Removed temporary `PendingBridgeJobsError` and `bridge_db_path` / `bridge_db` no-op compatibility stubs from `plugin/metrics/store.py`, `plugin/metrics/audits_reader.py`, `plugin/metrics/collector.py`, `plugin/metrics/milestone_analyzer.py`, and `plugin/metrics/agent_tree.py`.
+- **Legacy MCP UI, Config & Bridge Links Retirement (`TASK-MET-03c`):**
+  - Removed the remaining legacy MCP UI modules (`plugin/mcp/ui/charts.py`, `plugin/mcp/ui/markdown_view.py`, `plugin/mcp/ui/styles.py`, removing `plugin/mcp/` completely), standalone `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` (`575` lines).
+- **Legacy MCP Core Retirement Lot 1 (`TASK-MET-03b`):**
+  - Removed standalone legacy MCP core modules (`plugin/mcp/__init__.py`, `plugin/mcp/server.py`, `plugin/mcp/widget_html.py`, `plugin/mcp/ui/__init__.py`, `plugin/mcp/ui/app_js.py`) superseded by the unified `gravity_dashboard` MCP App (`DEC-ARCH-01`, `SPI-1`).
+  - Removed obsolete `tests/test_mcp_server.py` (retaining `plugin/mcp/ui/{charts,markdown_view,styles}.py`, `plugin/mcp_config.json`, and `plugin/metrics/bridge_links.py` for Wave W11 `TASK-MET-03c`).
 
 ### Changed
-- **UI, Manifest & Docs Terminology (`Enregistrer`):**
-  - Switched widget labels (`app_js.py`, `charts.py`), `plugin/plugin.json` `suggestedPrompts[1]`, `plugin/rules/AGENTS.md` (`<= 600` B), `plugin/skills/gravity-metrics/SKILL.md`, `plugin/README.md`, and `README.md` from `Archiver` / `Archivées` / `À archiver` to `Enregistrer` / `Enregistrées` / `À enregistrer` while preserving `status: "archived"` on disk for ecosystem compatibility.
-
-### Fixed
-- **False Positives `AUD-04-09` & Native Clean Termination (`plugin/metrics/collector.py`, `plugin/metrics/store.py`, `plugin/scripts/cli.py`, `plugin/hooks/pre_invocation_metrics.py`):**
-  - `AUD-04-09a`: added `--self-archiving` / `self_archiving` propagation across `cli.py`, `pre_invocation_metrics.py`, `store.py`, and `parse_agent_transcript()` so self-archival from the active root session (`cli.py archive` / `add`) no longer flags `clean_termination=False` (`Interrompu`).
-  - `AUD-04-09b`: excluded legitimate remediation `Reviewer` second passes (`source == "workflow"`, `type_name == "reviewer"`) preceded by a `Reviewer` `FAIL` verdict/blocker/major from `duplicate_role_spawns` in `collect_run_metrics()`.
-
-### Changed
-- **Live Gravity Bridge Retirement & `#01–#04` Read-Only Compatibility (`plugin/metrics/`, `plugin/mcp/`, `plugin/hooks/`, `plugin/scripts/`, `README.md`, `plugin/README.md`, `plugin/skills/gravity-metrics/SKILL.md`):**
-  - Retired all live SQLite `bridge.db` reads across `collector.py`, `audits_reader.py` (`_load_bridge_workspace_dirs` removed), `store.py`, `cli.py`, `pre_invocation_metrics.py`, `mcp/server.py`, and `mcp/ui/app_js.py`.
-  - Removed `PendingBridgeJobsError` and unused `bridge_db_path` parameters from `store.py`, removed `plugin/metrics/bridge_links.py` and its live exports from `plugin/metrics/__init__.py`, and removed the `confirmForceArchiveCid` modal and live `has_pending_bridge_jobs` / `bridge_pending_jobs_count` alerts from `app_js.py`.
-  - Preserved read-only rendering (`bridge:N` badges, `bridge_sessions`, workspace share, and Bridge tree panels) for historical archived reports (`#01–#04`) across `history.py`, `markdown_report.py`, `mcp/server.py`, and `app_js.py`, and aligned MCP, closure, workflow, lifecycle, and `#01–#04` compatibility tests (`tests/test_mcp_server.py`, `tests/test_bridge_v030.py`, `tests/test_closure_and_pending_hygiene.py`, `tests/test_workflow_and_pending_v042.py`, `tests/test_lifecycle_and_ux_v050.py`).
-
-### Added
-- **Validator Integrity Hardening (`INT-01`, `INT-03`, `INT-04`, `INT-06` in `plugin/scripts/validate.py`):**
-  - `INT-01`: enforced `ALLOWED_UI_MODES = frozenset({"none", "core", "transition-sidecar", "transition-mcp", "mcp-app"})` on `config/module.json` `ui.mode`.
-  - `INT-03`: promoted `suggestedPrompts` checks in `plugin/plugin.json` to blocking errors (exactly 3 non-empty strings, `<= 100` chars each, `/cmd — résumé` format).
-  - `INT-04`: enforced UTF-8 without BOM and LF line endings across all `.py`, `.md`, `.json` files under the plugin root (and in `_read_json_no_bom`) without duplicating D4 Markdown errors.
-  - `INT-06`: added OS personal home-directory path (Windows, macOS, and Linux user-profile prefixes, excluding `~`) and `file:` URI leak detection across `.py`, `.md`, `.json`, `.html`, `.svg` (excluding `tests/`).
-
-### Changed
-- **Docs & Manifests Alignment (`DOC-02`, `DOC-09`):**
-  - Updated `plugin/plugin.json` `suggestedPrompts[0]` (strict read-only phrasing) and `suggestedPrompts[2]` (`/gravity-metrics start — ...` format, `<= 100` chars).
-  - Removed forward-looking phrasing from `plugin/config/module.json`, `README.md`, and `plugin/README.md`, aligned `v0.5.0` references to `v0.5.1` in `README.md`, and documented `SessionStart` (`session_start_metrics.py`, `session_meta.json`, excluding worktrees), auto-start `/gravity-architect "<instruction>"`, and `cli.py start` in `AGENTS.md`, `plugin/skills/gravity-metrics/SKILL.md`, and `plugin/rules/AGENTS.md` (within byte budgets).
-
-### Fixed
-- **Bridge Multi-Wave Duplicate Exclusion & Milestone Accuracy (`AUD-03-01`, `AUD-03-05` in `plugin/metrics/collector.py`):**
-  - `AUD-03-01`: excluded `source == "bridge"` children from `dup_groups_map` so multi-repo/multi-wave Bridge dispatches do not trigger `duplicate_role_spawns` false positives while preserving native subagent duplicate detection.
-  - `AUD-03-05`: computed `first_prod_step = min(link_steps + child_steps)` and `last_prod_step = max(link_steps + child_steps)` in `_compute_session_milestones()` and `_compute_pending_milestones()`, gating `verif_step` / `has_verif` on `not bridge_pending_jobs` (resp. `not pending_jobs`) and `st_i > last_prod_step` while preserving 4-phase and 2-phase fallback JSON compatibility.
-
-### Added (Earlier Unreleased)
-- **Auto-Capture `/gravity-architect` & CLI `start` (`plugin/hooks/pre_invocation_metrics.py`, `plugin/metrics/lifecycle.py`, `plugin/scripts/cli.py`):**
-  - Added idempotent `overwrite: bool = False` (default) on `start_active_capture()` and extracted `next_step_index_in_transcript()` in `lifecycle.py` (re-exported from `metrics/__init__.py`).
-  - Auto-started an idempotent zero-token `architect-<slug>` capture (`invocationNum == 0`, `overwrite=False`) in `pre_invocation_metrics.py` on `/gravity-architect <instruction>` (excluding `init|add|sync|status|archive|audit` and preserving passthrough `{}`), while explicit `/gravity-metrics start` passes `overwrite=True`.
-  - Added `cli.py start <cid> [-l LABEL] [--step N] [--workspace PATH] [--brain-dir PATH] [--store PATH] [--history PATH]` (`overwrite=True`).
-- **End-of-Cycle `--update-sealed` Flag (`plugin/metrics/store.py`, `plugin/scripts/cli.py`):**
-  - Added `update_sealed: bool = False` to `record_session_metrics()` and `archive_conversation()` (default `False` preserves strict immutability) and exposed `--update-sealed` on `cli.py archive` and `cli.py add` to refresh an already-sealed window (e.g., after a final `git push`) while still enforcing `PendingBridgeJobsError` unless `--force` is passed.
-- **Anti-Noise Pending Filter & `--all` CLI Flag (`plugin/metrics/collector.py`, `plugin/scripts/cli.py`):**
-  - Tracked `has_work_activity` on `PLANNER_RESPONSE` tool calls (`write_file`, `write_to_file`, `edit_file`, `replace_file_content`, `multi_replace_file_content`, `run_workflow`, `invoke_subagent`, `swarm`) in `_get_transcript_index()` and added `include_noise: bool = False` to `list_pending_sessions()` (default hides consultative sessions lacking links, children, active captures, and work tools; exposed via `cli.py pending --all`).
-- **Neon/Flash Pricing Aliases (`plugin/config/pricing_catalog.json`):**
-  - Added `gemini-pro-orchestrator-neon*` (`$3.00 / $0.15 / $15.00`) and `gemini-flash-worker-agy*` (`$0.75 / $0.075 / $3.75` in `2026_nov_standard`, `$1.50 / $0.15 / $7.50` in `2027_standard`) while preserving `_fallback` (`is_fallback: true`) for unknown models.
-- **Detailed Anomaly Counters & Cold-Cache Telemetry (`plugin/metrics/collector.py`, `tests/test_neon_errors_cold_cache.py`):**
-  - Preserved `error_steps` / `total_error_steps` (`status == "ERROR"`) and `error_rate_pct`, and added `invalid_steps` (`status == "INVALID"`), `shell_nonzero_steps` (`GENERIC` steps with line-anchored `Command exited with code <N>` where `N != 0`, ignoring `Command output:`/`Showing lines ` bodies), and `total_anomalies` per agent, bucket, and `summary`.
-  - Added `efficiency_and_waste["cold_cache_waste"]` (`calls`, `input_tokens`, `cost_usd`, `share_of_total_cost_pct`) classifying cold/near-cold `PLANNER_RESPONSE` calls (`(cache == 0 and in > 10k)` or `(in > 50k and cache / (in + cache) < 0.25)`).
-- **MCP Apps Host Capability Check (`plugin/mcp/server.py`, `tests/test_mcp_server.py`):**
-  - Inspected `params.capabilities` and `params.clientInfo` during `initialize` (`MIN_ANTIGRAVITY_MCP_APP_VERSION = (2, 34, 0)`) and appended a non-fatal `[WARN UI]` notice to `open_metrics_dashboard` text output only when the client is identified without MCP Apps support (`isError: false`, zero false positives on minimal/uninitialized calls).
-
-### Changed
-- **NFKD Slugification & Chained-Command Stripping (`plugin/metrics/collector.py`):**
-  - Normalized accents via `unicodedata.normalize("NFKD", ...)` in `slugify_label()`.
-  - Extended `_GRAVITY_LEADING_AXES_RE` (namespace guard `(?::[a-z0-9_-]+)?(?=\s|$)`, `/boost`, `/grill-me`, `/plan`, `/caveman`, `quick`/`standard`/`deep`, single subcommand slot preserving `/gravity-bridge send audit bridge`) with fixed-point `_strip_leading_gravity_commands()` across `_extract_label_keywords()` and `_clean_pending_title()`.
-  - Expanded `suggest_auto_label(..., max_len=64)` to 5 keywords bounded cleanly via `slugify_label()`.
-- **End-of-Cycle Archival & Worktree Exclusion (`plugin/hooks/pre_invocation_metrics.py`, `plugin/hooks/session_start_metrics.py`, `plugin/rules/AGENTS.md`, `plugin/skills/gravity-metrics/SKILL.md`, `README.md`, `plugin/README.md`):**
-  - Removed premature auto-archiving on `/gravity-architect archive <slug>` from `PreInvocation` (`_ARCHITECT_ARCHIVE_CMD_RE`, `_handle_architect_archive_passthrough()`), retaining `parse_architect_archive_prompt()` / `is_architect_archive` in `collector.py` solely for the passive `Clôture / Archivé` milestone.
-  - Updated `session_start_metrics.py` to skip subagent worktree paths containing `/.gemini/antigravity/worktrees/` or `\worktrees\` without writing to `session_meta.json`.
-- **CLI Inspect & Session Detail Reports (`plugin/metrics/markdown_report.py`, `README.md`, `plugin/README.md`):**
-  - Updated `render_inspect_text()` to display `invalid=<N> | shell!=0=<M>` when present, `coldCache=<N> ($<usd>, <pct>%)` in `Alertes`, `[fallback]` suffixes in `--- Par modèle ---`, and a warning line when `unmatched_models` is non-empty.
-  - Updated `render_session_detail_markdown()` to surface `ERROR / INVALID / shell!=0` counts and `cold_cache_waste` in `## 6. Diagnostic & Gaspillages` with full backward compatibility on legacy payloads.
-
-### Fixed
-- **Validator Brain Isolation & Markdown Escaping Test (`plugin/scripts/validate.py`, `tests/test_lifecycle_and_ux_v050.py`):**
-  - Isolated `ANTIGRAVITY_BRAIN_DIR` to a temporary directory in `_run_hook_dry_runs()` and `_run_mcp_dry_run()` to prevent scanning the user's brain directory.
-  - Aligned `test_markdown_view_no_loop_on_gt_entities` with `esc(val)` from `app_js.py` and asserted `!loopCheck.includes('&amp;gt;')`.
-- **Dashboard UI Access Labels (`install.py`, `plugin/metrics/markdown_report.py`, `README.md`):**
-  - Replaced obsolete `Plugins` menu UI access labels for Gravity Metrics with the current Antigravity UI entry points (left sidebar `Gravity Metrics` or `+` menu in the right side pane).
+- **Rules/AGENTS Alignment, `evo`/`--no-verify` Bypass & Portability Remediation (`TASK-MET-03d`):**
+  - Updated `plugin/rules/AGENTS.md` (`<= 600` B) and root `AGENTS.md` (`<= 2500` B) to remove retired legacy references (`open_metrics_dashboard`, `mcp/server.py`, `mcp_config.json`, `transition-mcp`, `cost-telemetry`, active `SessionStart`, Bridge guard) and align with `open_gravity_dashboard` (`gravity_dashboard`), disabled `SessionStart`, `SPI-1..4`, `ui.mode: "none"`, `_shared/` SSOT, and `refonte/socle`.
+  - Updated `plugin/hooks/pre_invocation_metrics.py` (`_match_capture_policy`) to strip/bypass leading `evo` / `--no-verify` modifiers under `consultative_bypass`, aligned `plugin/metrics/collector.py` fallback (`endswith("-studio")`), and guarded POSIX `fcntl` contention in `tests/test_metrics.py` for Windows compatibility (`R4`), with new `SPI-2` modifier tests in `tests/test_hook.py`.
+- **Split `SessionStart` Disabled in `plugin/hooks.json` & W12 Tests (`TASK-MET-03d`, `plugin/hooks.json`, `tests/`):**
+  - Separated `SessionStart` (`hooks/session_start_metrics.py`) into dedicated `"gravity-metrics-session"` entry with `"enabled": false` while keeping `PreInvocation` (`hooks/pre_invocation_metrics.py`) active (`"enabled": true`) in `"gravity-metrics-command"`.
+  - Added explicit `hooks.json` / `hook_runtime.py` retirement assertions in `tests/test_hook.py` and `tests/test_lifecycle_and_ux_v050.py`, tightened `tests/test_metrics.py::test_stdlib_only_and_no_forbidden_jargon` (`hook_runtime` disallowed), and removed `bridge_db` args from `tests/test_audits_reader.py`.
+- **Legacy Test Suite Cleanup & `dashboard_provider` Migration (`TASK-MET-03c`, `tests/`):**
+  - Migrated `tests/test_bridge_v030.py`, `tests/test_workflow_and_pending_v042.py`, `tests/test_lifecycle_and_ux_v050.py`, and `tests/test_metrics.py` onto `dev` `list_pending_sessions` and `SPI-1` `dashboard_provider` semantics (removing `bridge_links`, `PendingBridgeJobsError`, `plugin/mcp/server.py`, and `markdown_view` assertions while preserving RO historical compatibility, strict pending filtering, and `record --from-step` tests).
+- **Installer, Validator, CLI, Workspace Resolver & `SKILL.md` (`TASK-MET-03a`, `install.py`, `plugin/`):**
+  - Slimmed `install.py` (`89` lines) onto `_shared.installer_core` preserving all 11 CLI flags (`--scope`, `--workspace`, `--target`, `--method`, `--force`, `--skip-validate`, `--strict`, `--no-fix-python`, `--dry-run`, `--check`, `--uninstall`), `0755` POSIX exec bits on `EXEC_SCRIPTS`, Windows `"python3"` rewriting, and rollback on `validate.py --strict` failure.
+  - Slimmed `plugin/scripts/validate.py` (`246` lines) onto `_shared.validator_core`, removing `mcp`, `widget_html`, `bridge_links`, and `hook_runtime` from `ALLOWED_LOCAL_MODULES`, enforcing `SKILL.md` description `<= 160` chars, and accepting `"enabled": false` on `SessionStart` in `hooks.json`.
+  - Ported `dev` `plugin/scripts/cli.py` (`683` lines, all 10 subcommands with `--json`, `record --update`, `--self-recording`), removing all `--bridge-db` flags, `bridge_links`, and `PendingBridgeJobsError` references, and adding `$GRAVITY_HOME/workflow/workspaces/<slug>-<sha256[:8]>/runs.jsonl` discovery (`T3-P25`) in `_discover_runs_jsonl`.
+  - Ported `plugin/metrics/workspace_resolver.py` (`337` lines, delegating worktree normalization to `_shared.transcript_reader` while retaining documented historical `*-studio` -> `"atelier"` classification) and updated `plugin/metrics/__init__.py` (`187` lines; removed `bridge_links`/`PendingBridgeJobsError` exports; exported `technical_signals`, `workspace_resolver`, and split collector symbols).
+  - Trimmed `plugin/skills/gravity-metrics/SKILL.md` description `<= 160` chars (EN) reflecting `SessionStart` disabled and `open_gravity_dashboard` (`gravity_dashboard`); cleaned `gravity-studio` residuals from `README.md`, `plugin/README.md`, and `tests/`; added `tests/test_technical_and_workspace.py`.
+- **Hooks `_shared.hook_runtime`, `SPI-2` Capture Policy, `SPI-1` Dashboard Provider, `audits_reader` & `module.json` (`TASK-MET-02`, `plugin/`):**
+  - Migrated `plugin/hooks/pre_invocation_metrics.py` and `plugin/hooks/session_start_metrics.py` onto `_shared.hook_runtime` (zero local `hook_runtime` imports); replaced hardcoded `/gravity-architect` regexes, `collector._extract_label_keywords`, and `PendingBridgeJobsError` with dynamic `SPI-2` `capture_policy` resolution from `$GRAVITY_HOME/core/modules.json` (supporting both `validator_core` list and `T3-P14` dict schemas); switched dashboard handoff wording to `open_gravity_dashboard` (`gravity_dashboard`) and ported `dev` `record`/`--update` command handling; retained `_is_subagent_worktree` wrapper in `session_start_metrics.py` delegating to `_shared.transcript_reader.is_worktree_path` (`T3-P29`).
+  - Added `plugin/scripts/dashboard_provider.py` (`SPI-1`, `< 550` lines) implementing `--view metrics|session-detail|audit-detail`, `--since-signature`, and lifecycle `--action` (`record`, `update`, `update-meta`, `ignore`, `unignore`, `remove`) JSON/CLI contracts consumed by `gravity`.
+  - Cleaned `plugin/metrics/audits_reader.py` to remove `.bridge_links`/`sqlite3` coupling while enforcing strict read-only `audits/agents/*.md` access (excluding `audits/code/`, symlinks, and NTFS junctions via `_shared.path_safety`).
+  - Updated `plugin/config/module.json` with `ui.mode: "none"`, `dashboard` (`SPI-1`), and `signals.produces: ["session-metrics"]` (`SPI-3`), plus unit tests in `tests/test_hook.py`, `tests/test_audits_reader.py`, and `tests/test_dashboard_provider.py`.
+- **Locks, Atomic I/O, `SPI-3` Signals, `technical_signals` & Pricing (`TASK-MET-01b`, `plugin/metrics/`, `plugin/config/`):**
+  - Migrated `plugin/metrics/history.py`, `plugin/metrics/lifecycle.py`, and `plugin/metrics/store.py` onto `_shared.file_lock` (fail-closed `TimeoutError` on POSIX & Windows) and `_shared.atomic_io` (`newline="\n"`, UTF-8 no-BOM, symlink/junction rejection).
+  - Updated `plugin/metrics/store.py` to remove `bridge_links`/`PendingBridgeJobsError` enforcement (keeping temporary compat stubs until W12), port `dev` `update_sealed`/`self_archiving` lifecycle, and emit `signal_v1` (`session-metrics`) via `_shared.signal_bus` with strict kebab-case slug normalization (`SPI-3`).
+  - Ported `plugin/metrics/technical_signals.py` and `plugin/config/pricing_catalog.json` aliases (`gemini-pro-orchestrator-neon*`, `gemini-flash-worker-agy*`) from `dev`.
+- **Collector SRP Split & `_shared` Sync (`TASK-MET-01a`, `plugin/metrics/`):**
+  - Synced read-only `plugin/_shared/` and `plugin/.shared_manifest.json` from `gravity/shared/gravity_shared/`.
+  - Split `plugin/metrics/collector.py` into 5 modules strictly `< 750` lines (`prompt_classifier.py`, `transcript_index.py`, `agent_tree.py`, `milestone_analyzer.py`, `collector.py` façade), delegating transcript/worktree/ISO/shell-exit helpers to `_shared.transcript_reader`, removing `bridge_links` coupling, preserving `dev` collector fixes (`invalid_steps`, `shell_nonzero_steps`, `cold_cache_waste`, `technical_signals`, `by_workspace`, anti-noise `pending`, `self_archiving`), and adding `$GRAVITY_HOME/workflow/workspaces/<slug>-<sha256[:8]>/profile.json` resolution (`T3-P25`).
 
 ## [0.5.1] - 2026-11-24
 

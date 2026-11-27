@@ -187,10 +187,10 @@ def classify_agent(type_name: str, role: str) -> str:
         return "discovery"
     if re.search(r"test.?writer|e2e.*writer", rl):
         return "testing"
-    if re.search(r"reviewer|challenger|auditor", rl):
-        return "verification"
     if re.search(r"worker|builder", rl):
         return "build"
+    if re.search(r"reviewer|challenger|auditor", rl):
+        return "verification"
     if tn in TYPE_TO_CATEGORY:
         return TYPE_TO_CATEGORY[tn]
     return "other"

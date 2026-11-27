@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Façade publique du moteur de métriques Gravity Metrics (100 % stdlib Python 3)."""
 
+from .agent_tree import (
+    discover_agent_tree,
+    discover_workflow_children,
+    is_bridge_child_conversation,
+    list_gravity_conversations,
+    load_known_child_conversation_ids,
+    resolve_conversation_id_in_brain,
+)
 from .audits_reader import (
     MAX_AUDIT_BYTES,
     build_audit_links_by_session,
@@ -9,28 +17,16 @@ from .audits_reader import (
     list_audits_bundle,
     read_audit,
 )
-from .collector import (
-    METRICS_MARKER,
-    METRICS_OPEN_MARKER,
-    classify_metrics_prompt,
-    collect_run_metrics,
-    discover_agent_tree,
-    discover_workflow_children,
-    extract_user_request_text,
-    is_bridge_child_conversation,
-    is_gravity_metrics_capture_prompt,
-    is_gravity_metrics_prompt,
-    is_gravity_session_prompt,
-    list_gravity_conversations,
-    list_pending_sessions,
-    load_known_child_conversation_ids,
-    parse_agent_transcript,
-    parse_architect_archive_prompt,
-    read_gravity_profile_summary,
-    resolve_conversation_id_in_brain,
-    resolve_gravity_window,
-    slugify_label,
-    suggest_auto_label,
+from .collector import collect_run_metrics
+from .history import (
+    find_archived_session,
+    history_lock,
+    load_history,
+    remove_session,
+    resolve_session_index,
+    save_history,
+    to_session_record,
+    upsert_session,
 )
 from .lifecycle import (
     current_turn_start_step_in_transcript,
@@ -44,16 +40,6 @@ from .lifecycle import (
     start_active_capture,
     unignore_session,
 )
-from .history import (
-    find_archived_session,
-    history_lock,
-    load_history,
-    remove_session,
-    resolve_session_index,
-    save_history,
-    to_session_record,
-    upsert_session,
-)
 from .markdown_report import (
     render_chat_summary_markdown,
     render_inspect_text,
@@ -62,6 +48,10 @@ from .markdown_report import (
     render_pending_table,
     render_session_detail_markdown,
     render_terminal_table,
+)
+from .milestone_analyzer import (
+    list_pending_sessions,
+    resolve_gravity_window,
 )
 from .pricing import (
     CATEGORY_LABELS_FR,
@@ -76,7 +66,19 @@ from .pricing import (
     load_pricing_catalog,
     resolve_model_pricing,
 )
-
+from .prompt_classifier import (
+    METRICS_MARKER,
+    METRICS_OPEN_MARKER,
+    classify_metrics_prompt,
+    extract_user_request_text,
+    is_gravity_metrics_capture_prompt,
+    is_gravity_metrics_prompt,
+    is_gravity_session_prompt,
+    parse_architect_archive_prompt,
+    read_gravity_profile_summary,
+    slugify_label,
+    suggest_auto_label,
+)
 from .store import (
     apply_remove,
     archive_conversation,
@@ -92,8 +94,10 @@ from .technical_signals import (
     aggregate_technical_signals,
     extract_technical_signals,
 )
+from .transcript_index import parse_agent_transcript
 from .workspace_resolver import (
     classify_workspace_kind,
+    discover_known_repos,
     normalize_worktree_path,
     resolve_agent_workspace,
 )
@@ -176,6 +180,7 @@ __all__ = [
     "update_session_metadata",
     "extract_technical_signals",
     "aggregate_technical_signals",
+    "discover_known_repos",
     "resolve_agent_workspace",
     "normalize_worktree_path",
     "classify_workspace_kind",

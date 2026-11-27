@@ -2,9 +2,11 @@
 """CLI unique pour mesurer, historiser et comparer les sessions Gravity (100 % stdlib)."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import List, Optional, Tuple
 
@@ -52,14 +54,50 @@ def _configure_stdio() -> None:
                 pass
 
 
+def _workflow_home() -> Path:
+    env_wf = os.environ.get("GRAVITY_WORKFLOW_HOME", "").strip()
+    if env_wf:
+        return Path(env_wf).expanduser()
+    env_g = os.environ.get("GRAVITY_HOME", "").strip()
+    if env_g:
+        return Path(env_g).expanduser() / "workflow"
+    return Path.home() / ".gemini" / "gravity" / "workflow"
+
+
 def _discover_runs_jsonl(workspace: Optional[Path] = None) -> List[Path]:
-    candidates = [
-        Path.cwd() / ".agents" / "gravity" / "observability" / "runs.jsonl",
-        Path.cwd() / "gravity" / "observability" / "runs.jsonl",
-    ]
-    if workspace is not None:
-        candidates.insert(0, workspace / ".agents" / "gravity" / "observability" / "runs.jsonl")
-    return [p for p in candidates if p.is_file()]
+    """Découvre `runs.jsonl` dans `$GRAVITY_HOME/workflow/workspaces/<slug>-<sha256[:8]>/` et `.agents/`."""
+    candidates: List[Path] = []
+    wf_ws_dir = _workflow_home() / "workspaces"
+    targets: List[Path] = [workspace.expanduser()] if workspace is not None else [Path.cwd()]
+    for base in targets:
+        try:
+            resolved = base.resolve()
+        except OSError:
+            resolved = base
+        slug = re.sub(r"[^a-z0-9]+", "-", resolved.name.lower()).strip("-")[:32] or "workspace"
+        digest = hashlib.sha256(os.path.normcase(str(resolved)).encode("utf-8")).hexdigest()[:8]
+        candidates.append(wf_ws_dir / f"{slug}-{digest}" / "runs.jsonl")
+        candidates.append(base / ".agents" / "gravity-workflow" / "runs.jsonl")
+        candidates.append(base / ".agents" / "gravity-workflow" / "observability" / "runs.jsonl")
+        candidates.append(base / ".agents" / "gravity" / "observability" / "runs.jsonl")
+    if workspace is None:
+        if wf_ws_dir.is_dir():
+            try:
+                candidates.extend(sorted(wf_ws_dir.glob("*/runs.jsonl")))
+            except OSError:
+                pass
+        candidates.append(Path.cwd() / "gravity" / "observability" / "runs.jsonl")
+    seen: set[Path] = set()
+    found: List[Path] = []
+    for cand in candidates:
+        try:
+            rcand = cand.resolve()
+        except OSError:
+            rcand = cand
+        if rcand not in seen and cand.is_file():
+            seen.add(rcand)
+            found.append(cand)
+    return found
 
 
 def _pick_conversation_interactively(
@@ -199,9 +237,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
             return _emit_error(args, "Identifiant de conversation ou --latest requis avec --json.")
         else:
             try:
-                cid, _title = _pick_conversation_interactively(
-                    brain_dir, args.all, ws_path
-                )
+                cid, _title = _pick_conversation_interactively(brain_dir, args.all, ws_path)
             except (EOFError, KeyboardInterrupt):
                 print("\nAnnulé.", file=sys.stderr)
                 return 1
@@ -504,7 +540,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--workspace", type=Path, default=None, help="Workspace projet pour lire (en lecture seule) nom et profil Gravity.")
     p_add.add_argument("--profile", default="2026_nov_standard", help="Profil tarifaire (défaut: 2026_nov_standard).")
     p_add.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
-    p_add.add_argument("--bridge-db", type=Path, default=None, help=argparse.SUPPRESS)
     p_add.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH, help="Catalogue tarifaire JSON.")
     p_add.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_add.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
@@ -546,7 +581,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_arch.add_argument("--workspace", type=Path, default=None, help="Workspace projet pour lire nom et profil Gravity.")
     p_arch.add_argument("--profile", default="2026_nov_standard", help="Profil tarifaire.")
     p_arch.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
-    p_arch.add_argument("--bridge-db", type=Path, default=None, help=argparse.SUPPRESS)
     p_arch.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH, help="Catalogue tarifaire JSON.")
     p_arch.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
     p_arch.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
@@ -571,7 +605,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_pend = sub.add_parser("pending", help="Liste les sessions Gravity racines non encore enregistrées (zéro écriture).")
     p_pend.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
-    p_pend.add_argument("--bridge-db", type=Path, default=None, help=argparse.SUPPRESS)
     p_pend.add_argument("--store", type=Path, default=None, help="Dossier centralisé.")
     p_pend.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")
     p_pend.add_argument("--all", action="store_true", help="Inclut aussi les sessions consultatives sans outil de travail.")
@@ -589,7 +622,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_insp.add_argument("target", help="Label ou UUID (ou préfixe d'UUID) de la session.")
     p_insp.add_argument("--profile", default="2026_nov_standard", help="Profil tarifaire.")
     p_insp.add_argument("--brain-dir", type=Path, default=default_brain_dir(), help="Répertoire des conversations.")
-    p_insp.add_argument("--bridge-db", type=Path, default=None, help=argparse.SUPPRESS)
     p_insp.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH, help="Catalogue tarifaire JSON.")
     p_insp.add_argument("--store", type=Path, default=None, help="Dossier centralisé (défaut: $GRAVITY_METRICS_HOME > $GRAVITY_HOME/metrics > ~/.gemini/gravity/metrics).")
     p_insp.add_argument("--history", type=Path, default=None, help="Chemin explicite vers history.jsonl.")

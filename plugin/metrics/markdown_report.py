@@ -29,7 +29,7 @@ def _mode_cell_md(rec: Dict[str, Any]) -> str:
     feats = [str(f) for f in (rec.get("features_used") or []) if f != mode]
     gp = _md_cell(rec.get("gravity_profile"))
     bridge_txt = _md_cell(_bridge_badge(rec))
-    status_txt = _md_cell(_status_badge(rec), "enregistrée")
+    status_txt = _md_cell(_status_badge(rec), "archivé")
     cell = f"`{mode}`" + (f" ({', '.join(feats)})" if feats else "")
     if bridge_txt:
         cell += f" · `{bridge_txt}`"
@@ -172,7 +172,7 @@ def render_metrics_markdown(records: List[Dict[str, Any]]) -> str:
         [
             "",
             "---",
-            "*Commande : `/gravity-metrics` · Widget interactif : **barre latérale gauche (`Gravity Metrics`) / menu `+` panneau droit***",
+            "*Commande : `/gravity-metrics` · Widget interactif : **Plugins > Gravity Metrics***",
             "",
         ]
     )
@@ -184,7 +184,7 @@ def render_terminal_table(records: List[Dict[str, Any]]) -> str:
     if not records:
         return "Aucune session enregistrée dans l'historique."
     header = (
-        f"{'Date':16} {'Label':24} {'Projet':14} {'Mode':12} {'Statut':12} {'Modèle':22} "
+        f"{'Date':16} {'Label':24} {'Projet':14} {'Mode':12} {'Statut':8} {'Modèle':22} "
         f"{'Coût':>9} {'Cache%':>7} {'Ag':>4} {'Calls':>6} {'Durée':>8} {'Alertes':11} Note"
     )
     sep = "-" * len(header)
@@ -195,7 +195,7 @@ def render_terminal_table(records: List[Dict[str, Any]]) -> str:
         mode = str(rec.get("execution_mode") or "single")
         b_cnt = int(rec.get("bridge_children_count") or 0)
         mode_cell = f"{mode}+B{b_cnt}" if b_cnt > 0 and mode != "bridge" else (f"bridge:{b_cnt}" if b_cnt > 0 else mode)
-        status_s = _status_badge(rec)[:12]
+        status_s = _status_badge(rec)[:8]
         mod = str(rec.get("primary_model") or "")[:22]
         cost_s = f"${float(rec.get('cost_usd') or 0.0):.4f}"
         cache_s = f"{float(rec.get('cache_hit_rate_pct') or 0.0):.1f}%"
@@ -205,18 +205,18 @@ def render_terminal_table(records: List[Dict[str, Any]]) -> str:
         al_s = _alerts_str(rec)
         note_s = str(rec.get("note") or "")[:36]
         lines.append(
-            f"{_session_date_str(rec):16} {lbl:24} {proj:14} {mode_cell[:12]:12} {status_s:12} {mod:22} "
+            f"{_session_date_str(rec):16} {lbl:24} {proj:14} {mode_cell[:12]:12} {status_s:8} {mod:22} "
             f"{cost_s:>9} {cache_s:>7} {ag_s:>4} {calls_s:>6} {dur_s:>8} {al_s:11} {note_s}"
         )
     lines.append(sep)
-    lines.append(f"Total : {len(records)} session(s) enregistrée(s)")
+    lines.append(f"Total : {len(records)} session(s) archivée(s)")
     return "\n".join(lines)
 
 
 def render_pending_table(pending: List[Dict[str, Any]]) -> str:
-    """Formate la file des sessions Gravity en attente d'enregistrement pour le terminal."""
+    """Formate la file des sessions Gravity en attente d'archivage pour le terminal."""
     if not pending:
-        return "Aucune session Gravity en attente d'enregistrement."
+        return "Aucune session Gravity en attente d'archivage."
     header = (
         f"{'ID':10} {'MAJ (UTC)':16} {'Appels':>6} {'Bridge':18} {'Fenêtre':16} Titre"
     )
@@ -238,7 +238,7 @@ def render_pending_table(pending: List[Dict[str, Any]]) -> str:
         title = str(item.get("title") or "")[:48]
         lines.append(f"{cid:10} {upd:16} {calls:>6} {b_cell[:18]:18} {wmode:16} {title}")
     lines.append(sep)
-    lines.append(f"En attente : {len(pending)} session(s) (`cli.py record <id>`)")
+    lines.append(f"En attente : {len(pending)} session(s) (`cli.py archive <id>`)")
     return "\n".join(lines)
 
 
@@ -246,11 +246,11 @@ def render_pending_markdown(pending: List[Dict[str, Any]]) -> str:
     """Formate la file `pending` pour affichage chat lors de `/gravity-metrics pending`."""
     lines = [
         METRICS_OPEN_MARKER,
-        f"### Gravity Metrics — Sessions en attente d'enregistrement ({len(pending)})",
+        f"### Gravity Metrics — Sessions en attente d'archivage ({len(pending)})",
         "",
     ]
     if not pending:
-        lines.append("_Aucune session Gravity en attente : tout est enregistré._")
+        lines.append("_Aucune session Gravity en attente : tout est archivé._")
         return "\n".join(lines)
 
     lines.extend(
@@ -275,7 +275,7 @@ def render_pending_markdown(pending: List[Dict[str, Any]]) -> str:
             bridge_cell = "—"
         wmode = _md_cell(item.get("window_mode") or "gravity_session")
         title = _md_cell(item.get("title") or "—")
-        cmd = f"`/gravity-metrics record {short_id}`"
+        cmd = f"`/gravity-metrics archive {short_id}`"
         lines.append(
             f"| `{short_id}` | `{upd}` | {calls} | {bridge_cell} | `{wmode}` | {title} | {cmd} |"
         )
@@ -290,16 +290,9 @@ def render_inspect_text(metrics: Dict[str, Any]) -> str:
     eff = metrics["efficiency_and_waste"]
     dup = eff["duplicate_role_spawns"]
     rw = eff["rewind_waste"]
-    cc = eff.get("cold_cache_waste") or {}
-    cc_calls = int(cc.get("calls") or 0)
-    cc_cost = float(cc.get("cost_usd") or 0.0)
-    cc_pct = float(cc.get("share_of_total_cost_pct") or 0.0)
     intr = eff["interrupted_agents"]
     cb = eff["context_bloat"]
     win = metrics.get("window") or {}
-    inv_steps = int(s.get("total_invalid_steps") or 0)
-    shell_nz = int(s.get("total_shell_nonzero_steps") or 0)
-    extra_err = f" | invalid={inv_steps} | shell!=0={shell_nz}" if (inv_steps > 0 or shell_nz > 0) else ""
 
     lines = [
         f"=== Inspection Gravity [{metrics['label']}] ({metrics['root_conversation_id']}) ===",
@@ -312,11 +305,11 @@ def render_inspect_text(metrics: Dict[str, Any]) -> str:
         [
             f"Mode      : {s.get('execution_mode', 'single')} (features: {', '.join(s.get('features_used') or ['single'])})",
             f"Fenêtre   : {s['first_ts']} -> {s['last_ts']} ({_fmt_dur(s['wall_clock_s'])}, parallélisme {s['parallelism_factor']:.2f}x) [{_window_desc(win)}]",
-            f"Activité  : {s['total_agents']} agents (prof. {s['max_tree_depth']}) | {s['total_llm_calls']:,} appels LLM | {s['total_tool_calls']:,} outils | {s['total_error_steps']} erreurs ({s['error_rate_pct']:.2f}%){extra_err}",
+            f"Activité  : {s['total_agents']} agents (prof. {s['max_tree_depth']}) | {s['total_llm_calls']:,} appels LLM | {s['total_tool_calls']:,} outils | {s['total_error_steps']} erreurs ({s['error_rate_pct']:.2f}%)",
             f"Tokens    : in={s['input_tokens']:,} | cache={s['cache_read_tokens']:,} ({s['cache_hit_rate_pct']:.2f}%) | out={s['output_tokens']:,}",
             f"Coût      : ${c['total_usd']:.4f} (in ${c['input_usd']:.4f} + cache ${c['cache_read_usd']:.4f} + out ${c['output_usd']:.4f}) | économie cache ${c['cache_savings_usd']:.4f}",
             f"Proj 2027 : ${p.get('total_usd', 0.0):.4f}",
-            f"Alertes   : doublons={dup['duplicate_agent_count']} (${dup['duplicate_cost_usd']:.4f}) | rewinds={rw['rewind_calls']} (${rw['rewind_cost_usd']:.4f}) | interrompus={intr['count']} (${intr['total_cost_usd']:.4f}) | maxCtx={cb['max_context_tokens_overall']:,} | coldCache={cc_calls} (${cc_cost:.4f}, {cc_pct:.1f}%)",
+            f"Alertes   : doublons={dup['duplicate_agent_count']} (${dup['duplicate_cost_usd']:.4f}) | rewinds={rw['rewind_calls']} (${rw['rewind_cost_usd']:.4f}) | interrompus={intr['count']} (${intr['total_cost_usd']:.4f}) | maxCtx={cb['max_context_tokens_overall']:,}",
             "",
             "--- Par catégorie ---",
         ]
@@ -354,14 +347,10 @@ def render_inspect_text(metrics: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("--- Par modèle ---")
     for m_name, m_data in metrics["by_model"].items():
-        fb_tag = " [fallback]" if m_data.get("is_fallback") else ""
         lines.append(
             f"  {m_name:32s} : {m_data['calls']:4d} calls | "
-            f"${m_data['cost_usd']['total_usd']:7.4f} ({m_data['cost_share_pct']:5.1f}%){fb_tag}"
+            f"${m_data['cost_usd']['total_usd']:7.4f} ({m_data['cost_share_pct']:5.1f}%)"
         )
-    unmatched = (metrics.get("data_quality") or {}).get("unmatched_models") or []
-    if unmatched:
-        lines.append(f"  [!] Modèles non catalogués (tarif fallback) : {', '.join(unmatched)}")
 
     lines.append("")
     lines.append("--- Top 10 agents par coût ---")
@@ -395,7 +384,7 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
         "[← Retour aux métriques globales](../METRICS.md)",
         "",
         f"- **Conversation racine** : `{metrics['root_conversation_id']}`",
-        "- **Statut** : `enregistrée`",
+        "- **Statut** : `archivé`",
     ]
     if metrics.get("project"):
         lines.append(f"- **Projet** : `{metrics['project']}`")
@@ -410,12 +399,6 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
         if lifespans_s is not None
         else f"actif : {_fmt_dur(s['sum_agent_active_s'])}"
     )
-    inv_steps = int(s.get("total_invalid_steps") or 0)
-    shell_nz = int(s.get("total_shell_nonzero_steps") or 0)
-    total_anom = int(s.get("total_anomalies") if s.get("total_anomalies") is not None else (int(s["total_error_steps"]) + inv_steps + shell_nz))
-    err_detail = f"Erreurs : {s['total_error_steps']} ({s['error_rate_pct']:.2f}%)"
-    if inv_steps > 0 or shell_nz > 0:
-        err_detail += f" · Invalid : {inv_steps} · Shell!=0 : {shell_nz}"
     lines.extend(
         [
             f"- **Fenêtre mesurée** : {_window_desc(win)}",
@@ -430,7 +413,7 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
             f"| **Projection ({metrics.get('secondary_pricing_profile') or '2027_standard'})** | **${proj_total:.4f}** | Écart : **{delta_sign}${abs(proj_delta):.4f}** |",
             f"| **Économie grâce au cache** | **${c['cache_savings_usd']:.4f}** | Sans cache : ${c['without_cache_usd']:.4f} (Cache Hit : **{s['cache_hit_rate_pct']:.2f}%**) |",
             f"| **Agents / Profondeur max** | **{s['total_agents']}** / {s['max_tree_depth']} | Parallélisme : **{s['parallelism_factor']:.2f}x** ({dur_detail}) |",
-            f"| **Appels LLM / Appels outils** | **{_fmt_int(s['total_llm_calls'])}** / **{_fmt_int(s['total_tool_calls'])}** | {err_detail} · Inputs utilisateur : {s['total_user_inputs']} |",
+            f"| **Appels LLM / Appels outils** | **{_fmt_int(s['total_llm_calls'])}** / **{_fmt_int(s['total_tool_calls'])}** | Erreurs : {s['total_error_steps']} ({s['error_rate_pct']:.2f}%) · Inputs utilisateur : {s['total_user_inputs']} |",
             f"| **Tokens (In / Cache / Out)** | **{_fmt_int(s['total_tokens'])}** | {_fmt_int(s['input_tokens'])} / {_fmt_int(s['cache_read_tokens'])} / {_fmt_int(s['output_tokens'])} |",
             "",
             "## 2. Répartition par Catégorie",
@@ -511,11 +494,6 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
 
     dup = eff["duplicate_role_spawns"]
     rw = eff["rewind_waste"]
-    cc = eff.get("cold_cache_waste") or {}
-    cc_calls = int(cc.get("calls") or 0)
-    cc_in = int(cc.get("input_tokens") or 0)
-    cc_cost = float(cc.get("cost_usd") or 0.0)
-    cc_pct = float(cc.get("share_of_total_cost_pct") or 0.0)
     intr = eff["interrupted_agents"]
     cb = eff["context_bloat"]
     v_ratio = eff.get("verification_to_build_cost_ratio")
@@ -526,10 +504,8 @@ def render_session_detail_markdown(metrics: Dict[str, Any]) -> str:
             "## 6. Diagnostic & Gaspillages",
             "",
             f"- **Ratio Vérification / (Build + Test)** : **{v_ratio_str}**",
-            f"- **Anomalies (ERROR / INVALID / shell!=0)** : **{total_anom}** ({s['total_error_steps']} / {inv_steps} / {shell_nz})",
             f"- **Doublons de rôles** : **{dup['duplicate_agent_count']}** ({dup['duplicate_calls']} appels, **${dup['duplicate_cost_usd']:.4f}**)",
             f"- **Rewinds / reprises quota** : **{rw['rewind_calls']}** appels (**${rw['rewind_cost_usd']:.4f}**)",
-            f"- **Cache froid / quasi-froid** : **{cc_calls}** appel(s) ({_fmt_int(cc_in)} in, **${cc_cost:.4f}**, **{cc_pct:.1f}%** du coût)",
             f"- **Agents interrompus** : **{intr['count']}** ({intr['total_llm_calls']} appels, **${intr['total_cost_usd']:.4f}**)",
             f"- **Contexte max / >100k / >128k / >200k** : **{_fmt_int(cb['max_context_tokens_overall'])}** / {cb.get('calls_over_100k_ctx', 0)} / {cb.get('calls_over_128k_ctx', 0)} / {cb.get('calls_over_200k_ctx', 0)}",
         ]
@@ -630,7 +606,7 @@ def render_chat_summary_markdown(
         meta_parts.append(f"Profil Gravity : `{saved_rec['gravity_profile']}`")
     meta_parts.append(_window_desc(win))
 
-    heading_state = "déjà enregistrée (immuable)" if already_archived else "enregistrée"
+    heading_state = "déjà archivée (immuable)" if already_archived else "archivée"
     lines = [
         METRICS_MARKER,
         f"### Gravity Metrics — `{saved_rec['label']}` {heading_state}",

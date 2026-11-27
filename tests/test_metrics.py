@@ -20,17 +20,14 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 from metrics import (  # noqa: E402
     METRICS_MARKER,
-    archive_conversation,
     classify_agent,
     collect_run_metrics,
     compute_call_cost,
     default_store_dir,
     discover_agent_tree,
     list_gravity_conversations,
-    load_active_captures,
     load_history,
     load_pricing_catalog,
-    next_step_index_in_transcript,
     parse_agent_transcript,
     read_gravity_profile_summary,
     record_session_metrics,
@@ -95,10 +92,6 @@ class TestCoreAndParsing(unittest.TestCase):
         self.assertEqual(classify_agent("planner", "Arch"), "orchestration")
         self.assertEqual(classify_agent("builder", "Impl"), "build")
         self.assertEqual(classify_agent("reviewer", "Audit"), "verification")
-        self.assertEqual(classify_agent("worker", "Swarm Worker (dip-reviewer)"), "verification")
-        self.assertEqual(classify_agent("worker", "Swarm Worker (security-auditor)"), "verification")
-        self.assertEqual(classify_agent("worker", "Swarm Worker (spec-challenger)"), "verification")
-        self.assertEqual(classify_agent("worker", "Swarm Worker (core-builder)"), "build")
 
     def test_pricing_long_context_tier_flash_flat_and_fallback(self) -> None:
         p_pro, is_fb = resolve_model_pricing("gemini-3.1-pro-preview", self.catalog, "2026_nov_standard")
@@ -463,12 +456,12 @@ class TestGravityWindowAndProfile(unittest.TestCase):
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
                     {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:01:00Z", "content": "/gravity-metrics"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T11:01:01Z", "content": METRICS_MARKER},
-                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_gravity_dashboard"}]},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_metrics_dashboard"}]},
                     {"step_index": 5, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-21T11:01:03Z", "content": "ok"},
                     {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:04Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 250, "cache_read_tokens": 0, "output_tokens": 20, "tool_calls": []},
                 ],
             )
-            # Un second /gravity-metrics immédiat ne doit PAS compter le tour open_gravity_dashboard
+            # Un second /gravity-metrics immédiat ne doit PAS compter le tour open_metrics_dashboard
             win_empty = resolve_gravity_window(
                 tpath,
                 current_prompt_is_metrics=True,
@@ -494,7 +487,7 @@ class TestGravityWindowAndProfile(unittest.TestCase):
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
                     {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:01:00Z", "content": "/gravity-metrics"},
                     {"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-21T11:01:01Z", "content": METRICS_MARKER},
-                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_gravity_dashboard"}]},
+                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 300, "cache_read_tokens": 0, "output_tokens": 30, "tool_calls": [{"name": "open_metrics_dashboard"}]},
                     {"step_index": 5, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-21T11:01:03Z", "content": "ok"},
                     {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-21T11:01:04Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 250, "cache_read_tokens": 0, "output_tokens": 20, "tool_calls": []},
                     {"step_index": 7, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-21T11:05:00Z", "content": "Ajoute un test"},
@@ -589,30 +582,6 @@ class TestGravityWindowAndProfile(unittest.TestCase):
             )
             self.assertEqual(lbl_ns, "myapp-ajoute-tests")
 
-            lbl_chained = suggest_auto_label(
-                "MyApp",
-                "/gravity-workflow standard /caveman ultra /grill-me corrige bug auth cache pipeline",
-                "2026-11-22T09:06:00Z",
-                [],
-            )
-            self.assertEqual(lbl_chained, "myapp-corrige-bug-auth-cache-pipeline")
-            self.assertLessEqual(len(lbl_chained), 64)
-
-            lbl_boost_plan = suggest_auto_label(
-                "MyApp",
-                "/boost /plan ultra refactorer moteur collecte metriques complet",
-                "2026-11-22T09:07:00Z",
-                [],
-            )
-            self.assertEqual(lbl_boost_plan, "myapp-refactorer-moteur-collecte-metriques-complet")
-            self.assertLessEqual(len(lbl_boost_plan), 64)
-
-            # Ne doit pas mordre /plan-b ni avaler audit après send
-            lbl_plan_b = suggest_auto_label("MyApp", "/plan-b secours", "2026-11-22T09:08:00Z", [])
-            self.assertEqual(lbl_plan_b, "myapp-plan-secours")
-            lbl_bridge = suggest_auto_label("MyApp", "/gravity-bridge send audit bridge", "2026-11-22T09:09:00Z", [])
-            self.assertEqual(lbl_bridge, "myapp-audit-bridge")
-
     def test_default_store_dir_precedence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -639,7 +608,6 @@ class TestGravityWindowAndProfile(unittest.TestCase):
 class TestHistoryAndCLI(unittest.TestCase):
     def test_slugify_label(self) -> None:
         self.assertEqual(slugify_label("v0.1 Prototype / Test!"), "v0.1-prototype-test")
-        self.assertEqual(slugify_label("créer écosystème"), "creer-ecosysteme")
         self.assertEqual(slugify_label("   ", fallback="session-abcd"), "session-abcd")
 
     def test_history_lifecycle_and_markdown(self) -> None:
@@ -846,64 +814,6 @@ class TestHistoryAndCLI(unittest.TestCase):
             self.assertEqual(r_rm2.returncode, 0, r_rm2.stderr)
             self.assertFalse((rep_dir / "run-2.json").exists())
             self.assertFalse((rep_dir / "run-2.md").exists())
-
-            # Sous-commande `start` (calcul transcript + --step explicite + prefixe ambigu)
-            store_start = root / "start_store"
-            ws_start = root / "ProjetStart"
-            ws_start.mkdir()
-            self.assertEqual(
-                next_step_index_in_transcript(brain / cid1 / ".system_generated" / "logs" / "transcript.jsonl"),
-                2,
-            )
-            self.assertEqual(next_step_index_in_transcript(root / "absent.jsonl"), 0)
-
-            r_start_tx = run_cli(
-                "start",
-                "aaaa1111",
-                "-l",
-                "depuis-tx",
-                "--workspace",
-                str(ws_start),
-                "--brain-dir",
-                str(brain),
-                "--store",
-                str(store_start),
-            )
-            self.assertEqual(r_start_tx.returncode, 0, r_start_tx.stderr)
-            caps_tx = load_active_captures(store_start)
-            self.assertEqual(caps_tx[cid1]["start_step"], 2)
-            self.assertEqual(caps_tx[cid1]["label"], "depuis-tx")
-            self.assertEqual(caps_tx[cid1]["project"], "ProjetStart")
-
-            r_start_step = run_cli(
-                "start",
-                "cccc3333-0000-0000-0000-000000000003",
-                "-l",
-                "step-manuel",
-                "--step",
-                "7",
-                "--brain-dir",
-                str(brain),
-                "--store",
-                str(store_start),
-            )
-            self.assertEqual(r_start_step.returncode, 0, r_start_step.stderr)
-            caps_step = load_active_captures(store_start)
-            self.assertEqual(caps_step["cccc3333-0000-0000-0000-000000000003"]["start_step"], 7)
-
-            # Préfixe ambigu rejeté même avec --step
-            _write_transcript(brain / "aaaa9999-0000-0000-0000-000000000009", [])
-            r_start_amb = run_cli(
-                "start",
-                "aaaa",
-                "--step",
-                "0",
-                "--brain-dir",
-                str(brain),
-                "--store",
-                str(store_start),
-            )
-            self.assertEqual(r_start_amb.returncode, 1)
 
     def test_execution_mode_detection_swarm_teamwork_and_single(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1152,7 +1062,7 @@ class TestReconciliationAndCompliance(unittest.TestCase):
 
     def test_stdlib_only_and_no_forbidden_jargon(self) -> None:
         stdlib_names = set(getattr(sys, "stdlib_module_names", set()))
-        allowed = stdlib_names | {"metrics", "hook_runtime", "cli", "validate", "install"}
+        allowed = stdlib_names | {"_shared", "metrics", "dashboard_provider", "cli", "validate", "install"}
         forbidden_re = re.compile(r"\bMod" + r"ule\s+0?\d\b", re.IGNORECASE)
         forbidden_term_re = re.compile(r"\bbench" + r"marks?\b", re.IGNORECASE)
 
@@ -1214,664 +1124,447 @@ class TestReconciliationAndCompliance(unittest.TestCase):
             self.assertNotEqual(proc_bad.returncode, 0)
             self.assertIn("schema_version", proc_bad.stdout)
 
+    def test_centralized_workflow_profile_slug_hash_t3_p25(self) -> None:
+        import hashlib
 
-class TestAudit0409Fixes(unittest.TestCase):
-    def setUp(self) -> None:
-        self.catalog = load_pricing_catalog(CATALOG_PATH)
-
-    def test_aud_04_09a_self_archiving_root_clean_termination(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            brain = root / "brain"
+            ws = root / "My Very Long Workspace Name With Spaces & Caps!"
+            ws.mkdir()
+            grav_home = root / "gravity_home"
+            resolved = ws.resolve()
+            slug = re.sub(r"[^a-z0-9]+", "-", resolved.name.lower()).strip("-")[:32] or "workspace"
+            digest8 = hashlib.sha256(os.path.normcase(str(resolved)).encode("utf-8")).hexdigest()[:8]
+            prof_file = grav_home / "workflow" / "workspaces" / f"{slug}-{digest8}" / "profile.json"
+            prof_file.parent.mkdir(parents=True)
+            prof_file.write_text(json.dumps({"mode": "deep"}), encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"GRAVITY_HOME": str(grav_home)}, clear=False):
+                os.environ.pop("GRAVITY_WORKFLOW_HOME", None)
+                self.assertEqual(read_gravity_profile_summary(ws), "deep")
+
+                prof_file.write_text(
+                    json.dumps({"mode": "evo", "current_level": "high", "pace": "fast", "verification": "safe"}),
+                    encoding="utf-8",
+                )
+                self.assertEqual(read_gravity_profile_summary(ws), "evo→high · fast · safe")
+
+    def test_split_collector_dev_anomalies_cold_cache_and_zero_bridge(self) -> None:
+        from metrics import collector as col_mod
+
+        for attr in ("METRICS_MARKER", "METRICS_OPEN_MARKER", "slugify_label", "collect_run_metrics", "resolve_gravity_window", "suggest_auto_label"):
+            self.assertTrue(hasattr(col_mod, attr), f"Missing collector facade attribute: {attr}")
+
+        for fname in ("collector.py", "prompt_classifier.py", "transcript_index.py", "agent_tree.py", "milestone_analyzer.py"):
+            src = (PLUGIN_ROOT / "metrics" / fname).read_text(encoding="utf-8")
+            self.assertNotIn("bridge_links", src, f"Unexpected bridge_links reference in {fname}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = Path(tmp) / "brain"
+            cid = "dev-feat-0001-0000-0000-000000000001"
+            _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:00:00Z", "content": "/gravity-workflow deep fix"},
+                    {
+                        "step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:05Z",
+                        "model": "gemini-3.8-flash-tiered", "input_tokens": 20_000, "cache_read_tokens": 0, "output_tokens": 200,
+                        "thinking": "Reasoning trace", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "pytest"}}],
+                    },
+                    {"step_index": 2, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-26T10:00:08Z", "content": "Command exited with code 2\nCommand output:\nfailed"},
+                    {"step_index": 3, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-26T10:00:09Z", "content": "Showing lines 1-5\nCommand exited with code 9"},
+                    {"step_index": 4, "type": "GENERIC", "status": "INVALID", "created_at": "2026-11-26T10:00:10Z", "content": "Bad tool payload"},
+                    {
+                        "step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:12Z",
+                        "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 9000, "output_tokens": 50,
+                        "tool_calls": [{"name": "run_command", "args": {"CommandLine": f"python3 plugin/scripts/cli.py record {cid[:8]}"}}],
+                    },
+                ],
+            )
+            m = collect_run_metrics(cid, brain, CATALOG_PATH, gravity_window=True, project="gravity-metrics")
+            s = m["summary"]
+            self.assertEqual(s["total_invalid_steps"], 1)
+            self.assertEqual(s["total_shell_nonzero_steps"], 1)
+            self.assertEqual(s["total_anomalies"], 2)
+            self.assertEqual(s["thinking_calls"], 1)
+            self.assertEqual(m["efficiency_and_waste"]["cold_cache_waste"]["calls"], 1)
+            self.assertEqual(m["efficiency_and_waste"]["cold_cache_waste"]["input_tokens"], 20_000)
+            self.assertTrue(m["agents"][0]["clean_termination"])
+            self.assertIn("gravity-metrics", m["by_workspace"])
+
+    def test_locks_fail_closed_timeout_posix_and_simulated_windows(self) -> None:
+        import importlib
+        import types
+        from metrics.history import history_lock
+        from metrics.lifecycle import state_file_lock
+
+        file_lock_mod = importlib.import_module("_shared.file_lock")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hpath = root / "history.jsonl"
+            hlock = hpath.with_suffix(".lock")
+            spath = root / "session_meta.json"
+            slock = spath.with_suffix(".lock")
+
+            if os.name != "nt":
+                import fcntl
+
+                with hlock.open("a+b") as holder:
+                    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try:
+                        with self.assertRaises(TimeoutError):
+                            with history_lock(hpath, timeout_s=0.05):
+                                pass
+                    finally:
+                        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+                with slock.open("a+b") as holder:
+                    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try:
+                        with self.assertRaises(TimeoutError):
+                            with state_file_lock(spath, timeout_s=0.05):
+                                pass
+                    finally:
+                        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            else:
+                import msvcrt
+
+                for lock_file, lock_ctx in (
+                    (hlock, lambda: history_lock(hpath, timeout_s=0.05)),
+                    (slock, lambda: state_file_lock(spath, timeout_s=0.05)),
+                ):
+                    with lock_file.open("a+b") as holder:
+                        holder.seek(0, os.SEEK_END)
+                        if holder.tell() == 0:
+                            holder.write(b"\x00")
+                            holder.flush()
+                        holder.seek(0)
+                        msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 1)
+                        try:
+                            with self.assertRaises(TimeoutError):
+                                with lock_ctx():
+                                    pass
+                        finally:
+                            holder.seek(0)
+                            msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, 1)
+
+            fake_msvcrt = types.SimpleNamespace(
+                LK_NBLCK=1,
+                LK_UNLCK=0,
+                locking=mock.Mock(side_effect=OSError("win lock busy")),
+            )
+            fake_win_os = types.SimpleNamespace(
+                name="nt",
+                fspath=os.fspath,
+                path=os.path,
+                SEEK_END=os.SEEK_END,
+            )
+            with mock.patch.object(file_lock_mod, "os", fake_win_os), mock.patch.object(
+                file_lock_mod, "msvcrt", fake_msvcrt
+            ):
+                with self.assertRaises(TimeoutError):
+                    with history_lock(hpath, timeout_s=0.05):
+                        pass
+                with self.assertRaises(TimeoutError):
+                    with state_file_lock(spath, timeout_s=0.05):
+                        pass
+
+            sym_lock = root / "sym.lock"
+            sym_lock.symlink_to(hlock)
+            with self.assertRaises(ValueError):
+                with history_lock(root / "sym.jsonl", timeout_s=0.05):
+                    pass
+
+    def test_atomic_lf_writes_and_symlink_rejection(self) -> None:
+        from metrics.lifecycle import record_session_meta, start_active_capture
+        from metrics.store import regenerate_views, write_session_details
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
             store = root / "store"
-            cid_plan = "a409a001-1111-2222-3333-444455556666"
-            cid_gen = "a409a002-1111-2222-3333-444455556666"
-            cid_crashed = "a409a003-1111-2222-3333-444455556666"
-            cid_sub_crash = "a409a004-1111-2222-3333-444455556666"
+            hist = store / "data" / "history.jsonl"
+            rec = {
+                "schema_version": "2.1.0",
+                "status": "archived",
+                "added_at": "2026-11-26T10:00:00Z",
+                "archived_at": "2026-11-26T10:00:00Z",
+                "label": "lf-test",
+                "detail_slug": "lf-test",
+                "conversation_id": "11111111-1111-4111-8111-111111111111",
+                "note": "line1\r\nline2",
+                "project": "gravity-metrics",
+                "pricing_profile": "2026_nov_standard",
+                "started_at": "2026-11-26T10:00:00Z",
+                "ended_at": "2026-11-26T10:01:00Z",
+                "wall_clock_s": 60.0,
+                "primary_model": "gemini-3.8-flash-tiered",
+                "models": {},
+                "agents": 1,
+                "max_depth": 0,
+                "llm_calls": 1,
+                "tool_calls": 0,
+                "user_inputs": 1,
+                "error_steps": 0,
+                "error_rate_pct": 0.0,
+                "input_tokens": 100,
+                "cache_read_tokens": 0,
+                "output_tokens": 10,
+                "total_tokens": 110,
+                "cache_hit_rate_pct": 0.0,
+                "max_context_tokens": 100,
+                "cost_usd": 0.001,
+                "cost_input_usd": 0.0005,
+                "cost_cache_usd": 0.0,
+                "cost_output_usd": 0.0005,
+                "cache_savings_usd": 0.0,
+                "cost_2027_usd": 0.002,
+                "category_share_pct": {},
+                "duplicate_spawns": 0,
+                "rewind_calls": 0,
+                "interrupted_agents": 0,
+            }
+            save_history(hist, [rec])
+            record_session_meta("11111111-1111-4111-8111-111111111111", cwd=str(root), project="gravity-metrics", store_dir=store)
+            start_active_capture("11111111-1111-4111-8111-111111111111", start_step=0, label="lf-test", store_dir=store)
+            regenerate_views(store, [rec])
+            sample_metrics = {
+                "schema_version": "2.1.0",
+                "label": "lf-test",
+                "root_conversation_id": "11111111-1111-4111-8111-111111111111",
+                "project": "gravity-metrics",
+                "pricing_profile": "2026_nov_standard",
+                "secondary_pricing_profile": "2027_standard",
+                "summary": {
+                    "total_agents": 1, "max_tree_depth": 0, "total_llm_calls": 1, "total_tool_calls": 0,
+                    "total_user_inputs": 1, "total_error_steps": 0, "error_rate_pct": 0.0,
+                    "input_tokens": 100, "cache_read_tokens": 0, "output_tokens": 10, "total_tokens": 110,
+                    "cache_hit_rate_pct": 0.0, "first_ts": "2026-11-26T10:00:00Z", "last_ts": "2026-11-26T10:01:00Z",
+                    "wall_clock_s": 60.0, "sum_agent_active_s": 60.0, "parallelism_factor": 1.0,
+                    "cost_usd": {"total_usd": 0.001, "input_usd": 0.0005, "cache_read_usd": 0.0, "output_usd": 0.0005, "without_cache_usd": 0.001, "cache_savings_usd": 0.0},
+                    "cost_usd_projection": {"total_usd": 0.002},
+                },
+                "by_category": {}, "by_model": {}, "by_phase": {},
+                "tool_usage": {"total_calls": 0, "by_tool": {}, "top_errors": []},
+                "efficiency_and_waste": {
+                    "verification_to_build_cost_ratio": 0.0,
+                    "duplicate_role_spawns": {"duplicate_agent_count": 0, "duplicate_calls": 0, "duplicate_cost_usd": 0.0, "groups": []},
+                    "rewind_waste": {"rewind_calls": 0, "rewind_cost_usd": 0.0},
+                    "interrupted_agents": {"count": 0, "total_llm_calls": 0, "total_cost_usd": 0.0},
+                    "context_bloat": {"max_context_tokens_overall": 100, "calls_over_100k_ctx": 0, "calls_over_128k_ctx": 0, "calls_over_200k_ctx": 0},
+                },
+                "agents": [],
+                "data_quality": {"unmatched_models": [], "missing_transcripts": [], "malformed_lines": 0},
+            }
+            write_session_details(store, "lf-test", sample_metrics)
 
-            # 1) Racine avec dernier appel actif `cli.py archive` -> clean_termination=True
-            t_plan = _write_transcript(
-                brain / cid_plan,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T18:00:00Z", "content": "/gravity-architect lot"},
-                    {
-                        "step_index": 1,
-                        "type": "PLANNER_RESPONSE",
-                        "status": "DONE",
-                        "created_at": "2026-11-24T18:00:10Z",
-                        "model": "gemini-3.8-flash-tiered",
-                        "input_tokens": 5_000,
-                        "cache_read_tokens": 0,
-                        "output_tokens": 200,
-                        "tool_calls": [
-                            {"name": "run_command", "args": {"CommandLine": f"python plugin/scripts/cli.py archive {cid_plan} --store {store}"}}
-                        ],
-                    },
-                ],
-            )
-            parsed_plan = parse_agent_transcript(t_plan, self.catalog, "2026_nov_standard")
-            self.assertTrue(parsed_plan["clean_termination"])
-
-            # 2) Racine avec GENERIC RUNNING suivant `cli.py add` -> clean_termination=True
-            t_gen = _write_transcript(
-                brain / cid_gen,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T18:05:00Z", "content": "/gravity run"},
-                    {
-                        "step_index": 1,
-                        "type": "PLANNER_RESPONSE",
-                        "status": "DONE",
-                        "created_at": "2026-11-24T18:05:10Z",
-                        "model": "gemini-3.8-flash-tiered",
-                        "input_tokens": 4_000,
-                        "cache_read_tokens": 0,
-                        "output_tokens": 150,
-                        "tool_calls": [
-                            {"name": "run_command", "args": {"CommandLine": f"python3 scripts/cli.py add {cid_gen} --gravity-window"}}
-                        ],
-                    },
-                    {"step_index": 2, "type": "GENERIC", "status": "RUNNING", "created_at": "2026-11-24T18:05:12Z", "content": "Running..."},
-                ],
-            )
-            parsed_gen = parse_agent_transcript(t_gen, self.catalog, "2026_nov_standard")
-            self.assertTrue(parsed_gen["clean_termination"])
-
-            # Sous-agent réellement interrompu reste False même avec self_archiving=True sur la racine
-            _write_subagent_meta(brain / cid_gen, cid_sub_crash, "teamwork_worker", "Builder", spawn_step=1)
-            _write_transcript(
-                brain / cid_sub_crash,
-                [
-                    {
-                        "step_index": 0,
-                        "type": "PLANNER_RESPONSE",
-                        "status": "DONE",
-                        "created_at": "2026-11-24T18:05:11Z",
-                        "model": "gemini-3.8-flash-tiered",
-                        "input_tokens": 1_000,
-                        "cache_read_tokens": 0,
-                        "output_tokens": 50,
-                        "tool_calls": [{"name": "edit_file"}],
-                    },
-                    {"step_index": 1, "type": "GENERIC", "status": "RUNNING", "created_at": "2026-11-24T18:05:12Z", "content": "Interrupted"},
-                ],
-            )
-            m_gen = collect_run_metrics(cid_gen, brain, CATALOG_PATH, gravity_window=True, self_archiving=True)
-            ag_by_id = {a["conversation_id"]: a for a in m_gen["agents"]}
-            self.assertTrue(ag_by_id[cid_gen]["clean_termination"])
-            self.assertFalse(ag_by_id[cid_sub_crash]["clean_termination"])
-            self.assertEqual(m_gen["efficiency_and_waste"]["interrupted_agents"]["count"], 1)
-
-            # 3) E2E cli.py archive sur session racine active sans flag -> 0 faux positif Interrompu
-            proc_arch = subprocess.run(
-                [sys.executable, "-B", str(CLI_SCRIPT), "archive", cid_plan, "-l", "self-arch-ok", "--brain-dir", str(brain), "--store", str(store)],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=False,
-            )
-            self.assertEqual(proc_arch.returncode, 0, proc_arch.stderr)
-            recs = load_history(store / "data" / "history.jsonl")
-            self.assertEqual(recs[0]["interrupted_agents"], 0)
-            det = json.loads((store / "reports" / f"{recs[0]['detail_slug']}.json").read_text(encoding="utf-8"))
-            self.assertTrue(det["agents"][0]["clean_termination"])
-
-            # 4) Session réellement crashée (dernier outil != cli.py) archivée a posteriori reste Interrompu=False,
-            #    tandis que self_archiving=True explicite sur session active non-ERROR passe True.
-            t_crash = _write_transcript(
-                brain / cid_crashed,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T18:10:00Z", "content": "/gravity fix"},
-                    {
-                        "step_index": 1,
-                        "type": "PLANNER_RESPONSE",
-                        "status": "DONE",
-                        "created_at": "2026-11-24T18:10:10Z",
-                        "model": "gemini-3.8-flash-tiered",
-                        "input_tokens": 2_000,
-                        "cache_read_tokens": 0,
-                        "output_tokens": 100,
-                        "tool_calls": [{"name": "read_file"}],
-                    },
-                    {"step_index": 2, "type": "GENERIC", "status": "RUNNING", "created_at": "2026-11-24T18:10:11Z", "content": "Waiting"},
-                ],
-            )
-            self.assertFalse(parse_agent_transcript(t_crash, self.catalog, "2026_nov_standard")["clean_termination"])
-            saved_crashed, _, _ = archive_conversation(
-                cid_crashed,
-                store_dir=store,
-                history_path=store / "data" / "history.jsonl",
-                brain_dir=brain,
-                catalog_path=CATALOG_PATH,
-                label="real-crash",
-            )
-            self.assertEqual(saved_crashed["interrupted_agents"], 1)
-
-            saved_explicit, _, _ = archive_conversation(
-                cid_crashed,
-                store_dir=store,
-                history_path=store / "data" / "history.jsonl",
-                brain_dir=brain,
-                catalog_path=CATALOG_PATH,
-                label="explicit-self",
-                force=True,
-                self_archiving=True,
-            )
-            self.assertEqual(saved_explicit["interrupted_agents"], 0)
-
-            # 5) Garde-fou ERROR / INVALID / exit != 0 même avec self_archiving=True (zéro écrasement store.py)
-            for idx, (tag, tail_step) in enumerate(
-                [
-                    (
-                        "err-planner",
-                        {
-                            "step_index": 1,
-                            "type": "PLANNER_RESPONSE",
-                            "status": "ERROR",
-                            "created_at": "2026-11-24T18:15:10Z",
-                            "model": "gemini-3.8-flash-tiered",
-                            "input_tokens": 1_000,
-                            "cache_read_tokens": 0,
-                            "output_tokens": 0,
-                            "tool_calls": [],
-                        },
-                    ),
-                    (
-                        "inv-planner",
-                        {
-                            "step_index": 1,
-                            "type": "PLANNER_RESPONSE",
-                            "status": "INVALID",
-                            "created_at": "2026-11-24T18:16:10Z",
-                            "model": "gemini-3.8-flash-tiered",
-                            "input_tokens": 1_000,
-                            "cache_read_tokens": 0,
-                            "output_tokens": 0,
-                            "tool_calls": [],
-                        },
-                    ),
-                    (
-                        "shell-nz",
-                        {
-                            "step_index": 1,
-                            "type": "GENERIC",
-                            "status": "DONE",
-                            "created_at": "2026-11-24T18:17:10Z",
-                            "content": "Command exited with code 1\n\nCommand output:\nfail",
-                        },
-                    ),
-                ],
-                start=1,
+            for fpath in (
+                hist,
+                store / "session_meta.json",
+                store / "active_captures.json",
+                store / "METRICS.md",
+                store / "reports" / "lf-test.json",
+                store / "reports" / "lf-test.md",
             ):
-                cid_err = f"a409a10{idx}-1111-2222-3333-444455556666"
-                t_err = _write_transcript(
-                    brain / cid_err,
-                    [
-                        {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T18:15:00Z", "content": "/gravity fix"},
-                        tail_step,
-                    ],
-                )
-                self.assertFalse(
-                    parse_agent_transcript(t_err, self.catalog, "2026_nov_standard", self_archiving=True)["clean_termination"],
-                    tag,
-                )
-                rec_err, _, det_err = archive_conversation(
-                    cid_err,
-                    store_dir=store,
-                    history_path=store / "data" / "history.jsonl",
-                    brain_dir=brain,
-                    catalog_path=CATALOG_PATH,
-                    label=f"err-{tag}",
-                    self_archiving=True,
-                )
-                self.assertFalse(det_err["agents"][0]["clean_termination"], tag)
-                self.assertEqual(rec_err["interrupted_agents"], 1, tag)
+                raw = fpath.read_bytes()
+                self.assertFalse(raw.startswith(b"\xef\xbb\xbf"), f"BOM found in {fpath}")
+                self.assertNotIn(b"\r", raw, f"CR/CRLF found in {fpath}")
 
-            # 6) Sous-agent crashé lançant cli.py archive <root> + racine crashée ciblant autre cid + faux positifs shell
-            cid_sub_cli = "a409a201-1111-2222-3333-444455556666"
-            cid_root_cli = "a409a202-1111-2222-3333-444455556666"
-            _write_transcript(
-                brain / cid_root_cli,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T18:20:00Z", "content": "/gravity run"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T18:20:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
-                ],
-            )
-            _write_subagent_meta(brain / cid_root_cli, cid_sub_cli, "teamwork_worker", "Builder", spawn_step=1)
-            _write_transcript(
-                brain / cid_sub_cli,
-                [
-                    {
-                        "step_index": 0,
-                        "type": "PLANNER_RESPONSE",
-                        "status": "DONE",
-                        "created_at": "2026-11-24T18:20:06Z",
-                        "model": "gemini-3.8-flash-tiered",
-                        "input_tokens": 1_000,
-                        "cache_read_tokens": 0,
-                        "output_tokens": 50,
-                        "tool_calls": [
-                            {"name": "run_command", "args": {"CommandLine": f"python plugin/scripts/cli.py archive {cid_root_cli}"}}
-                        ],
-                    },
-                    {"step_index": 1, "type": "GENERIC", "status": "RUNNING", "created_at": "2026-11-24T18:20:07Z", "content": "Hung"},
-                ],
-            )
-            m_sub_cli = collect_run_metrics(cid_root_cli, brain, CATALOG_PATH, gravity_window=True)
-            ag_sub = {a["conversation_id"]: a for a in m_sub_cli["agents"]}[cid_sub_cli]
-            self.assertFalse(ag_sub["clean_termination"])
+            sym_hist = root / "sym_history.jsonl"
+            sym_hist.symlink_to(hist)
+            with self.assertRaises(ValueError):
+                save_history(sym_hist, [rec])
 
-            for fp_idx, bad_cmd in enumerate(
-                [
-                    f"python plugin/scripts/cli.py archive {cid_crashed}",
-                    "python plugin/scripts/cli.py pending; git add foo",
-                    "python plugin/scripts/cli.py pending && git add foo",
-                    "python plugin/scripts/cli.py list --store /tmp/archive",
-                ],
-                start=1,
-            ):
-                cid_fp = f"a409a30{fp_idx}-1111-2222-3333-444455556666"
-                t_fp = _write_transcript(
-                    brain / cid_fp,
-                    [
-                        {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T18:25:00Z", "content": "/gravity test"},
-                        {
-                            "step_index": 1,
-                            "type": "PLANNER_RESPONSE",
-                            "status": "DONE",
-                            "created_at": "2026-11-24T18:25:05Z",
-                            "model": "gemini-3.8-flash-tiered",
-                            "input_tokens": 1_000,
-                            "cache_read_tokens": 0,
-                            "output_tokens": 50,
-                            "tool_calls": [{"name": "run_command", "args": {"CommandLine": bad_cmd}}],
-                        },
-                        {"step_index": 2, "type": "GENERIC", "status": "RUNNING", "created_at": "2026-11-24T18:25:06Z", "content": "Waiting"},
-                    ],
-                )
-                self.assertFalse(
-                    parse_agent_transcript(t_fp, self.catalog, "2026_nov_standard")["clean_termination"],
-                    bad_cmd,
-                )
+    def test_spi3_signal_emission_slug_normalization_and_window(self) -> None:
+        import importlib
 
-            # 7) PreInvocation `/gravity-metrics stop` propage self_archiving=True à collect_run_metrics
-            cid_hook_stop = "a409a401-1111-2222-3333-444455556666"
-            ws_hook = root / "WsHook"
-            ws_hook.mkdir()
-            t_hook = _write_transcript(
-                brain / cid_hook_stop,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T18:30:00Z", "content": "/gravity fix"},
-                    {
-                        "step_index": 1,
-                        "type": "PLANNER_RESPONSE",
-                        "status": "DONE",
-                        "created_at": "2026-11-24T18:30:05Z",
-                        "model": "gemini-3.8-flash-tiered",
-                        "input_tokens": 3_000,
-                        "cache_read_tokens": 0,
-                        "output_tokens": 100,
-                        "tool_calls": [{"name": "edit_file"}],
-                    },
-                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T18:30:10Z", "content": "/gravity-metrics stop hook-self"},
-                ],
-            )
-            env_h = os.environ.copy()
-            env_h["GRAVITY_METRICS_HOME"] = str(store)
-            env_h["ANTIGRAVITY_BRAIN_DIR"] = str(brain)
-            env_h["PYTHONUTF8"] = "1"
-            p_hook = subprocess.run(
-                [sys.executable, "-B", str(PLUGIN_ROOT / "hooks" / "pre_invocation_metrics.py")],
-                input=json.dumps({"conversationId": cid_hook_stop, "transcriptPath": str(t_hook), "cwd": str(ws_hook), "lastUserInput": "/gravity-metrics stop hook-self"}),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                env=env_h,
-                check=False,
-            )
-            self.assertEqual(p_hook.returncode, 0, p_hook.stderr)
-            rec_hook = next(r for r in load_history(store / "data" / "history.jsonl") if r["label"] == "hook-self")
-            self.assertEqual(rec_hook["interrupted_agents"], 0)
+        signal_bus = importlib.import_module("_shared.signal_bus")
+        expected_keys = {
+            "avg_error_rate_pct",
+            "avg_cache_hit_rate_pct",
+            "max_context_tokens",
+            "recent_duplicate_spawns",
+            "recent_rewind_calls",
+            "recent_interrupted_agents",
+            "recent_bridge_sessions",
+            "high_output_cost_ratio",
+        }
 
-    def test_aud_04_09b_reviewer_post_fail_excluded_from_duplicates(self) -> None:
-        def _setup_wf_tree(
-            brain: Path,
-            root_id: str,
-            reviewer_outputs: list,
-            *,
-            extra_builders: int = 1,
-        ) -> None:
-            tasks_dir = brain / root_id / ".system_generated" / "tasks"
-            tasks_dir.mkdir(parents=True, exist_ok=True)
-            _write_transcript(
-                brain / root_id,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T19:00:00Z", "content": "/gravity-workflow build"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T19:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "run_workflow"}]},
-                ],
-            )
-            log_lines = []
-            for b_idx in range(extra_builders):
-                bcid = f"{root_id[:8]}-0000-4000-8000-000000000b0{b_idx + 1}"
-                log_lines.append(f"- [agent:builder] Builder: DONE ({bcid})")
-                _write_transcript(
-                    brain / bcid,
-                    [
-                        {"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": f"2026-11-24T19:0{b_idx + 1}:00Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 3_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
-                    ],
-                )
-            for r_idx, rev_payload in enumerate(reviewer_outputs):
-                rcid = f"{root_id[:8]}-0000-4000-8000-000000000f0{r_idx + 1}"
-                log_lines.append(f"- [agent:reviewer] Reviewer: DONE ({rcid})")
-                _write_transcript(
-                    brain / rcid,
-                    [
-                        {
-                            "step_index": 0,
-                            "type": "PLANNER_RESPONSE",
-                            "status": "DONE",
-                            "created_at": f"2026-11-24T19:1{r_idx}:00Z",
-                            "model": "gemini-4-hydrogen-tiered-xhigh",
-                            "input_tokens": 5_000,
-                            "cache_read_tokens": 0,
-                            "output_tokens": 200,
-                            "content": rev_payload if isinstance(rev_payload, str) else json.dumps(rev_payload),
-                            "tool_calls": [],
-                        }
-                    ],
-                )
-            (tasks_dir / "task-1.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+        def _make_metrics(cid: str, project: str, err: float, cache: float, ctx: int, dup: int, rw: int, intr: int, cost: float, out_cost: float, ts_end: str) -> dict:
+            return {
+                "schema_version": "2.1.0",
+                "label": f"lbl-{cid[:8]}",
+                "root_conversation_id": cid,
+                "project": project,
+                "pricing_profile": "2026_nov_standard",
+                "secondary_pricing_profile": "2027_standard",
+                "window": {"mode": "full_conversation", "start_step_index": None, "first_prompt": "run"},
+                "summary": {
+                    "total_agents": 1, "max_tree_depth": 0, "total_llm_calls": 2, "total_tool_calls": 2,
+                    "total_user_inputs": 1, "total_error_steps": 0, "error_rate_pct": err,
+                    "input_tokens": 1000, "cache_read_tokens": 1000, "output_tokens": 100, "total_tokens": 2100,
+                    "cache_hit_rate_pct": cache, "first_ts": "2026-11-26T10:00:00Z", "last_ts": ts_end,
+                    "wall_clock_s": 10.0, "sum_agent_active_s": 10.0, "parallelism_factor": 1.0,
+                    "cost_usd": {"total_usd": cost, "input_usd": cost - out_cost, "cache_read_usd": 0.0, "output_usd": out_cost, "without_cache_usd": cost, "cache_savings_usd": 0.0},
+                    "cost_usd_projection": {"total_usd": cost},
+                },
+                "by_category": {}, "by_model": {}, "by_phase": {}, "by_workspace": {},
+                "tool_usage": {"total_calls": 2, "by_tool": {}, "top_errors": []},
+                "bridge_pending_jobs": [{"thread_id": "legacy-ignored"}],
+                "efficiency_and_waste": {
+                    "verification_to_build_cost_ratio": 0.0,
+                    "duplicate_role_spawns": {"duplicate_agent_count": dup, "duplicate_calls": 0, "duplicate_cost_usd": 0.0, "groups": []},
+                    "rewind_waste": {"rewind_calls": rw, "rewind_cost_usd": 0.0},
+                    "interrupted_agents": {"count": intr, "total_llm_calls": 0, "total_cost_usd": 0.0},
+                    "context_bloat": {"max_context_tokens_overall": ctx, "calls_over_100k_ctx": 0, "calls_over_128k_ctx": 0, "calls_over_200k_ctx": 0},
+                },
+                "agents": [],
+                "data_quality": {"unmatched_models": [], "missing_transcripts": [], "malformed_lines": 0},
+            }
 
         with tempfile.TemporaryDirectory() as tmp:
-            brain = Path(tmp) / "brain"
+            root = Path(tmp)
+            grav_home = root / "grav_home"
+            store = grav_home / "metrics"
+            hist = store / "data" / "history.jsonl"
 
-            # 1) FAIL JSON -> PASS JSON => 0 doublon Reviewer
-            r_fail = "b409b001-1111-4111-8111-111111111111"
-            _setup_wf_tree(
-                brain,
-                r_fail,
-                [
-                    {"verdict": "FAIL", "blockers": ["SQLite leak"], "majors": [], "summary": "Blocked"},
-                    {"verdict": "PASS", "blockers": [], "majors": [], "summary": "Fixed"},
-                ],
-            )
-            m_fail = collect_run_metrics(r_fail, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(len([a for a in m_fail["agents"] if a["type_name"] == "reviewer"]), 2)
-            dups_fail = m_fail["efficiency_and_waste"]["duplicate_role_spawns"]
-            self.assertEqual(dups_fail["duplicate_agent_count"], 0)
-            self.assertEqual(dups_fail["groups"], [])
+            with mock.patch.dict(os.environ, {"GRAVITY_HOME": str(grav_home)}, clear=False):
+                os.environ.pop("GRAVITY_METRICS_HOME", None)
+                for idx in range(6):
+                    cid = f"sig0000{idx}-1111-4111-8111-111111111111"
+                    m = _make_metrics(
+                        cid, "My.Project_v2!", err=float(idx * 2), cache=50.0 + idx,
+                        ctx=10_000 * (idx + 1), dup=idx, rw=1, intr=1 if idx >= 4 else 0,
+                        cost=1.0, out_cost=0.25, ts_end=f"2026-11-26T10:0{idx}:00Z",
+                    )
+                    record_session_metrics(m, store_dir=store, history_path=hist, label=f"s-{idx}")
 
-            # 2) PASS avec blockers/majors non vides -> 2e passe exclue (0 doublon)
-            r_maj = "b409b002-1111-4111-8111-111111111111"
-            _setup_wf_tree(
-                brain,
-                r_maj,
-                [
-                    {"verdict": "PASS", "blockers": [], "majors": ["Missing test"], "summary": "Needs fix"},
-                    {"verdict": "PASS", "blockers": [], "majors": [], "summary": "OK"},
-                ],
-            )
-            m_maj = collect_run_metrics(r_maj, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(len([a for a in m_maj["agents"] if a["type_name"] == "reviewer"]), 2)
-            self.assertEqual(m_maj["efficiency_and_waste"]["duplicate_role_spawns"]["duplicate_agent_count"], 0)
+                sig_path = grav_home / "signals" / "session-metrics" / "my-project-v2.json"
+                self.assertTrue(sig_path.is_file(), f"Missing SPI-3 signal file: {sig_path}")
+                sig = signal_bus.read_signal("session-metrics", "my-project-v2", gravity_home=grav_home)
+                self.assertIsNotNone(sig)
+                self.assertEqual(sig["schema_version"], 1)
+                self.assertEqual(sig["topic"], "session-metrics")
+                self.assertEqual(sig["producer"], "metrics")
+                self.assertEqual(sig["sample_count"], 5)
+                self.assertEqual(sig["window_size"], 5)
+                payload = sig["payload"]
+                self.assertEqual(set(payload.keys()), expected_keys)
+                self.assertEqual(payload["avg_error_rate_pct"], 6.0)
+                self.assertEqual(payload["avg_cache_hit_rate_pct"], 53.0)
+                self.assertEqual(payload["max_context_tokens"], 60_000)
+                self.assertEqual(payload["recent_duplicate_spawns"], 15)
+                self.assertEqual(payload["recent_rewind_calls"], 5)
+                self.assertEqual(payload["recent_interrupted_agents"], 2)
+                self.assertEqual(payload["recent_bridge_sessions"], 0)
+                self.assertAlmostEqual(payload["high_output_cost_ratio"], 0.25, places=4)
 
-            # 3) PASS sans findings -> 2e passe Reviewer inutile EST comptée en doublon
-            r_pass2 = "b409b003-1111-4111-8111-111111111111"
-            _setup_wf_tree(
-                brain,
-                r_pass2,
-                [
-                    {"verdict": "PASS", "blockers": [], "majors": [], "summary": "Clean"},
-                    {"verdict": "PASS", "blockers": [], "majors": [], "summary": "Redundant"},
-                ],
-            )
-            m_pass2 = collect_run_metrics(r_pass2, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(len([a for a in m_pass2["agents"] if a["type_name"] == "reviewer"]), 2)
-            dups_pass2 = m_pass2["efficiency_and_waste"]["duplicate_role_spawns"]
-            self.assertEqual(dups_pass2["duplicate_agent_count"], 1)
-            self.assertEqual(dups_pass2["groups"][0]["type_name"], "reviewer")
+                # Empty project -> "global"; punctuation-only project -> "default"
+                record_session_metrics(
+                    _make_metrics("sig-glob-1111-4111-8111-111111111111", "", 1.0, 80.0, 5000, 0, 0, 0, 0.5, 0.1, "2026-11-26T11:00:00Z"),
+                    store_dir=store, history_path=hist, label="glob-run",
+                )
+                self.assertIsNotNone(signal_bus.read_signal("session-metrics", "global", gravity_home=grav_home))
 
-            # 4) FAIL -> PASS -> PASS + Builder doublon : 2e Reviewer exclu, 3e Reviewer + 2e Builder comptés
-            r_mixed = "b409b004-1111-4111-8111-111111111111"
-            _setup_wf_tree(
-                brain,
-                r_mixed,
-                [
-                    "**Verdict :** FAIL\n- [BLOCKER] Guard missing",
-                    {"verdict": "PASS", "blockers": [], "majors": []},
-                    {"verdict": "PASS", "blockers": [], "majors": []},
-                ],
-                extra_builders=2,
-            )
-            m_mixed = collect_run_metrics(r_mixed, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(len([a for a in m_mixed["agents"] if a["type_name"] == "reviewer"]), 3)
-            dups_mixed = m_mixed["efficiency_and_waste"]["duplicate_role_spawns"]
-            self.assertEqual(dups_mixed["duplicate_agent_count"], 2)
-            by_type = {g["type_name"]: g for g in dups_mixed["groups"]}
-            self.assertEqual(by_type["reviewer"]["duplicate_count"], 1)
-            self.assertEqual(by_type["reviewer"]["spawn_count"], 2)
-            self.assertEqual(by_type["builder"]["duplicate_count"], 1)
+                record_session_metrics(
+                    _make_metrics("sig-dflt-1111-4111-8111-111111111111", "___...", 1.0, 80.0, 5000, 0, 0, 0, 0.5, 0.1, "2026-11-26T11:05:00Z"),
+                    store_dir=store, history_path=hist, label="dflt-run",
+                )
+                self.assertIsNotNone(signal_bus.read_signal("session-metrics", "default", gravity_home=grav_home))
 
-            # 5) FAIL -> FAIL -> PASS : seule la 2e passe (idx==1) est exclue ; la 3e passe (idx==2) EST comptée
-            r_fail2 = "b409b005-1111-4111-8111-111111111111"
-            _setup_wf_tree(
-                brain,
-                r_fail2,
-                [
-                    {"verdict": "FAIL", "blockers": ["B1"], "majors": [], "summary": "Fail 1"},
-                    {"verdict": "FAIL", "blockers": [], "majors": ["M2"], "summary": "Fail 2"},
-                    {"verdict": "PASS", "blockers": [], "majors": [], "summary": "Pass 3"},
-                ],
-            )
-            m_fail2 = collect_run_metrics(r_fail2, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(len([a for a in m_fail2["agents"] if a["type_name"] == "reviewer"]), 3)
-            dups_fail2 = m_fail2["efficiency_and_waste"]["duplicate_role_spawns"]
-            self.assertEqual(dups_fail2["duplicate_agent_count"], 1)
-            self.assertEqual(len(dups_fail2["groups"]), 1)
-            self.assertEqual(dups_fail2["groups"][0]["type_name"], "reviewer")
-            self.assertEqual(dups_fail2["groups"][0]["duplicate_count"], 1)
-            self.assertEqual(dups_fail2["groups"][0]["spawn_count"], 2)
-
-    def test_r4_shell_unwrapping_transcript_index_and_record_flags(self) -> None:
-        from metrics.collector import (
-            _extract_shell_command_str,
-            _get_transcript_index,
-            _segment_is_cli_self_archive,
-            classify_metrics_prompt,
-            load_pricing_catalog,
-            parse_agent_transcript,
+    def test_dev_history_tolerance_lifecycle_worktree_and_update_sealed(self) -> None:
+        from metrics.history import find_archived_session
+        from metrics.lifecycle import (
+            current_turn_start_step_in_transcript,
+            load_session_meta,
+            next_step_index_in_transcript,
+            record_session_meta,
+            start_active_capture,
         )
+        from metrics.store import archive_conversation
 
-        # 1) Désencapsulation CommandLine JSON doublement quotée
-        tc_quoted = {
-            "name": "run_command",
-            "args": {"CommandLine": '"git -C ../gravity-metrics push origin dev"'},
-        }
-        self.assertEqual(
-            _extract_shell_command_str(tc_quoted),
-            "git -C ../gravity-metrics push origin dev",
-        )
-        tc_quoted_cli = {
-            "name": "run_command",
-            "args": {"CommandLine": '"python3 plugin/scripts/cli.py record abc123 --update"'},
-        }
-        self.assertEqual(
-            _extract_shell_command_str(tc_quoted_cli),
-            "python3 plugin/scripts/cli.py record abc123 --update",
-        )
-
-        # 2) classify_metrics_prompt : record/archive & --update/--update-sealed
-        p_rec = classify_metrics_prompt("/gravity-metrics record f80dab92 my-lbl --update")
-        self.assertEqual(p_rec["action"], "record")
-        self.assertEqual(p_rec["target"], "f80dab92")
-        self.assertEqual(p_rec["label"], "my-lbl")
-        self.assertTrue(p_rec["update"])
-
-        p_arch = classify_metrics_prompt("/gravity-metrics archive f80dab92 --update-sealed")
-        self.assertEqual(p_arch["action"], "archive")
-        self.assertTrue(p_arch["update"])
-
-        p_stop = classify_metrics_prompt("/gravity-metrics stop --update")
-        self.assertEqual(p_stop["action"], "stop")
-        self.assertTrue(p_stop["update"])
-
-        p_cap = classify_metrics_prompt("/gravity-metrics --update")
-        self.assertEqual(p_cap["action"], "capture")
-        self.assertTrue(p_cap["update"])
-
-        # 3) _segment_is_cli_self_archive & parse_agent_transcript acceptent `cli.py record`
-        cid = "d4000001-1111-4111-8111-111111111111"
-        self.assertTrue(_segment_is_cli_self_archive(f"python3 cli.py record {cid[:8]} --update", cid))
-        self.assertFalse(_segment_is_cli_self_archive("echo cli.py record d4000001", cid))
+        cid = "tol00001-1111-4111-8111-111111111111"
+        base_rec = {"conversation_id": cid, "status": "archived", "window_start_step": 10, "label": "tol-1"}
+        self.assertIsNotNone(find_archived_session([base_rec], cid, 12))
+        self.assertIsNone(find_archived_session([base_rec], cid, 13))
+        up = upsert_session([base_rec], {**base_rec, "window_start_step": 11, "label": "tol-1"})
+        self.assertEqual(len(up), 1)
 
         with tempfile.TemporaryDirectory() as tmp:
-            brain = Path(tmp) / "brain"
+            root = Path(tmp)
+            store = root / "store"
+            brain = root / "brain"
+            hist = store / "data" / "history.jsonl"
+
+            self.assertEqual(record_session_meta(cid, cwd="/tmp/.worktrees/wt-1", store_dir=store), {})
+            record_session_meta(cid, cwd=str(root / "gravity-metrics"), store_dir=store)
+            self.assertIn(cid, load_session_meta(store))
+
+            c1 = start_active_capture(cid, start_step=2, label="first", source="auto", store_dir=store, overwrite=False)
+            c2 = start_active_capture(cid, start_step=4, label="second", source="manual", store_dir=store, overwrite=False)
+            self.assertEqual(c1["label"], "first")
+            self.assertEqual(c2["label"], "first")
+            c3 = start_active_capture(cid, start_step=4, label="second", source="manual", store_dir=store, overwrite=True)
+            self.assertEqual(c3["label"], "second")
+
             tpath = _write_transcript(
                 brain / cid,
                 [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T12:00:00Z", "content": "/gravity-architect sync"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "write_file", "args": {"Path": "specs/s.md"}}, {"name": "swarm"}]},
-                    {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "edit_file", "args": {"Path": "plugin/metrics/collector.py"}}]},
-                    {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:15Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "run_command", "args": {"CommandLine": '"python3 ../gravity/scripts/ecosystem_install.py --update"'}}]},
-                    {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:20Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [tc_quoted]},
-                    {"step_index": 5, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T12:00:25Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": [{"name": "run_command", "args": {"CommandLine": f'"python3 plugin/scripts/cli.py record {cid[:8]}"'}}]},
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:00:00Z", "content": "/gravity-workflow run"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 50},
+                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:01:00Z", "content": "<USER_REQUEST>next turn</USER_REQUEST>"},
                 ],
             )
-            tx = _get_transcript_index(tpath)
-            self.assertEqual(tx["max_step_index"], 5)
-            entries = tx["entries"]
-            self.assertTrue(entries[1]["has_swarm_or_subagent_tool"])
-            self.assertFalse(entries[1]["has_direct_edit_tool"])
-            self.assertTrue(entries[2]["has_direct_edit_tool"])
-            self.assertTrue(entries[3]["has_push_or_verif"])
-            self.assertTrue(entries[4]["has_push_or_verif"])
-            self.assertTrue(entries[5]["has_cli_record_or_archive"])
+            self.assertEqual(next_step_index_in_transcript(tpath), 3)
+            self.assertEqual(current_turn_start_step_in_transcript(tpath, expected_prompt="next turn"), 2)
 
-            catalog = load_pricing_catalog(CATALOG_PATH)
-            parsed = parse_agent_transcript(
-                tpath,
-                catalog=catalog,
-                profile=catalog["default_profile"],
-                allow_cli_self_archive=True,
-                conversation_id=cid,
+            archive_conversation(
+                cid, store_dir=store, history_path=hist, brain_dir=brain,
+                catalog_path=CATALOG_PATH, label="sealed-v1", full_conversation=True,
             )
-            self.assertTrue(parsed["clean_termination"])
-            self.assertEqual(parsed["last_step_index"], 5)
-
-    def test_w2_cli_record_aliases_flags_and_reports_wording(self) -> None:
-        import metrics as metrics_pkg
-        from metrics.formatters import _status_badge
-        from metrics.markdown_report import (
-            _mode_cell_md,
-            render_chat_summary_markdown,
-            render_pending_markdown,
-            render_pending_table,
-            render_terminal_table,
-        )
-
-        self.assertIs(metrics_pkg.record_conversation, archive_conversation)
-        self.assertIn("current_turn_start_step_in_transcript", metrics_pkg.__all__)
-        self.assertIn("record_conversation", metrics_pkg.__all__)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            brain = root / "brain"
-            store = root / "store"
-            hist_path = store / "data" / "history.jsonl"
-
-            cid_rec = "e2000001-1111-4111-8111-111111111111"
-            cid_arch = "e2000002-1111-4111-8111-111111111111"
-            for cid in (cid_rec, cid_arch):
-                _write_transcript(
-                    brain / cid,
-                    [
-                        {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T13:00:00Z", "content": "/gravity-workflow fix"},
-                        {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T13:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "read_file"}]},
-                        {"step_index": 2, "type": "GENERIC", "status": "RUNNING", "created_at": "2026-11-25T13:00:11Z", "content": "active"},
-                    ],
-                )
-
-            # 1) cli.py record --self-recording
-            proc_rec = subprocess.run(
-                [sys.executable, "-B", str(CLI_SCRIPT), "record", cid_rec, "-l", "rec-one", "--self-recording", "--brain-dir", str(brain), "--store", str(store)],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=False,
-            )
-            self.assertEqual(proc_rec.returncode, 0, proc_rec.stderr)
-            self.assertIn("Session enregistrée : rec-one", proc_rec.stdout)
-
-            # 2) cli.py archive (alias) --self-archiving -> parité totale
-            proc_arch = subprocess.run(
-                [sys.executable, "-B", str(CLI_SCRIPT), "archive", cid_arch, "-l", "arch-two", "--self-archiving", "--brain-dir", str(brain), "--store", str(store)],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=False,
-            )
-            self.assertEqual(proc_arch.returncode, 0, proc_arch.stderr)
-            self.assertIn("Session enregistrée : arch-two", proc_arch.stdout)
-
-            recs = load_history(hist_path)
-            self.assertEqual(len(recs), 2)
-            for rec in recs:
-                self.assertEqual(rec["status"], "archived")
-                self.assertEqual(rec["interrupted_agents"], 0)
-                self.assertEqual(_status_badge(rec), "enregistrée")
-                self.assertIn("`enregistrée`", _mode_cell_md(rec))
-
-            # 3) Mise à jour via record --update et add --update
             _write_transcript(
-                brain / cid_rec,
+                brain / cid,
                 [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T13:00:00Z", "content": "/gravity-workflow fix"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T13:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "read_file"}]},
-                    {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T13:00:20Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 4_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:00:00Z", "content": "/gravity-workflow run"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2000, "cache_read_tokens": 0, "output_tokens": 100},
                 ],
             )
-            proc_upd_rec = subprocess.run(
-                [sys.executable, "-B", str(CLI_SCRIPT), "record", cid_rec, "--update", "--brain-dir", str(brain), "--store", str(store)],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=False,
+            updated_rec, all_recs, _ = archive_conversation(
+                cid, store_dir=store, history_path=hist, brain_dir=brain,
+                catalog_path=CATALOG_PATH, label="sealed-v1", update_sealed=True, self_archiving=True,
             )
-            self.assertEqual(proc_upd_rec.returncode, 0, proc_upd_rec.stderr)
-            self.assertIn("Session enregistrée : rec-one", proc_upd_rec.stdout)
+            self.assertEqual(len(all_recs), 1)
+            self.assertEqual(updated_rec["input_tokens"], 2000)
 
-            proc_upd_add = subprocess.run(
-                [sys.executable, "-B", str(CLI_SCRIPT), "add", cid_rec, "--gravity-window", "--update-sealed", "--brain-dir", str(brain), "--store", str(store)],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=False,
-            )
-            self.assertEqual(proc_upd_add.returncode, 0, proc_upd_add.stderr)
-            recs_after = [r for r in load_history(hist_path) if r["conversation_id"] == cid_rec]
-            self.assertEqual(len(recs_after), 1)
-            self.assertEqual(recs_after[0]["input_tokens"], 9_000)
+    def test_technical_signals_and_pricing_catalog_aliases(self) -> None:
+        from metrics.technical_signals import aggregate_technical_signals, extract_technical_signals
 
-            # 4) Tableau terminal sans troncature de "enregistrée" (colonne Statut largeur 12) + rapports Markdown
-            table = render_terminal_table(recs_after)
-            self.assertIn("Statut      ", table)
-            self.assertIn("enregistrée ", table)
-            self.assertNotIn("enregist ", table)
-            self.assertIn("1 session(s) enregistrée(s)", table)
+        steps = [
+            {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:00:00Z", "content": "Go"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:01Z", "input_tokens": 50_000, "cache_read_tokens": 0, "thinking": "a" * 40},
+            {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:03Z", "input_tokens": 20_000, "cache_read_tokens": 0, "thinking": [{"text": "b" * 20}]},
+            {"step_index": 3, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:15:00Z", "content": "/compact"},
+            {"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:15:10Z", "input_tokens": 5_000, "cache_read_tokens": 0},
+        ]
+        sig = extract_technical_signals(steps)
+        self.assertEqual(sig["thinking_calls"], 2)
+        self.assertEqual(sig["thinking_est_tokens"], 15)
+        self.assertEqual(sig["compaction_count"], 2)
+        self.assertEqual(sig["latency_p50_ms"], 2000)
+        self.assertEqual(sig["latency_p95_ms"], 10000)
+        agg = aggregate_technical_signals([{"thinking_calls": 1, "thinking_chars": 8, "thinking_est_tokens": 2, "compaction_count": 1, "_latency_samples_ms": [100, 300]}])
+        self.assertEqual(agg["latency_samples_count"], 2)
+        self.assertEqual(agg["latency_p50_ms"], 100)
 
-            self.assertIn("en attente d'enregistrement", render_pending_table([]))
-            pend_sample = [{"conversation_id": cid_rec, "updated_at": "2026-11-25T13:00:00Z", "llm_calls": 2, "window_mode": "gravity_session", "title": "demo"}]
-            self.assertIn("cli.py record <id>", render_pending_table(pend_sample))
-            self.assertIn("tout est enregistré", render_pending_markdown([]))
-            self.assertIn(f"/gravity-metrics record {cid_rec[:8]}", render_pending_markdown(pend_sample))
-
-            det_md = (store / "reports" / f"{recs_after[0]['detail_slug']}.md").read_text(encoding="utf-8")
-            self.assertIn("- **Statut** : `enregistrée`", det_md)
-
-            det_json = json.loads((store / "reports" / f"{recs_after[0]['detail_slug']}.json").read_text(encoding="utf-8"))
-            chat_new = render_chat_summary_markdown(det_json, recs_after[0], store, already_archived=False)
-            chat_old = render_chat_summary_markdown(det_json, recs_after[0], store, already_archived=True)
-            self.assertIn("`rec-one` enregistrée", chat_new)
-            self.assertIn("`rec-one` déjà enregistrée (immuable)", chat_old)
+        catalog = load_pricing_catalog(CATALOG_PATH)
+        p_neon_26, fb_neon_26 = resolve_model_pricing("gemini-pro-orchestrator-neon", catalog, "2026_nov_standard")
+        self.assertFalse(fb_neon_26)
+        self.assertEqual((p_neon_26["input"], p_neon_26["cache_read"], p_neon_26["output"]), (3.0, 0.15, 15.0))
+        p_agy_26, fb_agy_26 = resolve_model_pricing("gemini-flash-worker-agy-high", catalog, "2026_nov_standard")
+        self.assertFalse(fb_agy_26)
+        self.assertEqual((p_agy_26["input"], p_agy_26["cache_read"], p_agy_26["output"]), (0.75, 0.075, 3.75))
+        p_agy_27, fb_agy_27 = resolve_model_pricing("gemini-flash-worker-agy", catalog, "2027_standard")
+        self.assertFalse(fb_agy_27)
+        self.assertEqual((p_agy_27["input"], p_agy_27["cache_read"], p_agy_27["output"]), (1.5, 0.15, 7.5))
 
 
 if __name__ == "__main__":

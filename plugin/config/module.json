@@ -19,10 +19,25 @@
     "mode": "none",
     "target": "gravity"
   },
+  "dashboard": {
+    "provider_script": "scripts/dashboard_provider.py",
+    "views": [
+      "metrics",
+      "session-detail",
+      "audit-detail"
+    ],
+    "actions": [
+      "record",
+      "update",
+      "update-meta",
+      "ignore",
+      "unignore",
+      "remove"
+    ]
+  },
   "signals": {
     "produces": [
-      "session-metrics",
-      "cost-telemetry"
+      "session-metrics"
     ],
     "consumes": []
   }

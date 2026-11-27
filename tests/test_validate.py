@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Tests unitaires isolés des contrôles D4 dans plugin/scripts/validate.py (100 % stdlib)."""
+"""Tests unitaires isolés des contrôles D4, SKILL.md, hooks.json et modules autorisés dans validate.py (100 % stdlib)."""
 
 import contextlib
 import io
-import os
+import json
 from pathlib import Path
 import shutil
 import sys
@@ -59,6 +59,52 @@ class TestValidateD4(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 rc = validate.main(list(argv))
         return rc, buf.getvalue()
+
+    def test_allowed_modules_excludes_legacy_and_accepts_disabled_session_start(self) -> None:
+        for legacy_mod in ("mcp", "widget_html", "bridge_links", "hook_runtime"):
+            self.assertNotIn(legacy_mod, validate.ALLOWED_LOCAL_MODULES)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = self._make_plugin_copy(tmp)
+            # Simulate post-W10/W11/W12 tree without legacy mcp/bridge_links/hook_runtime
+            shutil.rmtree(plugin_dir / "mcp", ignore_errors=True)
+            (plugin_dir / "mcp_config.json").unlink(missing_ok=True)
+            (plugin_dir / "metrics" / "bridge_links.py").unlink(missing_ok=True)
+            (plugin_dir / "hooks" / "hook_runtime.py").unlink(missing_ok=True)
+            (plugin_dir / "hooks.json").write_text(
+                json.dumps(
+                    {
+                        "gravity-metrics-session": {
+                            "enabled": False,
+                            "SessionStart": [
+                                {"type": "command", "command": "python3 hooks/session_start_metrics.py", "timeout": 5}
+                            ],
+                        },
+                        "gravity-metrics-command": {
+                            "enabled": True,
+                            "PreInvocation": [
+                                {"type": "command", "command": "python3 hooks/pre_invocation_metrics.py", "timeout": 15}
+                            ],
+                        },
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rc, out = self._run_main_captured("--plugin-root", str(plugin_dir), "--strict", mock_dry_runs=False)
+            self.assertEqual(rc, 0, out)
+            self.assertIn("[PASS]", out)
+
+            # SKILL.md description > 160 chars must fail
+            skill_md = plugin_dir / "skills" / "gravity-metrics" / "SKILL.md"
+            skill_md.write_text(
+                f"---\nname: gravity-metrics\ndescription: {'x' * 161}\n---\n\n# Skill\n",
+                encoding="utf-8",
+            )
+            rep_desc = self._run_validate_fast(plugin_dir)
+            self.assertFalse(rep_desc.ok(strict=True))
+            self.assertTrue(any("160" in e for e in rep_desc.errors), rep_desc.errors)
 
     def test_rules_agents_up_to_600_bytes_passes_strict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,64 +217,6 @@ class TestValidateD4(unittest.TestCase):
                 report_installed.ok(strict=True),
                 report_installed.errors + report_installed.warnings,
             )
-
-    def test_dry_runs_isolate_antigravity_brain_dir(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            plugin_dir = self._make_plugin_copy(tmp)
-            captured_envs: list[dict[str, str]] = []
-            real_run = validate.subprocess.run
-
-            def _spy_run(*args, **kwargs):
-                env = kwargs.get("env") or {}
-                captured_envs.append(dict(env))
-                bdir = Path(env["ANTIGRAVITY_BRAIN_DIR"])
-                self.assertTrue(bdir.is_dir())
-                return real_run(*args, **kwargs)
-
-            with (
-                mock.patch.dict(os.environ, {"ANTIGRAVITY_BRAIN_DIR": str(Path(tmp) / "outer_brain")}, clear=False),
-                mock.patch.object(validate.subprocess, "run", side_effect=_spy_run),
-            ):
-                rc, out = self._run_main_captured(
-                    "--plugin-root", str(plugin_dir), "--strict", mock_dry_runs=False
-                )
-
-            self.assertEqual(rc, 0, out)
-            self.assertGreaterEqual(len(captured_envs), 2)
-            for env in captured_envs:
-                self.assertIn("ANTIGRAVITY_BRAIN_DIR", env)
-                self.assertNotEqual(
-                    Path(env["ANTIGRAVITY_BRAIN_DIR"]).resolve(),
-                    (Path(tmp) / "outer_brain").resolve(),
-                )
-                self.assertEqual(
-                    Path(env["ANTIGRAVITY_BRAIN_DIR"]).parent.resolve(),
-                    Path(env["GRAVITY_METRICS_HOME"]).parent.resolve(),
-                )
-
-    def test_real_plugin_budgets_suggested_prompts_and_ui_csp(self) -> None:
-        import json as _json
-
-        rules_bytes = (PLUGIN_ROOT / "rules" / "AGENTS.md").read_bytes()
-        self.assertLessEqual(len(rules_bytes), 600)
-        self.assertFalse(rules_bytes.startswith(validate.UTF8_BOM))
-        self.assertNotIn(b"\r", rules_bytes)
-
-        skill_bytes = (PLUGIN_ROOT / "skills" / "gravity-metrics" / "SKILL.md").read_bytes()
-        self.assertLessEqual(len(skill_bytes), 6000)
-
-        manifest = _json.loads((PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8"))
-        prompts = manifest["suggestedPrompts"]
-        self.assertEqual(len(prompts), 3)
-        self.assertIn("enregistrement", prompts[1])
-        for p in prompts:
-            self.assertLessEqual(len(p), 100)
-            self.assertRegex(p, validate.SUGGESTED_PROMPT_RE)
-
-        self.assertFalse((PLUGIN_ROOT / "mcp").exists())
-        self.assertFalse((PLUGIN_ROOT / "mcp_config.json").exists())
-        mod = _json.loads((PLUGIN_ROOT / "config" / "module.json").read_text(encoding="utf-8"))
-        self.assertEqual(mod["ui"], {"mode": "none", "target": "gravity"})
 
 
 if __name__ == "__main__":

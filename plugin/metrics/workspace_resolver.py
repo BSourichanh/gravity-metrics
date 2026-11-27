@@ -2,20 +2,25 @@
 """Résolution canonique des dépôts/workspaces, normalisation des worktrees et classification atelier/code (100 % stdlib)."""
 
 from collections import Counter
+import importlib
 import json
-import os
 from pathlib import Path
-import posixpath
 import re
 import shlex
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
-from urllib.parse import unquote, urlparse
+import sys
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+
+_tr_reader = importlib.import_module("_shared.transcript_reader")
 
 KNOWN_GRAVITY_REPOS: Tuple[str, ...] = (
     "gravity-architect",
     "gravity-workflow",
     "gravity-metrics",
-    "gravity-studio",
+    "gravity-workshop",
     "gravity",
 )
 
@@ -25,12 +30,7 @@ SHELL_TOOL_NAMES = frozenset({"run_command", "execute_command", "bash", "shell"}
 
 _ATELIER_DOC_PATH_RE = re.compile(r"(?:^|/)(?:specs|tasks|tracking)/", re.IGNORECASE)
 _SPEC_TASK_PATH_RE = re.compile(r"(?:^|/)(?:specs|tasks)/", re.IGNORECASE)
-_WT_GRAVITY_RE = re.compile(r"(?:^|/)gravity-worktrees/([^/]+)(?:/|$)")
-_WT_GEMINI_RE = re.compile(r"(?:^|/)\.gemini/antigravity/worktrees/([^/]+)(?:/|$)")
-_WT_DOT_RE = re.compile(r"(?:^|/)\.worktrees/([^/]+)(?:/|$)")
-_WORKER_SUFFIX_RE = re.compile(r"-w\d+$", re.IGNORECASE)
-_CONTAINER_DIRS = frozenset({"github", "repos", "repo", "projects", "project", "workspaces", "workspace", "work"})
-_SCHEME_PREFIX = "fi" + "le:"
+_strip_file_uri = _tr_reader.strip_file_uri
 
 
 def _parse_tool_call_args(tc: Dict[str, Any]) -> Dict[str, Any]:
@@ -72,79 +72,13 @@ def _is_atelier_doc_path(raw_path: str) -> bool:
     return bool(_ATELIER_DOC_PATH_RE.search(raw_path.replace("\\", "/").strip()))
 
 
-def _strip_file_uri(raw: str) -> str:
-    s = str(raw or "").strip()
-    if s.lower().startswith(_SCHEME_PREFIX):
-        parsed = urlparse(s)
-        p = unquote(parsed.path or "")
-        if len(p) >= 3 and p[0] == "/" and p[2] == ":" and p[1].isalpha():
-            p = p[1:]
-        return p
-    return s
-
-
-def _normalize_wt_segment(seg: str, known_repos: Set[str], *, generic_suffix: bool) -> str:
-    clean = seg.strip()
-    if not clean:
-        return ""
-    for repo in sorted(known_repos, key=lambda r: (-len(r), r)):
-        if clean == repo or clean.startswith(repo + "-"):
-            return repo
-    stripped = _WORKER_SUFFIX_RE.sub("", clean)
-    if stripped != clean and stripped:
-        return stripped
-    if generic_suffix and "-" in clean:
-        base, _tail = clean.rsplit("-", 1)
-        if base:
-            return base
-    return clean
-
-
 def discover_known_repos(
     root_workspace: str = "",
     root_workspace_path: Optional[Union[Path, str]] = None,
 ) -> Set[str]:
     """Construit l'ensemble des noms de dépôts connus depuis l'écosystème, `projects.json` et les voisins disque."""
-    repos: Set[str] = set(KNOWN_GRAVITY_REPOS)
-    if root_workspace and root_workspace != "root":
-        repos.add(root_workspace)
-    if root_workspace_path is None:
-        return repos
-    try:
-        rpath = Path(root_workspace_path)
-    except Exception:
-        return repos
-    if rpath.name:
-        repos.add(rpath.name)
-    proj_file = rpath / "projects.json"
-    if proj_file.is_file():
-        try:
-            pdata = json.loads(proj_file.read_text(encoding="utf-8"))
-            if isinstance(pdata, dict):
-                items = pdata.get("projects")
-                if isinstance(items, list):
-                    for it in items:
-                        if isinstance(it, dict):
-                            name = str(it.get("name") or it.get("id") or "").strip()
-                            if name:
-                                repos.add(name)
-                            p_rel = str(it.get("path") or "").strip()
-                            if p_rel:
-                                repos.add(Path(p_rel.replace("\\", "/")).name)
-                elif isinstance(items, dict):
-                    for k in items:
-                        if str(k).strip():
-                            repos.add(str(k).strip())
-        except Exception:
-            pass
-    parent = rpath.parent
-    if parent.is_dir():
-        try:
-            for child in parent.iterdir():
-                if child.is_dir() and not child.name.startswith("."):
-                    repos.add(child.name)
-        except OSError:
-            pass
+    repos: Set[str] = set(_tr_reader.discover_known_repos(root_workspace, root_workspace_path))
+    repos.update(KNOWN_GRAVITY_REPOS)
     return repos
 
 
@@ -157,94 +91,16 @@ def normalize_worktree_path(
     is_workspace_uri: bool = False,
 ) -> str:
     """Résout un chemin ou URI (worktree inclus) vers le nom canonique du dépôt."""
-    cleaned = _strip_file_uri(raw_path)
-    if not cleaned:
-        return ""
-    norm = cleaned.replace("\\", "/").strip()
-    if not norm:
-        return ""
-
     repos = known_repos if known_repos is not None else discover_known_repos(root_workspace, root_workspace_path)
-
-    m_gw = _WT_GRAVITY_RE.search(norm)
-    if m_gw:
-        return _normalize_wt_segment(m_gw.group(1), repos, generic_suffix=False)
-
-    m_gm = _WT_GEMINI_RE.search(norm)
-    if m_gm:
-        return _normalize_wt_segment(m_gm.group(1), repos, generic_suffix=True)
-
-    m_dw = _WT_DOT_RE.search(norm)
-    if m_dw:
-        return _normalize_wt_segment(m_dw.group(1), repos, generic_suffix=True)
-
-    low_norm = norm.lower()
-    if "/.gemini/antigravity/brain/" in low_norm or "/.system_generated/" in low_norm:
-        return ""
-
-    is_abs = norm.startswith("/") or norm.startswith("~/") or bool(re.match(r"^[A-Za-z]:/", norm))
-    if not is_abs:
-        if norm.startswith("./"):
-            norm = norm[2:]
-        if not norm.startswith("../"):
-            if is_workspace_uri and "/" not in norm:
-                return norm
-            return root_workspace if (root_workspace and root_workspace != "root") else ""
-        if norm.startswith("../"):
-            if root_workspace_path is not None:
-                joined = posixpath.normpath(f"{Path(root_workspace_path).as_posix()}/{norm}")
-                return normalize_worktree_path(
-                    joined,
-                    root_workspace=root_workspace,
-                    root_workspace_path=root_workspace_path,
-                    known_repos=repos,
-                    is_workspace_uri=is_workspace_uri,
-                )
-            rest = norm
-            while rest.startswith("../"):
-                rest = rest[3:]
-            seg = rest.split("/", 1)[0].strip()
-            return seg if seg and seg not in (".", "..") else ""
-        return root_workspace if (root_workspace and root_workspace != "root") else ""
-
-    if is_workspace_uri:
-        base = norm.rstrip("/").rsplit("/", 1)[-1].strip()
-        return base
-
-    if root_workspace_path is not None:
-        root_posix = Path(root_workspace_path).as_posix().rstrip("/")
-        parent_posix = Path(root_workspace_path).parent.as_posix().rstrip("/")
-        if norm == root_posix or norm.startswith(root_posix + "/"):
-            return root_workspace or Path(root_workspace_path).name
-        if parent_posix and parent_posix != "/" and norm.startswith(parent_posix + "/"):
-            rel = norm[len(parent_posix) + 1 :]
-            first_seg = rel.split("/", 1)[0].strip()
-            if first_seg and not first_seg.startswith("."):
-                return first_seg
-
-    parts = [p for p in norm.split("/") if p]
-    for seg in reversed(parts):
-        if seg in repos:
-            return seg
-
-    try:
-        cand = Path(cleaned).expanduser()
-        probe = cand if cand.is_dir() else cand.parent
-        for _ in range(6):
-            if probe.is_dir() and (probe / ".git").exists():
-                return probe.name
-            if probe.parent == probe:
-                break
-            probe = probe.parent
-    except Exception:
-        pass
-
-    for idx, seg in enumerate(parts[:-1]):
-        if seg.lower() in _CONTAINER_DIRS or re.match(r"^tmp[a-z0-9_]{4,}$", seg, re.IGNORECASE):
-            nxt = parts[idx + 1]
-            if nxt and not nxt.startswith("."):
-                return nxt
-    return ""
+    return str(
+        _tr_reader.normalize_worktree_path(
+            raw_path,
+            root_workspace=root_workspace,
+            root_workspace_path=root_workspace_path,
+            known_repos=repos,
+            is_workspace_uri=is_workspace_uri,
+        )
+    )
 
 
 def classify_workspace_kind(
@@ -281,7 +137,8 @@ def classify_workspace_kind(
             is_atelier = (rpath / "projects.json").is_file() or (rpath / "specs").is_dir()
             return "atelier" if is_atelier else "code"
 
-    if ws_clean.lower() == "gravity-studio":
+    # Documented historical `*-studio` classification for legacy sessions without disk markers.
+    if ws_clean.lower().endswith("-studio"):
         return "atelier"
     return "code"
 

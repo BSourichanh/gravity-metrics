@@ -16,7 +16,8 @@ HOOK_SCRIPT = PLUGIN_ROOT / "hooks" / "pre_invocation_metrics.py"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from metrics import METRICS_MARKER, load_active_captures, load_history  # noqa: E402
+from metrics import METRICS_MARKER, load_active_captures, load_history, load_session_meta  # noqa: E402
+START_HOOK = PLUGIN_ROOT / "hooks" / "session_start_metrics.py"
 
 
 def _write_transcript(conv_dir: Path, lines: list) -> Path:
@@ -194,7 +195,7 @@ class TestPreInvocationHook(unittest.TestCase):
             out_immut = _run_hook(json.dumps(payload_b_immut), store, brain)
             self.assertNotIn("terminationBehavior", out_immut)
             md_immut = out_immut["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
-            self.assertIn("déjà enregistrée", md_immut)
+            self.assertIn("déjà archivée", md_immut)
             records_immut = load_history(store / "data" / "history.jsonl")
             self.assertEqual(len(records_immut), 1)
             self.assertEqual(records_immut[0]["label"], records[0]["label"])
@@ -476,7 +477,7 @@ class TestPreInvocationHook(unittest.TestCase):
             bridge_home = root / "bridge"
             bridge_home.mkdir()
             db_path = bridge_home / "bridge.db"
-            ws = root / "GravityStudio"
+            ws = root / "GravityWorkshop"
             ws.mkdir()
 
             root_cid = "7777aaaa-1111-2222-3333-444455556666"
@@ -503,7 +504,7 @@ class TestPreInvocationHook(unittest.TestCase):
                                     "ToolName": '"send_message"',
                                     "Arguments": json.dumps(
                                         {
-                                            "from_workspace": "gravity-studio",
+                                            "from_workspace": "gravity-workshop",
                                             "to_workspace": "gravity-metrics",
                                             "msg_type": "handoff",
                                             "dispatch": True,
@@ -538,7 +539,7 @@ class TestPreInvocationHook(unittest.TestCase):
             )
             con.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("thr-20261122-abc123", "gravity-studio", "gravity-metrics", "handoff", "open", child_cid, root_cid, "2026-11-22T13:00:15Z"),
+                ("thr-20261122-abc123", "gravity-workshop", "gravity-metrics", "handoff", "open", child_cid, root_cid, "2026-11-22T13:00:15Z"),
             )
             con.execute(
                 "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -579,343 +580,253 @@ class TestPreInvocationHook(unittest.TestCase):
             self.assertEqual(recs[0]["bridge_children_count"], 0)
             self.assertEqual(recs[0]["bridge_workspaces"], [])
 
-    def test_architect_auto_capture_idempotence_and_exclusions(self) -> None:
+    def test_spi2_capture_policy_both_schemas_exclusions_and_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            g_home = root / "gravity_home"
             store = root / "store"
             brain = root / "brain"
-            ws = root / "ProjetArch"
+            ws = root / "ProjetSPI2"
             ws.mkdir()
+            (g_home / "core").mkdir(parents=True)
+
+            # Schema A (validator_core list format) + disabled policy (auto_start=False)
+            (g_home / "core" / "modules.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "modules": [
+                            {
+                                "id": "atelier",
+                                "commands": ["/atelier-cmd"],
+                                "capture_policy": {
+                                    "commands": ["/atelier-cmd"],
+                                    "exclude_subcommands": ["init", "sync", "status", "audit", "archive"],
+                                    "consultative_bypass": True,
+                                    "label_prefix": "atelier",
+                                },
+                            },
+                            {
+                                "id": "silent",
+                                "commands": ["/silent-cmd"],
+                                "capture_policy": {
+                                    "commands": ["/silent-cmd"],
+                                    "auto_start": False,
+                                    "exclude_subcommands": [],
+                                    "consultative_bypass": True,
+                                    "label_prefix": "silent",
+                                },
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             cid = "9999aaaa-1111-2222-3333-444455556666"
             tpath = _write_transcript(
                 brain / cid,
                 [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-24T10:00:00Z", "content": "Intro"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-24T10:00:05Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Intro"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
                 ],
             )
+            env_g = {"GRAVITY_HOME": str(g_home)}
 
-            # 1) invocationNum = 1 / None / True + commandes maintenance/vide ignorés
-            for bad_inv in (1, None, True):
-                out = _run_hook(
-                    json.dumps({
-                        "conversationId": cid,
-                        "transcriptPath": str(tpath),
-                        "cwd": str(ws),
-                        "invocationNum": bad_inv,
-                        "lastUserInput": "/gravity-architect spec nouveau module",
-                    }),
-                    store,
-                    brain,
-                )
-                self.assertEqual(out, {})
+            # invocationNum=1/True, bare command, excluded subcommands, consultative/evo/--no-verify bypass, auto_start=False -> no capture
+            for payload in (
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 1, "lastUserInput": "/atelier-cmd spec x"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": True, "lastUserInput": "/atelier-cmd spec x"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd init"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd status"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd pourquoi ce module ?"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd evo"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd evo why is this slow?"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd --no-verify"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd --no-verify explain this"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd evo status"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/atelier-cmd evo --no-verify"},
+                {"conversationId": cid, "transcriptPath": str(tpath), "cwd": str(ws), "invocationNum": 0, "lastUserInput": "/silent-cmd build feature"},
+            ):
+                self.assertEqual(_run_hook(json.dumps(payload), store, brain, extra_env=env_g), {})
             self.assertEqual(load_active_captures(store), {})
 
-            for maint_cmd in (
-                "/gravity-architect",
-                "/gravity-architect   ",
-                "/gravity-architect init",
-                "/gravity-architect add",
-                "/gravity-architect sync",
-                "/gravity-architect status",
-                "/gravity-architect archive mon-lot",
-                "/gravity-architect audit security",
-            ):
-                out = _run_hook(
+            # Action command preceded by evo / --no-verify still captures when not excluded/consultative
+            cid_evo_act = "7777cccc-1111-2222-3333-444455558888"
+            tpath_evo_act = _write_transcript(
+                brain / cid_evo_act,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Intro"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                ],
+            )
+            self.assertEqual(
+                _run_hook(
                     json.dumps({
-                        "conversationId": cid,
-                        "transcriptPath": str(tpath),
+                        "conversationId": cid_evo_act,
+                        "transcriptPath": str(tpath_evo_act),
                         "cwd": str(ws),
                         "invocationNum": 0,
-                        "lastUserInput": maint_cmd,
+                        "lastUserInput": "/atelier-cmd evo build feature X",
                     }),
                     store,
                     brain,
-                )
-                self.assertEqual(out, {})
-            self.assertEqual(load_active_captures(store), {})
+                    extra_env=env_g,
+                ),
+                {},
+            )
+            caps_evo = load_active_captures(store)
+            self.assertIn(cid_evo_act, caps_evo)
+            self.assertEqual(caps_evo[cid_evo_act]["source"], "atelier_auto")
+            self.assertEqual(caps_evo[cid_evo_act]["label"], "atelier-build-feature")
 
-            # 2) invocationNum == 0 avec instruction -> passthrough {}, capture architect-<slug>, 0 fichier workspace
+            # Action override in consultative question -> captured
             out_ok = _run_hook(
                 json.dumps({
                     "conversationId": cid,
                     "transcriptPath": str(tpath),
                     "cwd": str(ws),
                     "invocationNum": 0,
-                    "lastUserInput": '/gravity-architect handoff /caveman ultra "Créer écosystème W1"',
+                    "lastUserInput": "/atelier-cmd comment créer une spec w8 ?",
                 }),
                 store,
                 brain,
+                extra_env=env_g,
             )
             self.assertEqual(out_ok, {})
-            self.assertEqual(list(ws.iterdir()), [])
             caps = load_active_captures(store)
             self.assertIn(cid, caps)
             self.assertEqual(caps[cid]["start_step"], 2)
-            self.assertEqual(caps[cid]["label"], "architect-creer-ecosysteme-w1")
-            self.assertEqual(caps[cid]["project"], "ProjetArch")
-            self.assertEqual(caps[cid]["source"], "architect_auto")
+            self.assertTrue(caps[cid]["label"].startswith("atelier-"))
+            self.assertEqual(caps[cid]["source"], "atelier_auto")
 
-            # 3) Non-écrasement d'une capture ouverte (overwrite=False) sur second /gravity-architect invocationNum=0
-            _write_transcript(
-                brain / cid,
+            # Schema B (T3-P14 dict format, invocationNum omitted -> is_initial_invocation True)
+            cid2 = "8888bbbb-1111-2222-3333-444455557777"
+            tpath2 = _write_transcript(
+                brain / cid2,
                 [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Intro"},
-                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
-                    {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": "/gravity-architect handoff"},
-                    {"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 2_000, "cache_read_tokens": 0, "output_tokens": 60, "tool_calls": []},
-                ],
-            )
-            out_second = _run_hook(
-                json.dumps({
-                    "conversationId": cid,
-                    "transcriptPath": str(tpath),
-                    "cwd": str(ws),
-                    "invocationNum": 0,
-                    "lastUserInput": "/gravity-architect autre instruction",
-                }),
-                store,
-                brain,
-            )
-            self.assertEqual(out_second, {})
-            caps_after = load_active_captures(store)
-            self.assertEqual(caps_after[cid]["start_step"], 2)
-            self.assertEqual(caps_after[cid]["label"], "architect-creer-ecosysteme-w1")
-
-            # 4) /gravity-metrics start explicite écrase (overwrite=True)
-            out_explicit = _run_hook(
-                json.dumps({
-                    "conversationId": cid,
-                    "transcriptPath": str(tpath),
-                    "cwd": str(ws),
-                    "lastUserInput": "/gravity-metrics start jalon-manuel",
-                }),
-                store,
-                brain,
-            )
-            self.assertEqual(out_explicit.get("terminationBehavior"), "terminate")
-            caps_explicit = load_active_captures(store)
-            self.assertEqual(caps_explicit[cid]["start_step"], 4)
-            self.assertEqual(caps_explicit[cid]["label"], "jalon-manuel")
-            self.assertEqual(caps_explicit[cid]["source"], "manual")
-
-    def test_architect_consultative_questions_skip_auto_capture(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            store = root / "store"
-            brain = root / "brain"
-            ws = root / "ProjetConsult"
-            ws.mkdir()
-
-            cid = "c1000001-1111-2222-3333-444455556666"
-            tpath = _write_transcript(
-                brain / cid,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Intro"},
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "init"},
                     {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
                 ],
             )
-            for consult_prompt in (
-                "/gravity-architect pourquoi ce module existe ?",
-                "/gravity-architect comment fonctionne le cache ?",
-                "/gravity-architect explique-moi ce code",
-                "/gravity-architect qu'est-ce que gravity-metrics ?",
-                "/gravity-architect liste les dépôts suivis",
-                "/gravity-architect why does this fail?",
-                "/gravity-architect how does sync work?",
-                "/gravity-architect explain the lifecycle",
-            ):
-                out = _run_hook(
-                    json.dumps({
-                        "conversationId": cid,
-                        "transcriptPath": str(tpath),
-                        "cwd": str(ws),
-                        "invocationNum": 0,
-                        "lastUserInput": consult_prompt,
-                    }),
+            (g_home / "core" / "modules.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "modules": {
+                            "custom": {
+                                "id": "custom",
+                                "commands": ["/custom-mod"],
+                                "capture_policy": {
+                                    "auto_start": True,
+                                    "exclude_subcommands": ["init", "sync", "status", "audit", "archive"],
+                                },
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _run_hook(
+                    json.dumps({"conversationId": cid2, "transcriptPath": str(tpath2), "cwd": str(ws), "lastUserInput": "/custom-mod init"}),
                     store,
                     brain,
+                    extra_env=env_g,
+                ),
+                {},
+            )
+            self.assertNotIn(cid2, load_active_captures(store))
+            self.assertEqual(
+                _run_hook(
+                    json.dumps({"conversationId": cid2, "transcriptPath": str(tpath2), "cwd": str(ws), "lastUserInput": "/custom-mod refactor auth"}),
+                    store,
+                    brain,
+                    extra_env=env_g,
+                ),
+                {},
+            )
+            caps2 = load_active_captures(store)
+            self.assertIn(cid2, caps2)
+            self.assertEqual(caps2[cid2]["source"], "custom_auto")
+            self.assertEqual(caps2[cid2]["label"], "custom-refactor-auth")
+
+    def test_session_start_worktree_skip_and_t3_p29_wrapper(self) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("session_start_metrics", START_HOOK)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(mod)
+
+        self.assertTrue(mod._is_subagent_worktree("/home/user/.gemini/antigravity/worktrees/wt-1"))
+        self.assertTrue(mod._is_subagent_worktree("/home/user/gravity-worktrees/repo-w1"))
+        self.assertTrue(mod._is_subagent_worktree(r"C:\repo\worktrees\wt-2"))
+        self.assertFalse(mod._is_subagent_worktree("/home/user/projects/my-app"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = root / "store"
+            wt_dir = root / "gravity-worktrees" / "repo-w1"
+            wt_dir.mkdir(parents=True)
+            ws_dir = root / "my-repo"
+            ws_dir.mkdir()
+
+            for cid, target_dir in (("wt-cid-1", wt_dir), ("ws-cid-1", ws_dir)):
+                proc = subprocess.run(
+                    [sys.executable, "-B", str(START_HOOK)],
+                    input=json.dumps({"conversationId": cid, "cwd": str(target_dir)}),
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    env={**os.environ, "GRAVITY_METRICS_HOME": str(store), "PYTHONDONTWRITEBYTECODE": "1"},
+                    timeout=10,
+                    check=False,
                 )
-                self.assertEqual(out, {})
-            self.assertEqual(load_active_captures(store), {})
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(json.loads(proc.stdout), {})
 
-            # Une question contenant `spec` ou un verbe d'action reste auto-capturée (`architect_auto`)
-            out_action = _run_hook(
-                json.dumps({
-                    "conversationId": cid,
-                    "transcriptPath": str(tpath),
-                    "cwd": str(ws),
-                    "invocationNum": 0,
-                    "lastUserInput": "/gravity-architect comment créer une spec pour w1 ?",
-                }),
-                store,
-                brain,
-            )
-            self.assertEqual(out_action, {})
-            caps = load_active_captures(store)
-            self.assertIn(cid, caps)
-            self.assertEqual(caps[cid]["source"], "architect_auto")
+            meta = load_session_meta(store)
+            self.assertNotIn("wt-cid-1", meta)
+            self.assertIn("ws-cid-1", meta)
+            self.assertEqual(meta["ws-cid-1"]["project"], "my-repo")
 
-    def test_architect_auto_start_r1_and_slash_record_update_wording(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            store = root / "store"
-            brain = root / "brain"
-            ws = root / "ProjetR1"
-            ws.mkdir()
+    def test_hooks_json_session_start_disabled_and_hook_runtime_retired(self) -> None:
+        self.assertFalse((PLUGIN_ROOT / "hooks" / "hook_runtime.py").exists())
+        hooks_cfg = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))
 
-            # 1) R1 : nouvelle session avec USER_INPUT(0) + SYSTEM_MESSAGE(1) déjà écrits -> start_step == 0
-            cid_new = "a1000001-1111-2222-3333-444455556666"
-            t_new = _write_transcript(
-                brain / cid_new,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:00:00Z", "content": "/gravity-architect spec r1-new"},
-                    {"step_index": 1, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:00:01Z", "content": "caveman"},
-                ],
-            )
-            out_r1_new = _run_hook(
-                json.dumps({
-                    "conversationId": cid_new,
-                    "transcriptPath": str(t_new),
-                    "cwd": str(ws),
-                    "invocationNum": 0,
-                    "lastUserInput": "/gravity-architect spec r1-new",
-                }),
-                store,
-                brain,
-            )
-            self.assertEqual(out_r1_new, {})
-            caps = load_active_captures(store)
-            self.assertEqual(caps[cid_new]["start_step"], 0)
+        self.assertIn("gravity-metrics-session", hooks_cfg)
+        sess_grp = hooks_cfg["gravity-metrics-session"]
+        self.assertIs(sess_grp.get("enabled"), False)
+        self.assertNotIn("PreInvocation", sess_grp)
+        self.assertEqual(
+            [h.get("command") for h in sess_grp.get("SessionStart", [])],
+            ["python3 hooks/session_start_metrics.py"],
+        )
 
-            # 2) R1 : reprise conversation avec USER_INPUT(72) + SYSTEM_MESSAGE(73) -> start_step == 72
-            cid_res = "a2000001-1111-2222-3333-444455556666"
-            t_res = _write_transcript(
-                brain / cid_res,
-                [
-                    {"step_index": 70, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T08:00:00Z", "content": "Chat"},
-                    {"step_index": 71, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T08:00:10Z", "model": "gemini-4-neon", "input_tokens": 50_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
-                    {"step_index": 72, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:05:00Z", "content": "/gravity-architect spec r1-res"},
-                    {"step_index": 73, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:05:01Z", "content": "caveman"},
-                ],
-            )
-            _run_hook(
-                json.dumps({
-                    "conversationId": cid_res,
-                    "transcriptPath": str(t_res),
-                    "cwd": str(ws),
-                    "invocationNum": 0,
-                    "lastUserInput": "/gravity-architect spec r1-res",
-                }),
-                store,
-                brain,
-            )
-            caps_res = load_active_captures(store)
-            self.assertEqual(caps_res[cid_res]["start_step"], 72)
+        self.assertIn("gravity-metrics-command", hooks_cfg)
+        cmd_grp = hooks_cfg["gravity-metrics-command"]
+        self.assertIs(cmd_grp.get("enabled"), True)
+        self.assertNotIn("SessionStart", cmd_grp)
+        self.assertEqual(
+            [h.get("command") for h in cmd_grp.get("PreInvocation", [])],
+            ["python3 hooks/pre_invocation_metrics.py"],
+        )
 
-            # 3) Activité + `/gravity-metrics record` + `--update` post-clôture sans doublon
-            _write_transcript(
-                brain / cid_res,
-                [
-                    {"step_index": 70, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T08:00:00Z", "content": "Chat"},
-                    {"step_index": 71, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T08:00:10Z", "model": "gemini-4-neon", "input_tokens": 50_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
-                    {"step_index": 72, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:05:00Z", "content": "/gravity-architect spec r1-res"},
-                    {"step_index": 73, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:05:01Z", "content": "caveman"},
-                    {"step_index": 74, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T09:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "edit_file", "args": {"Path": "plugin/metrics/store.py"}}]},
-                ],
+        # T4-S16 contract invariants
+        self.assertTrue(
+            any(
+                isinstance(v, dict)
+                and "SessionStart" in v
+                and v.get("enabled") is False
+                and "PreInvocation" not in v
+                for v in hooks_cfg.values()
             )
-            out_rec = _run_hook(
-                json.dumps({
-                    "conversationId": cid_res,
-                    "transcriptPath": str(t_res),
-                    "cwd": str(ws),
-                    "lastUserInput": f'/gravity-metrics record {cid_res[:8]} r1-run -n "note initiale"',
-                }),
-                store,
-                brain,
-            )
-            smsg_rec = out_rec["injectSteps"][0]["systemMessage"]["systemMessage"]
-            self.assertIn("enregistrée", smsg_rec)
-            recs1 = load_history(store / "data" / "history.jsonl")
-            self.assertEqual(len(recs1), 1)
-            self.assertEqual(recs1[0]["window_start_step"], 72)
-            self.assertEqual(recs1[0]["input_tokens"], 10_000)
-
-            # Nouveaux steps + `/gravity-metrics --update` sans capture active -> mise à jour sans doublon
-            _write_transcript(
-                brain / cid_res,
-                [
-                    {"step_index": 70, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T08:00:00Z", "content": "Chat"},
-                    {"step_index": 71, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T08:00:10Z", "model": "gemini-4-neon", "input_tokens": 50_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
-                    {"step_index": 72, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:05:00Z", "content": "/gravity-architect spec r1-res"},
-                    {"step_index": 73, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:05:01Z", "content": "caveman"},
-                    {"step_index": 74, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T09:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "edit_file", "args": {"Path": "plugin/metrics/store.py"}}]},
-                    {"step_index": 75, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:06:00Z", "content": "/gravity-metrics record"},
-                    {"step_index": 76, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:06:01Z", "content": METRICS_MARKER},
-                    {"step_index": 77, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:07:00Z", "content": "Push final"},
-                    {"step_index": 78, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T09:07:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "run_command", "args": {"CommandLine": "git push origin dev"}}]},
-                ],
-            )
-            out_upd = _run_hook(
-                json.dumps({
-                    "conversationId": cid_res,
-                    "transcriptPath": str(t_res),
-                    "cwd": str(ws),
-                    "lastUserInput": "/gravity-metrics --update",
-                }),
-                store,
-                brain,
-            )
-            smsg_upd = out_upd["injectSteps"][0]["systemMessage"]["systemMessage"]
-            self.assertIn("mise à jour", smsg_upd)
-            recs2 = load_history(store / "data" / "history.jsonl")
-            self.assertEqual(len(recs2), 1)
-            self.assertEqual(recs2[0]["label"], "r1-run")
-            self.assertEqual(recs2[0]["note"], "note initiale")
-            self.assertEqual(recs2[0]["input_tokens"], 15_000)
-
-            # 4) Aide erreur mentionne `record` et `--update`
-            out_err = _run_hook(json.dumps({"lastUserInput": "/gravity-metrics record"}), store, brain)
-            self.assertEqual(out_err["terminationBehavior"], "terminate")
-            err_md = out_err["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
-            self.assertIn("record", err_md)
-            self.assertIn("--update", err_md)
-
-    def test_architect_auto_capture_reactive_wakeup_anchors_on_user_input(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            store = root / "store"
-            brain = root / "brain"
-            ws = root / "ProjetWakeup"
-            ws.mkdir(parents=True)
-
-            cid = "4de96631-aaaa-bbbb-cccc-ddddeeeeffff"
-            prompt_txt = "/gravity-architect wave-1 reactive wakeup"
-            tpath = _write_transcript(
-                brain / cid,
-                [
-                    {"step_index": 53, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T08:00:10Z", "model": "gemini-4-neon", "input_tokens": 50_000, "cache_read_tokens": 0, "output_tokens": 500, "tool_calls": []},
-                    {"step_index": 54, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T09:05:00Z", "content": f"<USER_REQUEST>\n{prompt_txt}\n</USER_REQUEST>"},
-                    {"step_index": 55, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-25T09:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 10_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": []},
-                    {"step_index": 132, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-25T09:06:00Z", "content": "wakeup"},
-                ],
-            )
-            out = _run_hook(
-                json.dumps({
-                    "conversationId": cid,
-                    "transcriptPath": str(tpath),
-                    "cwd": str(ws),
-                    "invocationNum": 0,
-                    "lastUserInput": f"<ADDITIONAL_METADATA>m</ADDITIONAL_METADATA>\n{prompt_txt}",
-                }),
-                store,
-                brain,
-            )
-            self.assertEqual(out, {})
-            caps = load_active_captures(store)
-            self.assertIn(cid, caps)
-            self.assertEqual(caps[cid]["start_step"], 54)
+        )
+        for v in hooks_cfg.values():
+            if isinstance(v, dict) and "PreInvocation" in v:
+                self.assertIsNot(v.get("enabled"), False)
 
 
 if __name__ == "__main__":

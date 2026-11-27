@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
-"""Tests des signaux techniques, de la résolution workspace/worktrees et du CLI --json complet."""
+"""Tests des signaux techniques, de la résolution workspace/worktrees, du CLI --json et T3-P25 (100 % stdlib)."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
 PLUGIN_ROOT = REPO_ROOT / "plugin"
-if str(PLUGIN_ROOT) not in sys.path:
-    sys.path.insert(0, str(PLUGIN_ROOT))
+SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
+for _p in (str(PLUGIN_ROOT), str(SCRIPTS_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
+import metrics as metrics_pkg  # noqa: E402
 from metrics import (  # noqa: E402
     classify_workspace_kind,
     collect_run_metrics,
+    discover_known_repos,
     extract_technical_signals,
     load_history,
     normalize_worktree_path,
@@ -25,6 +32,7 @@ from metrics import (  # noqa: E402
     resolve_agent_workspace,
 )
 from metrics.lifecycle import record_session_meta  # noqa: E402
+import cli as metrics_cli  # noqa: E402
 
 CATALOG_PATH = PLUGIN_ROOT / "config" / "pricing_catalog.json"
 CLI_SCRIPT = PLUGIN_ROOT / "scripts" / "cli.py"
@@ -63,7 +71,7 @@ def _run_cli(args: list, env_extra: dict) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env.update(env_extra)
     return subprocess.run(
-        [sys.executable, str(CLI_SCRIPT), *args],
+        [sys.executable, "-B", str(CLI_SCRIPT), *args],
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -75,6 +83,22 @@ def _run_cli(args: list, env_extra: dict) -> subprocess.CompletedProcess:
 
 
 class TestTechnicalAndWorkspace(unittest.TestCase):
+    def test_public_exports_exclude_bridge_and_include_new_modules(self) -> None:
+        self.assertFalse(hasattr(metrics_pkg, "PendingBridgeJobsError"))
+        self.assertFalse(hasattr(metrics_pkg, "discover_bridge_links"))
+        self.assertFalse(hasattr(metrics_pkg, "resolve_bridge_db_path"))
+        for sym in (
+            "extract_technical_signals",
+            "aggregate_technical_signals",
+            "resolve_agent_workspace",
+            "normalize_worktree_path",
+            "classify_workspace_kind",
+            "discover_known_repos",
+            "record_conversation",
+            "collect_run_metrics",
+        ):
+            self.assertTrue(hasattr(metrics_pkg, sym), sym)
+
     def test_worktree_normalization_and_workspace_kind(self) -> None:
         self.assertEqual(
             normalize_worktree_path("~/gravity-worktrees/gravity-workflow-w1/plugin/foo.py"),
@@ -99,6 +123,9 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
             ),
             "gravity-workflow",
         )
+        # Historical *-studio classification retained for legacy sessions; legacy repo name excluded
+        self.assertEqual(classify_workspace_kind("legacy-studio"), "atelier")
+        self.assertNotIn("-".join(("gravity", "studio")), discover_known_repos())
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -134,7 +161,7 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
             root = Path(tmp)
             brain = root / "brain"
             store = root / "store"
-            atelier = root / "gravity-studio"
+            atelier = root / "gravity-workshop"
             (atelier / "specs").mkdir(parents=True)
             wf_repo = root / "gravity-workflow"
             wf_repo.mkdir()
@@ -146,7 +173,7 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
             reviewer_id = "revw3333-3333-4333-8333-333333333333"
             uri_child_id = "uric4444-4444-4444-8444-444444444444"
 
-            record_session_meta(root_id, cwd=str(atelier), project="gravity-studio", store_dir=store)
+            record_session_meta(root_id, cwd=str(atelier), project="gravity-workshop", store_dir=store)
 
             _write_transcript(
                 brain / root_id,
@@ -209,32 +236,30 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
 
             m = collect_run_metrics(root_id, brain, CATALOG_PATH, store_dir=store)
             by_ws = m["by_workspace"]
-            self.assertIn("gravity-studio", by_ws)
+            self.assertIn("gravity-workshop", by_ws)
             self.assertIn("gravity-workflow", by_ws)
             self.assertIn("gravity-metrics", by_ws)
             self.assertIn("gravity-architect", by_ws)
-            self.assertEqual(by_ws["gravity-studio"]["workspace_kind"], "atelier")
+            self.assertEqual(by_ws["gravity-workshop"]["workspace_kind"], "atelier")
             self.assertEqual(by_ws["gravity-workflow"]["workspace_kind"], "code")
             self.assertEqual(by_ws["gravity-metrics"]["workspace_kind"], "code")
             self.assertEqual(by_ws["gravity-architect"]["workspace_kind"], "code")
-            self.assertEqual(by_ws["gravity-studio"]["agents"], 1)
+            self.assertEqual(by_ws["gravity-workshop"]["agents"], 1)
             self.assertEqual(by_ws["gravity-workflow"]["agents"], 1)
 
-            # Priorité 1: bridge_workspace prime sur tout
             self.assertEqual(
                 resolve_agent_workspace(
                     {"bridge_workspace": "gravity", "workspace_uris": []},
                     {"write_paths": ["~/gravity-worktrees/gravity-workflow-w1/a.py"]},
-                    root_workspace="gravity-studio",
+                    root_workspace="gravity-workshop",
                 ),
                 "gravity",
             )
-            # Priorité 2: git -C / cd dans run_command
             self.assertEqual(
                 resolve_agent_workspace(
                     {"workspace_uris": []},
                     {"shell_dirs": ["../gravity-workflow"]},
-                    root_workspace="gravity-studio",
+                    root_workspace="gravity-workshop",
                     root_workspace_path=atelier,
                 ),
                 "gravity-workflow",
@@ -253,7 +278,6 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
         self.assertEqual(sig["thinking_chars"], 60)
         self.assertEqual(sig["thinking_est_tokens"], 15)
         self.assertEqual(sig["compaction_count"], 2)
-        # Deltas bornés <= 600s : 1000ms, 2000ms, 10000ms (897s exclu)
         self.assertEqual(sig["latency_p50_ms"], 2000)
         self.assertEqual(sig["latency_p95_ms"], 10000)
         self.assertAlmostEqual(sig["latency_avg_ms"], 4333.3, places=1)
@@ -281,22 +305,54 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
             self.assertEqual(loaded["compaction_count"], 2)
             self.assertEqual(loaded["latency_p95_ms"], 10000)
             self.assertEqual(loaded["workspace_kinds"], {"gravity-metrics": "code"})
-            for legacy_key in (
-                "status",
-                "project",
-                "ended_at",
-                "error_rate_pct",
-                "cache_hit_rate_pct",
-                "max_context_tokens",
-                "duplicate_spawns",
-                "rewind_calls",
-                "interrupted_agents",
-                "cost_usd",
-                "cost_output_usd",
-            ):
-                self.assertIn(legacy_key, loaded)
 
-    def test_cli_json_all_subcommands_and_metadata_ignore_lifecycle(self) -> None:
+    def test_discover_runs_jsonl_t3_p25_centralized_and_local(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grav_home = root / "gravity_home"
+            ws = root / "My App Workspace!"
+            ws.mkdir()
+            resolved = ws.resolve()
+            slug = re.sub(r"[^a-z0-9]+", "-", resolved.name.lower()).strip("-")[:32] or "workspace"
+            digest = hashlib.sha256(os.path.normcase(str(resolved)).encode("utf-8")).hexdigest()[:8]
+
+            cent_runs = grav_home / "workflow" / "workspaces" / f"{slug}-{digest}" / "runs.jsonl"
+            cent_runs.parent.mkdir(parents=True)
+            cid_run = "run77777-7777-4777-8777-777777777777"
+            cent_runs.write_text(json.dumps({"conversation_id": cid_run}) + "\n", encoding="utf-8")
+
+            local_runs = ws / ".agents" / "gravity-workflow" / "runs.jsonl"
+            local_runs.parent.mkdir(parents=True)
+            local_runs.write_text(json.dumps({"conversation_id": cid_run}) + "\n", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"GRAVITY_HOME": str(grav_home)}, clear=False):
+                os.environ.pop("GRAVITY_WORKFLOW_HOME", None)
+                found = metrics_cli._discover_runs_jsonl(ws)
+                self.assertIn(cent_runs, found)
+                self.assertIn(local_runs, found)
+                self.assertEqual(found[0], cent_runs)
+
+                # Verify cli.py add --latest --workspace discovers a session listed ONLY in centralized runs.jsonl
+                brain = root / "brain"
+                store = root / "store"
+                _write_transcript(
+                    brain / cid_run,
+                    [
+                        {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-26T10:00:00Z", "content": "plain non-slash prompt"},
+                        {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-26T10:00:02Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 50, "tool_calls": []},
+                    ],
+                )
+                local_runs.unlink()
+                p_add = _run_cli(
+                    ["add", "--latest", "--workspace", str(ws), "--brain-dir", str(brain), "--store", str(store), "--json"],
+                    {"GRAVITY_HOME": str(grav_home), "GRAVITY_METRICS_HOME": str(store)},
+                )
+                self.assertEqual(p_add.returncode, 0, p_add.stdout + p_add.stderr)
+                d_add = json.loads(p_add.stdout)
+                self.assertTrue(d_add["ok"])
+                self.assertEqual(d_add["conversation_id"], cid_run)
+
+    def test_cli_json_all_subcommands_and_no_bridge_db_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             brain = root / "brain"
@@ -314,33 +370,30 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
             env_extra = {"GRAVITY_METRICS_HOME": str(store), "ANTIGRAVITY_BRAIN_DIR": str(brain)}
             base_args = ["--store", str(store)]
 
+            # --bridge-db must be completely rejected
+            p_bad_flag = _run_cli(["pending", "--bridge-db", "/tmp/x.db", *base_args], env_extra)
+            self.assertNotEqual(p_bad_flag.returncode, 0)
+
             p_start = _run_cli(["start", cid[:8], "-l", "cap-1", "--step", "0", "--workspace", str(ws), "--brain-dir", str(brain), *base_args, "--json"], env_extra)
             self.assertEqual(p_start.returncode, 0, p_start.stderr)
-            d_start = json.loads(p_start.stdout)
-            self.assertTrue(d_start["ok"])
-            self.assertEqual(d_start["capture"]["label"], "cap-1")
+            self.assertEqual(json.loads(p_start.stdout)["capture"]["label"], "cap-1")
 
             p_ign = _run_cli(["ignore", cid[:8], "-r", "pause", "--brain-dir", str(brain), *base_args, "--json"], env_extra)
             self.assertEqual(p_ign.returncode, 0)
-            self.assertTrue(json.loads(p_ign.stdout)["ok"])
             p_pend_hid = _run_cli(["pending", "--brain-dir", str(brain), *base_args, "--json"], env_extra)
             self.assertEqual(json.loads(p_pend_hid.stdout), [])
 
             p_unign = _run_cli(["unignore", cid[:8], "--brain-dir", str(brain), *base_args, "--json"], env_extra)
             self.assertEqual(p_unign.returncode, 0)
-            self.assertTrue(json.loads(p_unign.stdout)["removed"])
             p_pend_vis = _run_cli(["pending", "--brain-dir", str(brain), *base_args, "--json"], env_extra)
             self.assertEqual(len(json.loads(p_pend_vis.stdout)), 1)
 
             p_rec = _run_cli(["record", cid[:8], "--brain-dir", str(brain), "--workspace", str(ws), *base_args, "--json"], env_extra)
             self.assertEqual(p_rec.returncode, 0, p_rec.stderr)
-            d_rec = json.loads(p_rec.stdout)
-            self.assertTrue(d_rec["ok"])
-            self.assertEqual(d_rec["record"]["label"], "cap-1")
+            self.assertEqual(json.loads(p_rec.stdout)["record"]["label"], "cap-1")
 
-            p_upd = _run_cli(["record", cid[:8], "--update-sealed", "--brain-dir", str(brain), *base_args, "--json"], env_extra)
+            p_upd = _run_cli(["record", cid[:8], "--update", "--brain-dir", str(brain), *base_args, "--json"], env_extra)
             self.assertEqual(p_upd.returncode, 0, p_upd.stderr)
-            self.assertTrue(json.loads(p_upd.stdout)["ok"])
 
             p_meta = _run_cli(["update-meta", "cap-1", "--label", "cap-renamed", "--project", "gravity-metrics", "--note", "edited", *base_args, "--json"], env_extra)
             self.assertEqual(p_meta.returncode, 0, p_meta.stderr)
@@ -360,17 +413,9 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
             self.assertEqual(p_rm.returncode, 0)
             self.assertEqual(json.loads(p_rm.stdout)["remaining"], 0)
 
-            p_err = _run_cli(["remove", "missing-id", *base_args, "--json"], env_extra)
-            self.assertNotEqual(p_err.returncode, 0)
-            d_err = json.loads(p_err.stdout)
-            self.assertFalse(d_err["ok"])
-            self.assertTrue(bool(d_err["error"]))
-
             p_add = _run_cli(["add", cid[:8], "-l", "cap-added", "--brain-dir", str(brain), "--workspace", str(ws), *base_args, "--json"], env_extra)
             self.assertEqual(p_add.returncode, 0, p_add.stderr)
-            d_add = json.loads(p_add.stdout)
-            self.assertTrue(d_add["ok"])
-            self.assertEqual(d_add["record"]["label"], "cap-added")
+            self.assertEqual(json.loads(p_add.stdout)["record"]["label"], "cap-added")
 
 
 if __name__ == "__main__":

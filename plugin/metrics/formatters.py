@@ -55,7 +55,7 @@ def _format_models_summary(rec: Dict[str, Any]) -> str:
 
 def _status_badge(rec: Dict[str, Any]) -> str:
     status = str(rec.get("status") or "archived").strip().lower()
-    return "enregistrée" if status == "archived" else status
+    return "archivé" if status == "archived" else status
 
 
 def _bridge_badge(rec: Dict[str, Any]) -> str:

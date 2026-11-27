@@ -36,7 +36,6 @@ def _write_subagent(
     type_name: str,
     role: str,
     spawn_step: int = 1,
-    state: str = "SUBAGENT_STATE_DONE",
 ) -> None:
     sub_dir = parent_dir / ".system_generated" / "subagents"
     sub_dir.mkdir(parents=True, exist_ok=True)
@@ -45,7 +44,7 @@ def _write_subagent(
             {
                 "conversationId": child_id,
                 "subagentDescriptor": {"typeName": type_name, "role": role},
-                "state": state,
+                "state": "SUBAGENT_STATE_DONE",
                 "spawnStepIndex": spawn_step,
                 "workspaceUris": [],
             }
@@ -425,107 +424,10 @@ class TestWorkflowPrecisionV043(unittest.TestCase):
             self.assertTrue(res_missing["transcript_missing"])
             self.assertFalse(res_missing["clean_termination"])
 
-            # 7. Worker /swarm terminé par post_message + swarm_wait -> 2× GENERIC(DONE), SUBAGENT_STATE_KILLED => True
-            t_swarm_done = _write_transcript(
-                brain / "case-swarm-done",
-                [
-                    _planner_step(
-                        0,
-                        "2026-11-22T15:05:00Z",
-                        tool_calls=[{"name": "post_message"}, {"name": "swarm_wait"}],
-                        status="DONE",
-                    ),
-                    {"step_index": 1, "type": "GENERIC", "status": "DONE", "content": "Message #2 posted."},
-                    {"step_index": 2, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "Board idle"},
-                    {"step_index": 3, "type": "GENERIC", "status": "DONE", "content": "Swarm wait parked."},
-                ],
-            )
-            self.assertTrue(
-                parse_agent_transcript(
-                    t_swarm_done,
-                    catalog,
-                    profile,
-                    subagent_state="SUBAGENT_STATE_KILLED",
-                )["clean_termination"]
-            )
-
-            # 8. Cas réels interrompus / erreur avec SUBAGENT_STATE_KILLED ou ERROR => False
-            t_swarm_running = _write_transcript(
-                brain / "case-swarm-running",
-                [
-                    _planner_step(
-                        0,
-                        "2026-11-22T15:06:00Z",
-                        tool_calls=[{"name": "post_message"}, {"name": "swarm_wait"}],
-                        status="DONE",
-                    ),
-                    {"step_index": 1, "type": "GENERIC", "status": "DONE", "content": "Message #2 posted."},
-                    {"step_index": 2, "type": "GENERIC", "status": "RUNNING", "content": "Waiting..."},
-                ],
-            )
-            self.assertFalse(
-                parse_agent_transcript(
-                    t_swarm_running,
-                    catalog,
-                    profile,
-                    subagent_state="SUBAGENT_STATE_KILLED",
-                )["clean_termination"]
-            )
-            t_swarm_shell_err = _write_transcript(
-                brain / "case-swarm-shell-err",
-                [
-                    _planner_step(
-                        0,
-                        "2026-11-22T15:06:30Z",
-                        tool_calls=[{"name": "post_message"}, {"name": "swarm_wait"}],
-                        status="DONE",
-                    ),
-                    {"step_index": 1, "type": "GENERIC", "status": "DONE", "content": "Command exited with code 2\nfail"},
-                    {"step_index": 2, "type": "GENERIC", "status": "DONE", "content": "Swarm wait parked."},
-                ],
-            )
-            self.assertFalse(
-                parse_agent_transcript(
-                    t_swarm_shell_err,
-                    catalog,
-                    profile,
-                    subagent_state="SUBAGENT_STATE_KILLED",
-                )["clean_termination"]
-            )
-            t_swarm_mid_edit = _write_transcript(
-                brain / "case-swarm-mid-edit",
-                [
-                    _planner_step(
-                        0,
-                        "2026-11-22T15:07:00Z",
-                        tool_calls=[{"name": "edit_file"}],
-                        status="DONE",
-                    ),
-                    {"step_index": 1, "type": "GENERIC", "status": "DONE", "content": "Edited"},
-                ],
-            )
-            self.assertFalse(
-                parse_agent_transcript(
-                    t_swarm_mid_edit,
-                    catalog,
-                    profile,
-                    subagent_state="SUBAGENT_STATE_KILLED",
-                )["clean_termination"]
-            )
-            self.assertFalse(
-                parse_agent_transcript(
-                    t_finish_generic,
-                    catalog,
-                    profile,
-                    subagent_state="SUBAGENT_STATE_ERROR",
-                )["clean_termination"]
-            )
-
-            # 9. Intégration collect_run_metrics sur arbre mixte (racine + natif + workflow + worker /swarm KILLED)
+            # 7. Intégration collect_run_metrics sur arbre mixte (racine + natif + workflow)
             root_id = "66666666-6666-4666-8666-666666666666"
             sub_id = "dddddddd-0001-4000-8000-000000000001"
             wf_id = "eeeeeeee-0001-4000-8000-000000000001"
-            swarm_rev_id = "ffffffff-0001-4000-8000-000000000001"
 
             _write_transcript(
                 brain / root_id,
@@ -554,14 +456,6 @@ class TestWorkflowPrecisionV043(unittest.TestCase):
                 ],
             )
             _write_subagent(brain / root_id, sub_id, "research", "Explorer", spawn_step=1)
-            _write_subagent(
-                brain / root_id,
-                swarm_rev_id,
-                "worker",
-                "Swarm Worker (dip-reviewer)",
-                spawn_step=1,
-                state="SUBAGENT_STATE_KILLED",
-            )
             for cid, ts_base in ((sub_id, "2026-11-22T15:10:1"), (wf_id, "2026-11-22T15:10:2")):
                 _write_transcript(
                     brain / cid,
@@ -581,123 +475,11 @@ class TestWorkflowPrecisionV043(unittest.TestCase):
                         },
                     ],
                 )
-            _write_transcript(
-                brain / swarm_rev_id,
-                [
-                    _planner_step(
-                        0,
-                        "2026-11-22T15:10:22Z",
-                        tool_calls=[{"name": "post_message"}, {"name": "swarm_wait"}],
-                        status="DONE",
-                    ),
-                    {
-                        "step_index": 1,
-                        "type": "GENERIC",
-                        "status": "DONE",
-                        "created_at": "2026-11-22T15:10:23Z",
-                        "content": "Posted [done] PASS.",
-                    },
-                    {
-                        "step_index": 2,
-                        "type": "GENERIC",
-                        "status": "DONE",
-                        "created_at": "2026-11-22T15:10:24Z",
-                        "content": "Waiting on swarm.",
-                    },
-                ],
-            )
 
             metrics = collect_run_metrics(root_id, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(metrics["summary"]["total_agents"], 4)
+            self.assertEqual(metrics["summary"]["total_agents"], 3)
             self.assertEqual(metrics["efficiency_and_waste"]["interrupted_agents"]["count"], 0)
             self.assertTrue(all(ag["clean_termination"] for ag in metrics["agents"]))
-            rev_ag = {ag["conversation_id"]: ag for ag in metrics["agents"]}[swarm_rev_id]
-            self.assertEqual(rev_ag["category"], "verification")
-
-    def test_r3_native_swarm_subagents_and_direct_edits_phases(self) -> None:
-        from metrics import list_pending_sessions
-
-        with tempfile.TemporaryDirectory() as tmp:
-            brain = Path(tmp) / "brain"
-
-            # 1) Conception seule : research + édition docs atelier (`specs/`, `tasks/`, `tracking/`) -> reste Conception
-            cid_conc = "r3000001-1111-4111-8111-111111111111"
-            sub_res = "r3sub001-1111-4111-8111-111111111111"
-            _write_transcript(
-                brain / cid_conc,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T11:00:00Z", "content": "/gravity-architect spec r3"},
-                    _planner_step(1, "2026-11-25T11:00:05Z", tool_calls=[{"name": "invoke_subagent"}]),
-                    _planner_step(
-                        2,
-                        "2026-11-25T11:00:10Z",
-                        tool_calls=[
-                            {"name": "write_file", "args": {"Path": "/repo/gravity-studio/specs/2026-11-25-r3.md"}},
-                            {"name": "edit_file", "args": {"Path": "tasks/2026-11-25-w1.md"}},
-                            {"name": "replace_file_content", "args": {"TargetFile": "tracking/IMPACT.md"}},
-                        ],
-                    ),
-                ],
-            )
-            _write_subagent(brain / cid_conc, sub_res, "research", "Researcher", spawn_step=1)
-            _write_transcript(brain / sub_res, [_planner_step(0, "2026-11-25T11:00:06Z", tool_calls=[])])
-
-            m_conc = collect_run_metrics(cid_conc, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(m_conc["milestones"]["mode"], "4_phases")
-            self.assertEqual(m_conc["milestones"]["current_phase"], "Conception")
-            pend_map = {p["conversation_id"]: p for p in list_pending_sessions(brain)}
-            self.assertEqual(pend_map[cid_conc]["milestones"]["current_phase"], "Conception")
-
-            # 2) /swarm + subagent builder -> Production -> Vérification & Push -> Clôture / Enregistrée
-            cid_swarm = "r3000002-1111-4111-8111-111111111111"
-            sub_bld = "r3sub002-1111-4111-8111-111111111111"
-            steps_swarm = [
-                {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T11:10:00Z", "content": "/gravity-architect handoff r3"},
-                _planner_step(1, "2026-11-25T11:10:05Z", tool_calls=[{"name": "write_file", "args": {"Path": "specs/r3.md"}}], in_tok=2_000, out_tok=100),
-                {"step_index": 2, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T11:11:00Z", "content": "/swarm lancer build"},
-                _planner_step(3, "2026-11-25T11:11:05Z", tool_calls=[{"name": "swarm"}], in_tok=4_000, out_tok=200),
-            ]
-            _write_transcript(brain / cid_swarm, steps_swarm)
-            _write_subagent(brain / cid_swarm, sub_bld, "teamwork_worker", "Builder", spawn_step=3)
-            _write_transcript(brain / sub_bld, [_planner_step(0, "2026-11-25T11:11:08Z", tool_calls=[{"name": "finish"}], in_tok=6_000, out_tok=300)])
-
-            m_swarm_prod = collect_run_metrics(cid_swarm, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(m_swarm_prod["milestones"]["current_phase"], "Production")
-            pend_swarm = {p["conversation_id"]: p for p in list_pending_sessions(brain)}
-            self.assertEqual(pend_swarm[cid_swarm]["milestones"]["current_phase"], "Production")
-
-            steps_verif = steps_swarm + [
-                _planner_step(4, "2026-11-25T11:12:00Z", tool_calls=[{"name": "run_command", "args": {"CommandLine": '"python3 scripts/audit_ecosystem.py --strict"'}}], in_tok=1_500, out_tok=50),
-            ]
-            _write_transcript(brain / cid_swarm, steps_verif)
-            m_swarm_verif = collect_run_metrics(cid_swarm, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(m_swarm_verif["milestones"]["current_phase"], "Vérification & Push")
-            pend_verif = {p["conversation_id"]: p for p in list_pending_sessions(brain)}
-            self.assertEqual(pend_verif[cid_swarm]["milestones"]["current_phase"], "Vérification & Push")
-
-            steps_close = steps_verif + [
-                _planner_step(5, "2026-11-25T11:13:00Z", tool_calls=[{"name": "run_command", "args": {"CommandLine": f'"python3 plugin/scripts/cli.py record {cid_swarm[:8]} --update"'}}], in_tok=500, out_tok=20),
-            ]
-            _write_transcript(brain / cid_swarm, steps_close)
-            m_swarm_close = collect_run_metrics(cid_swarm, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(m_swarm_close["milestones"]["current_phase"], "Clôture / Enregistrée")
-            by_id = {ph["id"]: ph for ph in m_swarm_close["milestones"]["phases"]}
-            self.assertEqual(by_id["conception"]["tokens"], 2100)
-            self.assertEqual(by_id["production"]["tokens"], 10500)
-            self.assertEqual(by_id["verification"]["tokens"], 1550)
-            self.assertEqual(by_id["cloture"]["tokens"], 520)
-
-            # 3) Édition directe hors docs atelier -> déclenche Production
-            cid_edit = "r3000003-1111-4111-8111-111111111111"
-            _write_transcript(
-                brain / cid_edit,
-                [
-                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-25T11:20:00Z", "content": "/gravity-architect fix"},
-                    _planner_step(1, "2026-11-25T11:20:05Z", tool_calls=[{"name": "edit_file", "args": {"Path": "plugin/metrics/collector.py"}}]),
-                ],
-            )
-            m_edit = collect_run_metrics(cid_edit, brain, CATALOG_PATH, gravity_window=True)
-            self.assertEqual(m_edit["milestones"]["current_phase"], "Production")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Hook PreInvocation Gravity Metrics : cycle hybride /gravity-metrics."""
+"""Hook PreInvocation Gravity Metrics : cycle hybride /gravity-metrics & capture SPI-2."""
 
+import importlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -9,20 +11,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 HOOKS_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = HOOKS_DIR.parent
-if str(HOOKS_DIR) not in sys.path:
-    sys.path.insert(0, str(HOOKS_DIR))
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
 
-from hook_runtime import (  # noqa: E402
-    configure_utf8_stdio,
-    emit_handoff_markdown,
-    emit_passthrough,
-    emit_user_markdown,
-    first_not_none,
-    read_stdin_text,
-    resolve_brain_dir,
-    resolve_conversation_id,
-    resolve_workspace_root,
-)
+_hook_rt = importlib.import_module("_shared.hook_runtime")
+_path_safety = importlib.import_module("_shared.path_safety")
 
 _STRIP_META_RE = re.compile(
     r"<ADDITIONAL_METADATA>.*?(?:</ADDITIONAL_METADATA>|$)"
@@ -34,17 +27,13 @@ _METRICS_CMD_RE = re.compile(
     r"^/gravity-metrics(?::gravity-metrics)?(?:\s+(.*))?$",
     re.IGNORECASE | re.DOTALL,
 )
-_ARCHITECT_RUN_RE = re.compile(
-    r"^/gravity-architect(?::gravity-architect)?\s+(?!(?:init|add|sync|status|archive|audit)\b)(.+)",
-    re.IGNORECASE | re.DOTALL,
-)
-_ARCHITECT_CONSULT_HEAD_RE = re.compile(
+_CONSULT_HEAD_RE = re.compile(
     r"^(?:pourquoi|comment|combien|explique(?:-moi)?|qu['’]est-ce|est-ce\s+que|"
     r"quel(?:le)?s?|list(?:e|er)?|montre(?:-moi)?|affiche|r[eé]sume|"
     r"what|why|how|explain|show|summarize)\b",
     re.IGNORECASE,
 )
-_ARCHITECT_ACTION_OVERRIDE_RE = re.compile(
+_ACTION_OVERRIDE_RE = re.compile(
     r"\b(?:specs?|tasks?|handoff|cr[eé]er|cr[eé]e|impl[eé]menter|impl[eé]mente|"
     r"modifier|modifie|[eé]diter|[eé]dite|corriger|corrige|refactor(?:er|iser)?|"
     r"ajouter|ajoute|supprimer|supprime|migrer|migre|d[eé]ployer|d[eé]ploie|"
@@ -52,12 +41,28 @@ _ARCHITECT_ACTION_OVERRIDE_RE = re.compile(
     r"patch|fix|add|remove|delete|build|write|deploy)\b",
     re.IGNORECASE,
 )
+_LABEL_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "au", "aux", "avec", "ce", "ces", "dans", "de", "des",
+        "du", "en", "et", "for", "in", "la", "le", "les", "of", "on", "or",
+        "ou", "par", "pour", "sur", "the", "to", "un", "une",
+    }
+)
+
+
+def _resolve_gravity_home() -> Path:
+    env_home = os.environ.get("GRAVITY_HOME", "").strip()
+    if env_home:
+        return Path(env_home).expanduser()
+    return _path_safety.safe_home_dir() / ".gemini" / "gravity"
 
 
 def _resolve_transcript_path(
     payload: Dict[str, Any], brain_dir: Path, cid: Optional[str]
 ) -> Optional[Path]:
-    tpath_raw = first_not_none(payload.get("transcriptPath"), payload.get("transcript_path"))
+    tpath_raw = _hook_rt.first_not_none(
+        payload.get("transcriptPath"), payload.get("transcript_path")
+    )
     if isinstance(tpath_raw, str) and tpath_raw.strip():
         return Path(tpath_raw.strip()).expanduser()
     if cid:
@@ -107,7 +112,11 @@ def _is_handoff_already_active(
         if stype == "SYSTEM_MESSAGE":
             content = str(entry.get("content") or "")
             meta_obj = entry.get("metadata")
-            meta_dump = json.dumps(meta_obj, ensure_ascii=False) if isinstance(meta_obj, dict) else ""
+            meta_dump = (
+                json.dumps(meta_obj, ensure_ascii=False)
+                if isinstance(meta_obj, dict)
+                else ""
+            )
             if any(m in content or (meta_dump and m in meta_dump) for m in markers):
                 has_marker = True
         elif stype == "PLANNER_RESPONSE":
@@ -125,8 +134,8 @@ def _is_handoff_already_active(
     if not has_marker:
         return False
 
-    inv_num = payload.get("invocationNum")
-    return isinstance(inv_num, int) and inv_num > 0
+    inv_num = _hook_rt.first_not_none(payload.get("invocationNum"), payload.get("invocation_num"))
+    return isinstance(inv_num, int) and not isinstance(inv_num, bool) and inv_num > 0
 
 
 def _build_handoff_system_message(
@@ -159,9 +168,6 @@ def _run_metrics_command(
     if rest.startswith("/"):
         return None
 
-    if str(PLUGIN_ROOT) not in sys.path:
-        sys.path.insert(0, str(PLUGIN_ROOT))
-
     from metrics import (
         METRICS_MARKER,
         METRICS_OPEN_MARKER,
@@ -172,7 +178,6 @@ def _run_metrics_command(
         list_pending_sessions,
         load_active_captures,
         load_history,
-        next_step_index_in_transcript,
         pop_active_capture,
         read_gravity_profile_summary,
         record_session_metrics,
@@ -182,6 +187,7 @@ def _run_metrics_command(
         resolve_store_paths,
         start_active_capture,
     )
+    from metrics.lifecycle import next_step_index_in_transcript
     from metrics.store import resolve_sealed_update_target
 
     parsed = classify_metrics_prompt(raw_input)
@@ -192,13 +198,13 @@ def _run_metrics_command(
         raise ValueError(parsed.get("error") or "Syntaxe invalide.")
 
     store_dir, history_path = resolve_store_paths()
-    brain_dir = resolve_brain_dir(payload) or default_brain_dir()
-    cid = resolve_conversation_id(payload)
+    brain_dir = _hook_rt.resolve_brain_dir(payload) or default_brain_dir()
+    cid = _hook_rt.resolve_conversation_id(payload)
 
     if _is_handoff_already_active(payload, brain_dir, cid, (METRICS_MARKER, METRICS_OPEN_MARKER)):
         return None
 
-    ws_root = resolve_workspace_root(payload)
+    ws_root = _hook_rt.resolve_workspace_root(payload)
     project = str(parsed.get("project") or "").strip() or (ws_root.name if ws_root else "")
     gravity_profile = read_gravity_profile_summary(ws_root)
 
@@ -212,14 +218,18 @@ def _run_metrics_command(
         cap_info = ""
         if isinstance(active_cap, dict):
             cap_lbl = active_cap.get("label") or "capture en cours"
-            cap_info = f"\n- **Capture active :** `{cap_lbl}` (depuis step `{active_cap.get('start_step', 0)}`) — utilisez `/gravity-metrics stop` pour enregistrer."
+            cap_info = (
+                f"\n- **Capture active :** `{cap_lbl}` (depuis step `{active_cap.get('start_step', 0)}`) "
+                "— utilisez `/gravity-metrics stop` pour enregistrer."
+            )
         scope_txt = f" · Projet : `{project}`" if project else ""
         md_out = (
             f"{METRICS_OPEN_MARKER}\n"
             "### Gravity Metrics — Tableau de bord (lecture seule)\n\n"
             f"- **Sessions enregistrées :** `{len(records)}` · **À enregistrer :** `{len(pending)}`{scope_txt}"
             f"{cap_info}\n"
-            "- Commandes capture : `/gravity-metrics start [label]` · `/gravity-metrics stop [label]` · `/gravity-metrics record <uuid>` · `/gravity-metrics pending`"
+            "- Commandes capture : `/gravity-metrics start [label]` · `/gravity-metrics stop [label]` "
+            "· `/gravity-metrics record <uuid>` · `/gravity-metrics pending`"
         )
         sys_msg = _build_handoff_system_message(
             METRICS_OPEN_MARKER,
@@ -460,57 +470,157 @@ def _run_metrics_command(
     return "handoff", md_out, sys_msg
 
 
-def _is_consultative_architect_prompt(cleaned: str) -> bool:
-    """Retourne True si `/gravity-architect <texte>` est une simple question consultative."""
-    match = _ARCHITECT_RUN_RE.match(cleaned)
-    if match is None:
-        return False
-    arg_text = match.group(1).strip()
-    if not arg_text or _ARCHITECT_CONSULT_HEAD_RE.match(arg_text) is None:
-        return False
-    return _ARCHITECT_ACTION_OVERRIDE_RE.search(arg_text) is None
+def _load_capture_policies() -> List[Dict[str, Any]]:
+    """Lit dynamiquement les `capture_policy` (`SPI-2`) depuis `$GRAVITY_HOME/core/modules.json`."""
+    g_home = _resolve_gravity_home()
+    core_dir = g_home / "core"
+    reg_path = core_dir / "modules.json"
+    if (
+        _path_safety.is_symlink_or_junction(g_home)
+        or _path_safety.is_symlink_or_junction(core_dir)
+        or _path_safety.is_symlink_or_junction(reg_path)
+        or not reg_path.is_file()
+    ):
+        return []
+    try:
+        raw = reg_path.read_bytes()
+        if raw.startswith(b"\xef\xbb\xbf"):
+            raw = raw[3:]
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    raw_modules = data.get("modules")
+    items: List[Tuple[str, Dict[str, Any]]] = []
+    if isinstance(raw_modules, dict):
+        items = [(str(k), v) for k, v in raw_modules.items() if isinstance(v, dict)]
+    elif isinstance(raw_modules, list):
+        items = [(str(v.get("id") or ""), v) for v in raw_modules if isinstance(v, dict)]
+
+    policies: List[Dict[str, Any]] = []
+    for mod_key, mod in items:
+        cp = mod.get("capture_policy")
+        if not isinstance(cp, dict):
+            continue
+        if cp.get("auto_start") is False:
+            continue
+        raw_cmds = cp.get("commands") or mod.get("commands")
+        if not isinstance(raw_cmds, list):
+            continue
+        commands = [
+            c.strip() for c in raw_cmds if isinstance(c, str) and c.strip().startswith("/")
+        ]
+        if not commands:
+            continue
+        raw_excl = cp.get("exclude_subcommands") or []
+        exclude_subcommands = (
+            {s.strip().lower() for s in raw_excl if isinstance(s, str) and s.strip()}
+            if isinstance(raw_excl, list)
+            else set()
+        )
+        cb_raw = cp.get("consultative_bypass")
+        consultative_bypass = cb_raw if isinstance(cb_raw, bool) else True
+        label_prefix = (
+            str(cp.get("label_prefix") or mod.get("id") or mod_key or "capture").strip()
+            or "capture"
+        )
+        policies.append(
+            {
+                "commands": commands,
+                "exclude_subcommands": exclude_subcommands,
+                "consultative_bypass": consultative_bypass,
+                "label_prefix": label_prefix,
+            }
+        )
+    return policies
 
 
-def _maybe_auto_start_architect_capture(payload: Dict[str, Any], cleaned: str) -> None:
-    """Auto-démarre une capture idempotente (0 token) sur `/gravity-architect <instruction>`."""
-    if _is_consultative_architect_prompt(cleaned):
+def _match_capture_policy(cleaned: str) -> Optional[Tuple[str, str]]:
+    """Retourne `(label_prefix, args_text)` si `cleaned` déclenche une `capture_policy` SPI-2."""
+    if not cleaned.startswith("/"):
+        return None
+    for policy in _load_capture_policies():
+        for cmd in policy["commands"]:
+            pattern = re.compile(
+                rf"^{re.escape(cmd)}(?::[a-z0-9_-]+)?\s+(.+)$",
+                re.IGNORECASE | re.DOTALL,
+            )
+            m = pattern.match(cleaned)
+            if m is None:
+                continue
+            args_text = m.group(1).strip()
+            if not args_text or args_text.startswith("/"):
+                continue
+            effective_args = args_text
+            if policy["consultative_bypass"]:
+                while True:
+                    parts = effective_args.split(None, 1)
+                    if not parts:
+                        break
+                    if parts[0].strip().lower() in ("evo", "--no-verify"):
+                        effective_args = parts[1].strip() if len(parts) > 1 else ""
+                        continue
+                    break
+                if not effective_args:
+                    return None
+                if effective_args.startswith("/"):
+                    continue
+            first_tok = effective_args.split(None, 1)[0].strip().lower()
+            if first_tok in policy["exclude_subcommands"]:
+                return None
+            if policy["consultative_bypass"] and _CONSULT_HEAD_RE.match(effective_args):
+                if _ACTION_OVERRIDE_RE.search(effective_args) is None:
+                    return None
+            return policy["label_prefix"], effective_args
+    return None
+
+
+def _derive_capture_label(label_prefix: str, args_text: str, slugify_fn: Any) -> str:
+    slug_args = slugify_fn(args_text, fallback="", max_len=0).replace(".", "-")
+    kws = [
+        tok for tok in re.findall(r"[a-z0-9]+", slug_args)
+        if len(tok) >= 2 and tok not in _LABEL_STOPWORDS
+    ][:5]
+    if kws:
+        return str(slugify_fn(f"{label_prefix}-{'-'.join(kws)}", fallback=label_prefix, max_len=64))
+    return str(slugify_fn(label_prefix, fallback="capture", max_len=64))
+
+
+def _maybe_auto_start_policy_capture(payload: Dict[str, Any], cleaned: str) -> None:
+    """Auto-démarre une capture idempotente (0 token) selon `capture_policy` (`SPI-2`)."""
+    if not _hook_rt.is_initial_invocation(payload):
         return
-    inv_num = payload.get("invocationNum")
-    if not (isinstance(inv_num, int) and not isinstance(inv_num, bool) and inv_num == 0):
+    matched = _match_capture_policy(cleaned)
+    if matched is None:
         return
-    cid = resolve_conversation_id(payload)
+    cid = _hook_rt.resolve_conversation_id(payload)
     if not cid:
         return
+    label_prefix, args_text = matched
     try:
-        if str(PLUGIN_ROOT) not in sys.path:
-            sys.path.insert(0, str(PLUGIN_ROOT))
         from metrics import (
             default_brain_dir,
             resolve_store_paths,
             slugify_label,
             start_active_capture,
         )
-        from metrics.collector import _extract_label_keywords
         from metrics.lifecycle import current_turn_start_step_in_transcript
 
         store_dir, _ = resolve_store_paths()
-        brain_dir = resolve_brain_dir(payload) or default_brain_dir()
+        brain_dir = _hook_rt.resolve_brain_dir(payload) or default_brain_dir()
         tpath = _resolve_transcript_path(payload, brain_dir, cid)
         start_step = current_turn_start_step_in_transcript(tpath, expected_prompt=cleaned)
-        ws_root = resolve_workspace_root(payload)
+        ws_root = _hook_rt.resolve_workspace_root(payload)
         project = ws_root.name if ws_root else ""
-        kws = _extract_label_keywords(cleaned)[:5]
-        auto_lbl = (
-            slugify_label("architect-" + "-".join(kws), fallback="architect", max_len=64)
-            if kws
-            else "architect"
-        )
+        auto_lbl = _derive_capture_label(label_prefix, args_text, slugify_label)
         start_active_capture(
             cid,
             start_step=start_step,
             label=auto_lbl,
             project=project,
-            source="architect_auto",
+            source=f"{label_prefix}_auto",
             store_dir=store_dir,
             overwrite=False,
         )
@@ -519,22 +629,22 @@ def _maybe_auto_start_architect_capture(payload: Dict[str, Any], cleaned: str) -
 
 
 def main() -> int:
-    configure_utf8_stdio()
-    raw = read_stdin_text()
+    _hook_rt.configure_utf8_stdio()
+    raw = _hook_rt.read_stdin_text()
     if not raw:
-        emit_passthrough()
+        _hook_rt.emit_passthrough()
         return 0
     try:
         payload = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        emit_passthrough()
+        _hook_rt.emit_passthrough()
         return 0
     if not isinstance(payload, dict):
-        emit_passthrough()
+        _hook_rt.emit_passthrough()
         return 0
 
     raw_input = str(
-        first_not_none(
+        _hook_rt.first_not_none(
             payload.get("lastUserInput"),
             payload.get("userInput"),
             payload.get("prompt"),
@@ -544,20 +654,19 @@ def main() -> int:
     cleaned = re.sub(r"\s+", " ", _STRIP_META_RE.sub("", raw_input)).strip()
     match = _METRICS_CMD_RE.match(cleaned)
     if match is None:
-        if _ARCHITECT_RUN_RE.match(cleaned) is not None:
-            _maybe_auto_start_architect_capture(payload, cleaned)
-        emit_passthrough()
+        _maybe_auto_start_policy_capture(payload, cleaned)
+        _hook_rt.emit_passthrough()
         return 0
 
     rest = (match.group(1) or "").strip()
     if rest.startswith("/"):
-        emit_passthrough()
+        _hook_rt.emit_passthrough()
         return 0
 
     try:
         result = _run_metrics_command(payload, raw_input, rest)
     except Exception as exc:
-        emit_user_markdown(
+        _hook_rt.emit_user_markdown(
             f"### Gravity Metrics — Erreur\n\n"
             f"`{exc}`\n\n"
             'Syntaxe : `/gravity-metrics` · `/gravity-metrics start [label]` · '
@@ -568,14 +677,14 @@ def main() -> int:
         return 0
 
     if result is None:
-        emit_passthrough()
+        _hook_rt.emit_passthrough()
         return 0
 
     mode, markdown_out, sys_msg = result
     if mode == "terminate":
-        emit_user_markdown(markdown_out, system_message=sys_msg)
+        _hook_rt.emit_user_markdown(markdown_out, system_message=sys_msg)
     else:
-        emit_handoff_markdown(markdown_out, system_message=sys_msg)
+        _hook_rt.emit_handoff_markdown(markdown_out, system_message=sys_msg)
     return 0
 
 
