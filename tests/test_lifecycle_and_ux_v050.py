@@ -360,7 +360,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             import dashboard_provider
 
             record_session_meta(cid_pend, cwd=str(root / "ProjBeta"), project="ProjBeta", store_dir=store)
-            view_0 = dashboard_provider.get_metrics_view(m_home=store)
+            view_0 = dashboard_provider.get_metrics_view(m_home=store, brain_dir=brain)
             self.assertEqual(len(view_0["pending_sessions"]), 1)
             self.assertEqual(len(view_0["ignored_sessions"]), 0)
 
@@ -368,7 +368,7 @@ class TestLifecycleAndUxV050(unittest.TestCase):
                 "ignore", {"target": cid_pend, "reason": "bruit-spi1"}, m_home=store, brain_dir=brain
             )
             self.assertTrue(res_ign["ok"])
-            view_1 = dashboard_provider.get_metrics_view(m_home=store)
+            view_1 = dashboard_provider.get_metrics_view(m_home=store, brain_dir=brain)
             self.assertEqual(len(view_1["pending_sessions"]), 0)
             self.assertEqual(len(view_1["ignored_sessions"]), 1)
             self.assertEqual(view_1["ignored_sessions"][0]["ignored_reason"], "bruit-spi1")
@@ -387,10 +387,10 @@ class TestLifecycleAndUxV050(unittest.TestCase):
             self.assertEqual(res_meta["record"]["label"], "renamed-spi1")
             self.assertEqual(res_meta["record"]["cost_usd"], cost_before)
 
-            view_2 = dashboard_provider.get_metrics_view(m_home=store)
+            view_2 = dashboard_provider.get_metrics_view(m_home=store, brain_dir=brain)
             sig = view_2["signature"]
             t0 = time.perf_counter()
-            fast_res = dashboard_provider.get_metrics_view(since_signature=sig, m_home=store)
+            fast_res = dashboard_provider.get_metrics_view(since_signature=sig, m_home=store, brain_dir=brain)
             dt_ms = (time.perf_counter() - t0) * 1000.0
             self.assertFalse(fast_res["changed"])
             self.assertTrue(fast_res["unchanged"])

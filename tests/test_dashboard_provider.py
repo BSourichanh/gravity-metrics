@@ -19,8 +19,11 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 from metrics import (  # noqa: E402
     archive_conversation,
+    ignore_session,
+    load_active_captures,
     load_history,
     load_ignored_sessions,
+    load_session_meta,
     record_session_meta,
     start_active_capture,
 )
@@ -199,7 +202,201 @@ class TestDashboardProviderSpi1(unittest.TestCase):
                 env_extra=env_extra,
             )
             self.assertTrue(rm_act["ok"])
+            self.assertFalse(rm_act["already_absent"])
+            self.assertTrue(rm_act["cleaned_sources"]["history"])
             self.assertEqual(rm_act["remaining"], 1)
+
+    def test_pending_excludes_session_meta_subagents_and_non_gravity_and_surfaces_orphans(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            g_home = root / "gravity_home"
+            m_home = g_home / "metrics"
+            brain = root / "brain"
+
+            cid_grav = "aaaa1111-aaaa-bbbb-cccc-000000000001"
+            cid_sub = "bbbb2222-aaaa-bbbb-cccc-000000000002"
+            cid_nongrav = "cccc3333-aaaa-bbbb-cccc-000000000003"
+            cid_meta_only = "dddd4444-aaaa-bbbb-cccc-000000000004"
+            cid_orphan_cap = "eeee5555-aaaa-bbbb-cccc-000000000005"
+            cid_orphan_ign = "ffff6666-aaaa-bbbb-cccc-000000000006"
+
+            _write_transcript(
+                brain / cid_grav,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T08:00:00Z", "content": "/gravity build feature"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T08:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 5_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "edit_file"}]},
+                ],
+            )
+            _write_transcript(
+                brain / cid_sub,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T08:01:00Z", "content": "[GRAVITY-BRIDGE] child worker"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T08:01:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 4_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "edit_file"}]},
+                ],
+            )
+            _write_transcript(
+                brain / cid_nongrav,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T08:02:00Z", "content": "Simple question sans gravity"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T08:02:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 3_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "edit_file"}]},
+                ],
+            )
+
+            for cid in (cid_grav, cid_sub, cid_nongrav, cid_meta_only):
+                record_session_meta(cid, cwd=str(root / "ProjA"), project="ProjA", store_dir=m_home)
+            start_active_capture(cid_orphan_cap, start_step=0, label="orphan-cap", project="ProjA", store_dir=m_home)
+            ignore_session(cid_orphan_ign, reason="old-orphan", store_dir=m_home)
+
+            env_extra = {"GRAVITY_HOME": str(g_home)}
+            ctx = {"metrics_home": str(m_home), "brain_dir": str(brain)}
+            view = _invoke(["--view", "metrics", "--json"], stdin_obj={"params": {}, "context": ctx}, env_extra=env_extra)
+
+            pending_by_cid = {p["conversation_id"]: p for p in view["pending_sessions"]}
+            ignored_by_cid = {i["conversation_id"]: i for i in view["ignored_sessions"]}
+
+            self.assertEqual(set(pending_by_cid), {cid_grav, cid_orphan_cap})
+            self.assertTrue(pending_by_cid[cid_grav]["brain_exists"])
+            self.assertFalse(pending_by_cid[cid_grav]["orphan"])
+            self.assertFalse(pending_by_cid[cid_orphan_cap]["brain_exists"])
+            self.assertTrue(pending_by_cid[cid_orphan_cap]["orphan"])
+
+            self.assertEqual(set(ignored_by_cid), {cid_orphan_ign})
+            self.assertFalse(ignored_by_cid[cid_orphan_ign]["brain_exists"])
+            self.assertTrue(ignored_by_cid[cid_orphan_ign]["orphan"])
+            for excluded in (cid_sub, cid_nongrav, cid_meta_only):
+                self.assertNotIn(excluded, pending_by_cid)
+                self.assertNotIn(excluded, ignored_by_cid)
+
+            # Removing brain_dir triggers safe fallback (still zero session_meta pollution)
+            missing_brain = root / "missing_brain"
+            fb_view = _invoke(
+                ["--view", "metrics", "--json"],
+                stdin_obj={"params": {}, "context": {"metrics_home": str(m_home), "brain_dir": str(missing_brain)}},
+                env_extra=env_extra,
+            )
+            self.assertEqual({p["conversation_id"] for p in fb_view["pending_sessions"]}, {cid_orphan_cap})
+            self.assertEqual({i["conversation_id"] for i in fb_view["ignored_sessions"]}, {cid_orphan_ign})
+            self.assertFalse(fb_view["pending_sessions"][0]["brain_exists"])
+            self.assertTrue(fb_view["pending_sessions"][0]["orphan"])
+
+            # Removing orphan capture & orphan ignored cleans them completely
+            rm_cap = _invoke(
+                ["--action", "remove", "--json"],
+                stdin_obj={"params": {"target": cid_orphan_cap}, "context": ctx},
+                env_extra=env_extra,
+            )
+            self.assertTrue(rm_cap["ok"])
+            self.assertFalse(rm_cap["already_absent"])
+            self.assertTrue(rm_cap["cleaned_sources"]["active_captures"])
+
+            rm_ign = _invoke(
+                ["--action", "remove", "--json"],
+                stdin_obj={"params": {"target": cid_orphan_ign}, "context": ctx},
+                env_extra=env_extra,
+            )
+            self.assertTrue(rm_ign["ok"])
+            self.assertFalse(rm_ign["already_absent"])
+            self.assertTrue(rm_ign["cleaned_sources"]["ignored"])
+
+            view_after = _invoke(["--view", "metrics", "--json"], stdin_obj={"params": {}, "context": ctx}, env_extra=env_extra)
+            self.assertEqual([p["conversation_id"] for p in view_after["pending_sessions"]], [cid_grav])
+            self.assertEqual(view_after["ignored_sessions"], [])
+            self.assertNotIn(cid_orphan_cap, load_active_captures(m_home))
+            self.assertNotIn(cid_orphan_ign, load_ignored_sessions(m_home))
+
+            # Brain dir appearance/mutation invalidates signature via _stat_token(brain_dir)
+            sig_before = view_after["signature"]
+            cid_new = "99990000-aaaa-bbbb-cccc-000000000009"
+            _write_transcript(
+                brain / cid_new,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T08:05:00Z", "content": "/gravity new"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T08:05:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "write_file"}]},
+                ],
+            )
+            os.utime(brain, None)
+            view_new = _invoke(
+                ["--view", "metrics", "--since-signature", sig_before, "--json"],
+                stdin_obj={"params": {}, "context": ctx},
+                env_extra=env_extra,
+            )
+            self.assertTrue(view_new["changed"])
+            self.assertNotEqual(view_new["signature"], sig_before)
+            self.assertIn(cid_new, {p["conversation_id"] for p in view_new["pending_sessions"]})
+
+    def test_remove_detail_slug_without_resurrection_and_idempotent_ghost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            g_home = root / "gravity_home"
+            m_home = g_home / "metrics"
+            brain = root / "brain"
+
+            cid = "77778888-aaaa-bbbb-cccc-000000000007"
+            _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T09:00:00Z", "content": "/gravity mixed"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T09:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 9_000, "cache_read_tokens": 0, "output_tokens": 300, "tool_calls": [{"name": "edit_file"}]},
+                ],
+            )
+            record_session_meta(cid, cwd=str(root / "ProjMix"), project="ProjMix", store_dir=m_home)
+            saved_rec, _, _ = archive_conversation(
+                cid, store_dir=m_home, history_path=m_home / "data" / "history.jsonl",
+                brain_dir=brain, catalog_path=CATALOG_PATH, label="Dash Run Mixed", project="ProjMix",
+            )
+            slug = saved_rec["detail_slug"]
+            self.assertNotEqual(slug, "Dash Run Mixed")
+            # Simulate leftover ignored/meta entries + deleted brain folder
+            ignore_session(cid, reason="stale-ignore", store_dir=m_home)
+            for p in sorted((brain / cid).rglob("*"), reverse=True):
+                p.unlink() if p.is_file() else p.rmdir()
+            (brain / cid).rmdir()
+
+            env_extra = {"GRAVITY_HOME": str(g_home)}
+            ctx = {"metrics_home": str(m_home), "brain_dir": str(brain)}
+
+            rm_res = _invoke(
+                ["--action", "remove", "--json"],
+                stdin_obj={"params": {"target": slug, "conversation_id": cid}, "context": ctx},
+                env_extra=env_extra,
+            )
+            self.assertTrue(rm_res["ok"])
+            self.assertFalse(rm_res["already_absent"])
+            self.assertEqual(rm_res["remaining"], 0)
+            self.assertTrue(rm_res["cleaned_sources"]["history"])
+            self.assertTrue(rm_res["cleaned_sources"]["reports"])
+            self.assertTrue(rm_res["cleaned_sources"]["ignored"])
+            self.assertTrue(rm_res["cleaned_sources"]["session_meta"])
+            self.assertFalse((m_home / "reports" / f"{slug}.json").exists())
+            self.assertFalse((m_home / "reports" / f"{slug}.md").exists())
+            self.assertNotIn(cid, load_session_meta(m_home))
+            self.assertNotIn(cid, load_ignored_sessions(m_home))
+
+            # Zero resurrection in get_metrics_view
+            view_clean = _invoke(["--view", "metrics", "--json"], stdin_obj={"params": {}, "context": ctx}, env_extra=env_extra)
+            self.assertEqual(view_clean["total_records"], 0)
+            self.assertEqual(view_clean["pending_sessions"], [])
+            self.assertEqual(view_clean["ignored_sessions"], [])
+
+            # Idempotent remove on already-removed slug & completely unknown ghost
+            rm_again = _invoke(
+                ["--action", "remove", "--json"],
+                stdin_obj={"params": {"target": slug, "conversation_id": cid}, "context": ctx},
+                env_extra=env_extra,
+            )
+            self.assertTrue(rm_again["ok"])
+            self.assertTrue(rm_again["already_absent"])
+            self.assertEqual(rm_again["remaining"], 0)
+            self.assertFalse(any(rm_again["cleaned_sources"].values()))
+
+            rm_ghost = _invoke(
+                ["--action", "remove", "--json"],
+                stdin_obj={"params": {"target": "ghost-session-absent"}, "context": ctx},
+                env_extra=env_extra,
+            )
+            self.assertTrue(rm_ghost["ok"])
+            self.assertTrue(rm_ghost["already_absent"])
+            self.assertEqual(rm_ghost["remaining"], 0)
 
 
 if __name__ == "__main__":

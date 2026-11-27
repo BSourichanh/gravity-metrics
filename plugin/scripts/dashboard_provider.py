@@ -22,9 +22,10 @@ _path_safety = importlib.import_module("_shared.path_safety")
 
 from metrics import (  # noqa: E402
     apply_remove, archive_conversation, default_brain_dir, discover_audit_roots,
-    ignore_session, list_audits_bundle, load_active_captures, load_ignored_sessions,
-    load_session_meta, read_audit, resolve_conversation_id_in_brain, resolve_store_paths,
-    slugify_label, unignore_session, update_session_metadata,
+    ignore_session, list_audits_bundle, list_pending_sessions, load_active_captures,
+    load_ignored_sessions, load_session_meta, read_audit,
+    resolve_conversation_id_in_brain, resolve_store_paths, slugify_label,
+    unignore_session, update_session_metadata,
 )
 
 DEFAULT_LIMIT, MAX_LIMIT, MAX_PAYLOAD_BYTES, MAX_AGENTS_IN_DETAIL = 100, 500, 450_000, 200
@@ -198,9 +199,18 @@ def _matches_query(rec: Dict[str, Any], q_cf: str) -> bool:
     return any(isinstance(rec.get(f), str) and q_cf in rec[f].casefold() for f in fields)
 
 
+def _has_brain_transcript(brain_dir: Optional[Path], cid: str) -> bool:
+    if brain_dir is None or not cid or "/" in cid or "\\" in cid or ".." in cid:
+        return False
+    conv_dir = brain_dir / cid
+    tpath = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+    return conv_dir.is_dir() and tpath.is_file() and not _path_safety.is_symlink_or_junction(tpath)
+
+
 def _derive_pending_states_ro(
     *, records: Sequence[Dict[str, Any]], active_captures: Dict[str, Dict[str, Any]],
     ignored_map: Dict[str, Dict[str, Any]], session_meta: Dict[str, Dict[str, Any]],
+    brain_dir: Optional[Path] = None, m_home: Optional[Path] = None, history_path: Optional[Path] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     archived_cids = {str(r.get("conversation_id") or "").strip() for r in records if str(r.get("status") or "archived").strip().lower() == "archived"}
     active_hist = {
@@ -209,24 +219,57 @@ def _derive_pending_states_ro(
     }
     pending: List[Dict[str, Any]] = []
     ignored: List[Dict[str, Any]] = []
-    for cid in sorted(c for c in ((set(active_captures) | set(ignored_map) | set(session_meta) | set(active_hist)) - archived_cids) if c):
+
+    def _build_item(cid: str, *, lp_item: Optional[Dict[str, Any]] = None, brain_exists: bool, orphan: bool) -> Dict[str, Any]:
+        lp = lp_item or {}
         cap, ign = active_captures.get(cid), ignored_map.get(cid)
         meta, hist_a = session_meta.get(cid) or {}, active_hist.get(cid) or {}
-        item = {
-            "conversation_id": cid, "label": str((cap or {}).get("label") or hist_a.get("label") or f"session-{cid[:8]}"),
-            "project": str((cap or {}).get("project") or meta.get("project") or hist_a.get("project") or ""),
+        raw_step = (cap or {}).get("start_step")
+        if not isinstance(raw_step, int) or isinstance(raw_step, bool):
+            w_step = lp.get("window_start_step")
+            raw_step = w_step if isinstance(w_step, int) and not isinstance(w_step, bool) else None
+        return {
+            "conversation_id": cid,
+            "label": str((cap or {}).get("label") or hist_a.get("label") or lp.get("title") or f"session-{cid[:8]}"),
+            "project": str(lp.get("project") or (cap or {}).get("project") or meta.get("project") or hist_a.get("project") or ""),
             "cwd": str(meta.get("cwd") or ""),
-            "started_at": str((cap or {}).get("started_at") or meta.get("started_at") or hist_a.get("started_at") or ""),
-            "updated_at": str((cap or {}).get("updated_at") or meta.get("updated_at") or hist_a.get("ended_at") or ""),
+            "started_at": str(lp.get("started_at") or (cap or {}).get("started_at") or meta.get("started_at") or hist_a.get("started_at") or ""),
+            "updated_at": str(lp.get("updated_at") or (cap or {}).get("updated_at") or meta.get("updated_at") or hist_a.get("ended_at") or ""),
             "active_capture": cap is not None,
-            "start_step": (cap or {}).get("start_step") if isinstance((cap or {}).get("start_step"), int) else None,
-            "ignored": ign is not None, "ignored_reason": str((ign or {}).get("reason") or ""),
-            "ignored_at": str((ign or {}).get("ignored_at") or ""),
-            "current_phase": str(hist_a.get("current_phase") or ""),
-            "llm_calls": int(hist_a.get("llm_calls") or 0), "bridge_children_count": 0,
+            "start_step": raw_step,
+            "ignored": ign is not None or bool(lp.get("ignored")),
+            "ignored_reason": str((ign or {}).get("reason") or lp.get("ignored_reason") or ""),
+            "ignored_at": str((ign or {}).get("ignored_at") or lp.get("ignored_at") or ""),
+            "current_phase": str(lp.get("current_phase") or hist_a.get("current_phase") or ""),
+            "llm_calls": int(lp.get("llm_calls") or hist_a.get("llm_calls") or 0),
+            "bridge_children_count": 0,
+            "brain_exists": brain_exists,
+            "orphan": orphan,
         }
-        (ignored if item["ignored"] else pending).append(item)
-    sort_k = lambda e: (str(e.get("updated_at") or ""), str(e.get("conversation_id") or ""))
+
+    if brain_dir is not None and brain_dir.is_dir():
+        eff_history = history_path if history_path is not None else (m_home / "data" / "history.jsonl" if m_home is not None else None)
+        live_cids = set()
+        for lp in list_pending_sessions(brain_dir, eff_history, store_dir=m_home, include_ignored=True):
+            cid = str(lp.get("conversation_id") or "").strip()
+            if not cid:
+                continue
+            live_cids.add(cid)
+            item = _build_item(cid, lp_item=lp, brain_exists=True, orphan=False)
+            (ignored if item["ignored"] else pending).append(item)
+        for cid in sorted(c for c in ((set(active_captures) | set(ignored_map)) - live_cids - archived_cids) if c):
+            if _has_brain_transcript(brain_dir, cid):
+                continue
+            item = _build_item(cid, brain_exists=False, orphan=True)
+            (ignored if item["ignored"] else pending).append(item)
+        for cid in sorted(c for c in (set(active_hist) - live_cids - archived_cids - set(active_captures) - set(ignored_map)) if c):
+            pending.append(_build_item(cid, brain_exists=_has_brain_transcript(brain_dir, cid), orphan=False))
+    else:
+        for cid in sorted(c for c in ((set(active_captures) | set(ignored_map) | set(active_hist)) - archived_cids) if c):
+            item = _build_item(cid, brain_exists=False, orphan=(cid in active_captures or cid in ignored_map))
+            (ignored if item["ignored"] else pending).append(item)
+
+    sort_k = lambda e: (str(e.get("updated_at") or e.get("ignored_at") or ""), str(e.get("conversation_id") or ""))
     pending.sort(key=sort_k, reverse=True)
     ignored.sort(key=sort_k, reverse=True)
     return pending, ignored
@@ -267,17 +310,18 @@ def _audit_stat_tokens(audits_dirs: Optional[List[Path]], ws_dirs: List[Path]) -
 
 def get_metrics_view(
     *, project: str = "", limit: int = DEFAULT_LIMIT, q: str = "", since_signature: str = "",
-    m_home: Path, audits_dirs: Optional[List[Path]] = None,
+    m_home: Path, audits_dirs: Optional[List[Path]] = None, brain_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     eff_limit, project_clean, q_clean = _clamp_limit(limit), project.strip(), q.strip()
+    eff_brain = Path(brain_dir).expanduser().resolve() if brain_dir is not None else None
     history_path, md_path = m_home / "data" / "history.jsonl", m_home / "METRICS.md"
     session_meta = load_session_meta(m_home)
     ws_dirs = _workspace_dirs_from_meta(session_meta)
     sig = _short_digest([
-        str(m_home), project_clean.casefold(), eff_limit, q_clean.casefold(),
+        str(m_home), str(eff_brain) if eff_brain is not None else "", project_clean.casefold(), eff_limit, q_clean.casefold(),
         _stat_token(history_path), _stat_token(m_home / "active_captures.json"),
         _stat_token(m_home / "ignored.json"), _stat_token(m_home / "session_meta.json"),
-        _stat_token(md_path), *_audit_stat_tokens(audits_dirs, ws_dirs),
+        _stat_token(md_path), _stat_token(eff_brain), *_audit_stat_tokens(audits_dirs, ws_dirs),
     ])
     if since_signature and since_signature == sig:
         return {"changed": False, "unchanged": True, "signature": sig}
@@ -295,7 +339,8 @@ def get_metrics_view(
         if (not proj_cf or str(r.get("project") or "").strip().casefold() == proj_cf) and _matches_query(r, q_cf)
     ]
     pending_sessions, ignored_sessions = _derive_pending_states_ro(
-        records=all_records, active_captures=active_captures, ignored_map=ignored_map, session_meta=session_meta,
+        records=all_records, active_captures=active_captures, ignored_map=ignored_map,
+        session_meta=session_meta, brain_dir=eff_brain, m_home=m_home, history_path=history_path,
     )
     payload: Dict[str, Any] = {
         "available": True, "changed": True, "unchanged": False, "signature": sig,
@@ -469,8 +514,29 @@ def run_action(action: str, params: Dict[str, Any], *, m_home: Path, brain_dir: 
             cid = _resolve_cid_for_lifecycle(str(params.get("conversation_id") or target), brain_dir, m_home)
             return {"ok": True, "action": clean_act, "conversation_id": cid, "removed": unignore_session(cid, store_dir=store_dir), "message": f"Session '{cid[:8]}' restaurée."}
         if clean_act == "remove":
-            removed_rec, remaining = apply_remove(target, store_dir=store_dir, history_path=history_path, purge_reports=bool(params.get("purge_reports", False)))
-            return {"ok": True, "action": clean_act, "removed": removed_rec, "remaining": remaining, "message": f"Session '{removed_rec.get('label')}' supprimée."}
+            cid_param = str(params.get("conversation_id") or "").strip()
+            removed_rec, remaining = apply_remove(
+                target,
+                store_dir=store_dir,
+                history_path=history_path,
+                conversation_id=cid_param,
+                purge_reports=bool(params.get("purge_reports", True)),
+                purge_state=True,
+                if_exists=True,
+            )
+            already_absent = bool(removed_rec.get("already_absent", False))
+            cleaned_sources = dict(removed_rec.get("cleaned_sources") or {})
+            lbl = removed_rec.get("label") or target
+            msg = f"Session '{lbl}' déjà absente." if already_absent else f"Session '{lbl}' supprimée."
+            return {
+                "ok": True,
+                "action": clean_act,
+                "removed": removed_rec,
+                "remaining": remaining,
+                "already_absent": already_absent,
+                "cleaned_sources": cleaned_sources,
+                "message": msg,
+            }
         raise ValueError(f"Unsupported action: {action!r}")
     except (FileNotFoundError, KeyError, ValueError, RuntimeError, TimeoutError) as exc:
         return {"ok": False, "action": clean_act, "error": str(exc), "message": str(exc)}
@@ -528,7 +594,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             project=args.project if args.project is not None else str(params.get("project") or ""),
             limit=args.limit if args.limit is not None else params.get("limit", DEFAULT_LIMIT),
             q=args.q if args.q is not None else str(params.get("q") or ""),
-            since_signature=args.since_signature, m_home=m_home, audits_dirs=audits_dirs,
+            since_signature=args.since_signature, m_home=m_home, audits_dirs=audits_dirs, brain_dir=brain_dir,
         )
     else:
         out = {"available": False, "error": f"Unknown view: {args.view!r}"}

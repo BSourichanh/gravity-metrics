@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `--purge-state` and `--if-exists` flags to `plugin/scripts/cli.py remove` while keeping strict failure behavior by default.
 
 ### Changed
+- **SPI-1 Provider Pending Alignment & Idempotent Remove (`TASK-MET-06c`):**
+  - Updated `plugin/scripts/dashboard_provider.py::get_metrics_view` and `main` to accept/forward `brain_dir` and include `_stat_token(brain_dir)` in `signature` invalidation.
+  - Aligned `plugin/scripts/dashboard_provider.py::_derive_pending_states_ro` on `list_pending_sessions(..., include_ignored=True)` when `brain_dir` exists, removed raw `session_meta.json` injection, and surfaced only missing-transcript `active_captures`/`ignored` entries with `brain_exists: false, orphan: true`.
+  - Updated `plugin/scripts/dashboard_provider.py::run_action("remove")` to call `apply_remove(..., conversation_id=..., purge_reports=..., purge_state=True, if_exists=True)` and expose `already_absent` and `cleaned_sources`.
 - **Detail-Slug Resolution, Lifecycle Cleanup & Confined Orphan Removal (`TASK-MET-06a`):**
   - Extended `plugin/metrics/history.py::resolve_session_index` to match `detail_slug` (exact then case-insensitive) alongside `label` and `conversation_id`, fixing `remove` and `update-meta` when `detail_slug != label`.
   - Extended `plugin/metrics/store.py::apply_remove` (`conversation_id`, `purge_state`, `if_exists`) to purge `active_captures.json`, `ignored.json`, and `session_meta.json` when removing the last remaining window for a `conversation_id`, purge orphan lifecycle/report artifacts under strict `_shared.path_safety` confinement, and return `already_absent` + `cleaned_sources`.
