@@ -22,7 +22,7 @@ gravity-metrics/
 ├── install.py                              # Thin 11-flag installer / uninstaller onto _shared.installer_core
 ├── plugin/                                 # Standalone plugin ready to install
 │   ├── plugin.json                         # Official 9-field manifest ("gravity-metrics", v0.5.1)
-│   ├── hooks.json                          # PreInvocation (active) & SessionStart ("enabled": false in W12)
+│   ├── hooks.json                          # PreInvocation (active) & SessionStart ("enabled": false)
 │   ├── README.md                           # Plugin documentation (French)
 │   ├── _shared/                            # Read-only SSOT primitives synced from gravity/shared/gravity_shared/
 │   ├── assets/logo.svg                     # 1:1 square SVG icon
