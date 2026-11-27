@@ -189,28 +189,32 @@ def _harmonize_project_name(project: str, records: List[Dict[str, Any]]) -> str:
 
 
 def find_existing_recorded_session(
-    records: List[Dict[str, Any]], conversation_id: str, *, label: str = "",
+    records: List[Dict[str, Any]], conversation_id: str, *, label: str = "", detail_slug: str = "",
     from_step: Optional[int] = None, candidate_step: Optional[int] = None,
     allow_latest_fallback: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Résout une session enregistrée existante (priorité `label`, puis tolérance `±2` steps)."""
+    """Résout une session enregistrée existante (priorité `detail_slug`/`label` récent-d'abord, puis tolérance `±2` steps)."""
     cid = str(conversation_id or "").strip()
     if not cid or not records:
         return None
     clean_lbl = str(label or "").strip()
+    clean_slug = str(detail_slug or "").strip()
     archived = [
         r for r in records
         if r.get("conversation_id") == cid and str(r.get("status") or "archived").lower() == "archived"
     ]
     if not archived:
         return None
-    if clean_lbl:
-        for rec in archived:
-            if str(rec.get("label") or "").strip() == clean_lbl:
+    rev_archived = list(reversed(archived))
+    for probe in (clean_slug, clean_lbl):
+        if not probe:
+            continue
+        for rec in rev_archived:
+            if str(rec.get("detail_slug") or "").strip() == probe or str(rec.get("label") or "").strip() == probe:
                 return dict(rec)
-        low_lbl = clean_lbl.lower()
-        for rec in archived:
-            if str(rec.get("label") or "").strip().lower() == low_lbl:
+        low_probe = probe.lower()
+        for rec in rev_archived:
+            if str(rec.get("detail_slug") or "").strip().lower() == low_probe or str(rec.get("label") or "").strip().lower() == low_probe:
                 return dict(rec)
     step_probe = from_step if (isinstance(from_step, int) and not isinstance(from_step, bool)) else candidate_step
     if step_probe is not None:
@@ -221,13 +225,14 @@ def find_existing_recorded_session(
 
 
 def resolve_sealed_update_target(
-    history_path: Path, conversation_id: str, *, label: str = "", project: str = "",
+    history_path: Path, conversation_id: str, *, label: str = "", detail_slug: str = "", project: str = "",
     from_step: Optional[int] = None, full_conversation: bool = False,
     transcript_path: Optional[Path] = None,
 ) -> Tuple[Optional[int], bool, str, str, Optional[Dict[str, Any]]]:
     """Résout `(from_step, full_conversation, label, project, existing)` pour `update_sealed=True`."""
     eff_from, eff_full = from_step, bool(full_conversation)
-    eff_label, eff_project = str(label or "").strip(), str(project or "").strip()
+    eff_label, eff_slug = str(label or "").strip(), str(detail_slug or "").strip()
+    eff_project = str(project or "").strip()
     records = load_history(history_path)
     candidate_step: Optional[int] = None
     if not eff_full and eff_from is None and transcript_path is not None and transcript_path.is_file():
@@ -235,7 +240,7 @@ def resolve_sealed_update_target(
         if isinstance(cand, int) and not isinstance(cand, bool):
             candidate_step = cand
     existing = find_existing_recorded_session(
-        records, conversation_id, label=eff_label, from_step=eff_from,
+        records, conversation_id, label=eff_label, detail_slug=eff_slug, from_step=eff_from,
         candidate_step=candidate_step, allow_latest_fallback=not eff_full,
     )
     if existing is None:
@@ -246,8 +251,10 @@ def resolve_sealed_update_target(
             eff_full = True
         elif isinstance(ex_wstep, int) and not isinstance(ex_wstep, bool):
             eff_from = ex_wstep
-    if not eff_label and existing.get("label"):
-        eff_label = str(existing["label"]).strip()
+    ex_label = str(existing.get("label") or "").strip()
+    ex_slug = str(existing.get("detail_slug") or "").strip()
+    if ex_label and (not eff_label or (ex_slug and eff_label.lower() == ex_slug.lower())):
+        eff_label = ex_label
     if not eff_project and existing.get("project"):
         eff_project = str(existing["project"]).strip()
     return eff_from, eff_full, eff_label, eff_project, existing
@@ -346,10 +353,51 @@ def archive_conversation(
     full_conversation: bool = False, from_step: Optional[int] = None,
     project: str = "", gravity_profile: str = "", summary_only: bool = False,
     force: bool = False, update_sealed: bool = False, self_archiving: bool = False,
+    detail_slug: str = "",
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     """Résout un UUID ou préfixe, collecte la session et l'enregistre avec garde-fous."""
-    cid = resolve_conversation_id_in_brain(target, brain_dir)
     eff_from_step, eff_full, eff_label, eff_project = from_step, bool(full_conversation), label, project
+    eff_slug = str(detail_slug or "").strip()
+    matched_hist: Optional[Dict[str, Any]] = None
+    try:
+        cid = resolve_conversation_id_in_brain(target, brain_dir)
+    except FileNotFoundError:
+        if not update_sealed:
+            raise
+        recs = load_history(history_path)
+        matched_hist = recs[resolve_session_index(recs, target)]
+        cid = resolve_conversation_id_in_brain(str(matched_hist["conversation_id"]), brain_dir)
+
+    if update_sealed and matched_hist is None and eff_slug:
+        recs = load_history(history_path)
+        try:
+            cand = recs[resolve_session_index(recs, eff_slug)]
+            if cand.get("conversation_id") == cid:
+                matched_hist = cand
+        except (KeyError, ValueError):
+            pass
+
+    if matched_hist is not None:
+        if not eff_full and eff_from_step is None:
+            m_step = matched_hist.get("window_start_step")
+            if m_step is None and matched_hist.get("window_mode") == "full_conversation":
+                eff_full = True
+            elif isinstance(m_step, int) and not isinstance(m_step, bool):
+                eff_from_step = m_step
+        if not eff_label.strip() and matched_hist.get("label"):
+            eff_label = str(matched_hist["label"]).strip()
+        if not eff_project.strip() and matched_hist.get("project"):
+            eff_project = str(matched_hist["project"]).strip()
+
+    tpath = brain_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
+    if update_sealed and not eff_full and eff_from_step is None and (eff_label.strip() or eff_slug):
+        u_from, u_full, u_label, u_proj, u_existing = resolve_sealed_update_target(
+            history_path, cid, label=eff_label, detail_slug=eff_slug, project=eff_project,
+            from_step=eff_from_step, full_conversation=eff_full, transcript_path=tpath,
+        )
+        if u_existing is not None:
+            eff_from_step, eff_full, eff_label, eff_project = u_from, u_full, u_label, u_proj
+
     if not eff_full and eff_from_step is None:
         active_cap = load_active_captures(store_dir).get(cid)
         if isinstance(active_cap, dict):
@@ -361,9 +409,8 @@ def archive_conversation(
                 eff_project = str(active_cap["project"]).strip()
 
     if update_sealed and not eff_full and eff_from_step is None:
-        tpath = brain_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
         eff_from_step, eff_full, eff_label, eff_project, _ = resolve_sealed_update_target(
-            history_path, cid, label=eff_label, project=eff_project,
+            history_path, cid, label=eff_label, detail_slug=eff_slug, project=eff_project,
             from_step=eff_from_step, full_conversation=eff_full, transcript_path=tpath,
         )
 
@@ -434,7 +481,21 @@ def update_session_metadata(
             if any(i != idx and str(r.get("label") or "").strip() == new_label for i, r in enumerate(records)):
                 raise ValueError(f"Un autre rapport porte déjà le label {new_label!r}.")
             rec["label"] = new_label
-            new_slug = slugify_label(new_label, f"session-{cid[:8]}")
+            base_slug = slugify_label(new_label, f"session-{cid[:8]}")
+            other_slugs = {
+                str(r.get("detail_slug") or "").strip()
+                or slugify_label(str(r.get("label") or ""), f"session-{str(r.get('conversation_id') or '')[:8]}")
+                for i, r in enumerate(records)
+                if i != idx
+            }
+            new_slug = base_slug
+            if new_slug in other_slugs:
+                cand = f"{base_slug}-{cid[:8]}" if cid else f"{base_slug}-{idx}"
+                n = 2
+                while cand in other_slugs:
+                    cand = f"{base_slug}-{cid[:8]}-{n}" if cid else f"{base_slug}-{idx}-{n}"
+                    n += 1
+                new_slug = cand
         else:
             new_slug = old_slug
 
@@ -453,6 +514,7 @@ def update_session_metadata(
                 det = json.loads(old_json.read_text(encoding="utf-8"))
                 if isinstance(det, dict):
                     det["label"] = rec["label"]
+                    det["detail_slug"] = new_slug
                     det["project"] = rec.get("project") or ""
                     if new_slug != old_slug:
                         old_json.unlink(missing_ok=True)

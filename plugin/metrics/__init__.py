@@ -19,9 +19,11 @@ from .audits_reader import (
 )
 from .collector import collect_run_metrics
 from .history import (
+    build_recorded_index,
     find_archived_session,
     history_lock,
     load_history,
+    record_max_timestamp,
     remove_session,
     resolve_session_index,
     save_history,
@@ -146,6 +148,8 @@ __all__ = [
     "parse_agent_transcript",
     "collect_run_metrics",
     "history_lock",
+    "build_recorded_index",
+    "record_max_timestamp",
     "find_archived_session",
     "to_session_record",
     "load_history",

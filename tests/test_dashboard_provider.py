@@ -478,7 +478,12 @@ class TestDashboardProviderSpi1(unittest.TestCase):
                     except FileNotFoundError:
                         return "missing"
 
-                parts = [str(home.resolve()), _tok(home / "active_captures.json"), _tok(home / "session_meta.json")]
+                parts = [
+                    str(home.resolve()),
+                    _tok(home / "active_captures.json"),
+                    _tok(home / "session_meta.json"),
+                    _tok(home / "data" / "history.jsonl"),
+                ]
                 return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
 
             # 1) Uninitialized m_home -> empty maps, compatible signature, zero writes
@@ -486,6 +491,8 @@ class TestDashboardProviderSpi1(unittest.TestCase):
             self.assertTrue(empty_res["ok"])
             self.assertEqual(empty_res["active_captures"], {})
             self.assertEqual(empty_res["session_meta"], {})
+            self.assertEqual(empty_res["recorded_by_cid"], {})
+            self.assertEqual(empty_res["recent_archived"], [])
             self.assertEqual(empty_res["signature"], _expected_sig(m_home))
             self.assertFalse(m_home.exists())
 
@@ -542,7 +549,281 @@ class TestDashboardProviderSpi1(unittest.TestCase):
             self.assertTrue(res_sym_home["ok"])
             self.assertEqual(res_sym_home["active_captures"], {})
             self.assertEqual(res_sym_home["session_meta"], {})
+            self.assertEqual(res_sym_home["recorded_by_cid"], {})
+            self.assertEqual(res_sym_home["recent_archived"], [])
             self.assertTrue(any("symlink" in w.lower() for w in res_sym_home["warnings"]))
+
+    def test_live_meta_recorded_index_multi_window_and_history_invalidation(self) -> None:
+        from metrics import save_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            m_home = Path(tmp) / "metrics_home"
+            hist_path = m_home / "data" / "history.jsonl"
+
+            records = [
+                {
+                    "conversation_id": "cid-multi-1",
+                    "status": "archived",
+                    "label": "multi-w1-updated",
+                    "detail_slug": "multi-w1-updated",
+                    "project": "ProjM",
+                    "ended_at": "2026-11-27T08:00:00Z",
+                    "archived_at": "2026-11-27T14:00:00Z",
+                    "input_tokens": 900,
+                    "cache_read_tokens": 100,
+                    "output_tokens": 200,
+                    "agents": 2,
+                    "primary_model": "gemini-3.8-flash-tiered",
+                    "current_phase": "Clôture / Enregistrée",
+                },
+                {
+                    "conversation_id": "cid-multi-1",
+                    "status": "archived",
+                    "label": "multi-w2-earlier-archive",
+                    "detail_slug": "multi-w2-earlier-archive",
+                    "project": "ProjM",
+                    "ended_at": "2026-11-27T11:00:00Z",
+                    "archived_at": "2026-11-27T11:05:00Z",
+                    "total_tokens": 5000,
+                    "useful_tokens": 2500,
+                    "agents": 3,
+                    "primary_model": "gemini-3.8-flash-tiered",
+                    "current_phase": "Clôture / Enregistrée",
+                },
+                {
+                    "conversation_id": "cid-active-only",
+                    "status": "active",
+                    "label": "active-rec",
+                    "project": "ProjM",
+                    "ended_at": "2026-11-27T16:00:00Z",
+                    "total_tokens": 300,
+                },
+            ]
+            for i in range(34):
+                records.append({
+                    "conversation_id": f"cid-arch-{i:02d}",
+                    "status": "archived",
+                    "label": f"arch-{i:02d}",
+                    "detail_slug": f"arch-{i:02d}",
+                    "project": "ProjM",
+                    "ended_at": f"2026-11-26T{i % 24:02d}:{i:02d}:00Z",
+                    "archived_at": f"2026-11-26T{i % 24:02d}:{i:02d}:30Z",
+                    "total_tokens": 100 + i,
+                    "useful_tokens": 50 + i,
+                    "agents": 1,
+                    "primary_model": "gemini-3.8-flash-tiered",
+                    "current_phase": "validation",
+                })
+            save_history(hist_path, records)
+
+            res = _invoke(["--view", "live-meta", "--metrics-home", str(m_home), "--json"])
+            self.assertTrue(res["ok"])
+            rec_by_cid = res["recorded_by_cid"]
+            self.assertIn("cid-multi-1", rec_by_cid)
+            self.assertEqual(rec_by_cid["cid-multi-1"]["label"], "multi-w1-updated")
+            self.assertEqual(rec_by_cid["cid-multi-1"]["archived_at"], "2026-11-27T14:00:00Z")
+            self.assertEqual(rec_by_cid["cid-multi-1"]["total_tokens"], 1200)
+            self.assertEqual(rec_by_cid["cid-multi-1"]["useful_tokens"], 1100)
+            for k in (
+                "label", "project", "status", "detail_slug", "ended_at", "archived_at",
+                "total_tokens", "useful_tokens", "agents", "primary_model", "current_phase",
+            ):
+                self.assertIn(k, rec_by_cid["cid-multi-1"])
+
+            recent = res["recent_archived"]
+            self.assertEqual(len(recent), 30)
+            self.assertEqual(recent[0]["conversation_id"], "cid-multi-1")
+            self.assertTrue(all(item["conversation_id"] != "cid-active-only" for item in recent))
+
+            # Modifying history.jsonl invalidates live-meta signature
+            sig_before = res["signature"]
+            records.append({
+                "conversation_id": "cid-newest",
+                "status": "archived",
+                "label": "newest-run",
+                "ended_at": "2026-11-27T17:00:00Z",
+                "archived_at": "2026-11-27T17:01:00Z",
+                "total_tokens": 42,
+            })
+            save_history(hist_path, records)
+            res_after = _invoke(
+                ["--view", "live-meta", "--metrics-home", str(m_home), "--since-signature", sig_before, "--json"]
+            )
+            self.assertTrue(res_after["changed"])
+            self.assertNotEqual(res_after["signature"], sig_before)
+            self.assertEqual(res_after["recent_archived"][0]["conversation_id"], "cid-newest")
+
+    def test_recent_first_resolution_update_meta_slug_and_sealed_update(self) -> None:
+        from metrics import resolve_session_index, save_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            m_home = root / "metrics"
+            brain = root / "brain"
+            hist_path = m_home / "data" / "history.jsonl"
+
+            # Collision test: older vs newer record with identical label/slug
+            save_history(hist_path, [
+                {"conversation_id": "aaaa0000-1111-2222-3333-000000000001", "label": "dup-run", "detail_slug": "dup-run", "cost_usd": 1.0, "status": "archived"},
+                {"conversation_id": "aaaa0000-1111-2222-3333-000000000002", "label": "dup-run", "detail_slug": "dup-run", "cost_usd": 5.0, "status": "archived"},
+            ])
+            self.assertEqual(resolve_session_index(load_history(hist_path), "dup-run"), 1)
+            det_dup = _invoke(["--view", "session-detail", "--metrics-home", str(m_home), "--target", "dup-run", "--json"])
+            self.assertTrue(det_dup["found"])
+            self.assertEqual(det_dup["record"]["cost_usd"], 5.0)
+            self.assertEqual(det_dup["source"], "history_fallback")
+            self.assertTrue(det_dup["summary_only"])
+
+            # Multi-window update-meta slug & run_action("update") targeting specific window
+            m_home2 = root / "metrics2"
+            hist2 = m_home2 / "data" / "history.jsonl"
+            cid = "bbbb1111-2222-3333-4444-000000000010"
+            tpath = _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T09:00:00Z", "content": "/gravity win1"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T09:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                ],
+            )
+            archive_conversation(
+                cid, store_dir=m_home2, history_path=hist2, brain_dir=brain, catalog_path=CATALOG_PATH,
+                label="Win Alpha 1", project="ProjW", from_step=0, gravity_window=True,
+            )
+            _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T09:00:00Z", "content": "/gravity win1"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T09:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                    {"step_index": 10, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T10:00:00Z", "content": "/gravity win2"},
+                    {"step_index": 11, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T10:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": []},
+                ],
+            )
+            archive_conversation(
+                cid, store_dir=m_home2, history_path=hist2, brain_dir=brain, catalog_path=CATALOG_PATH,
+                label="Win Alpha 2", project="ProjW", from_step=10, gravity_window=True,
+            )
+
+            # session-detail by cid returns latest window (Win Alpha 2)
+            det_cid = _invoke(["--view", "session-detail", "--metrics-home", str(m_home2), "--target", cid, "--json"])
+            self.assertEqual(det_cid["label"], "Win Alpha 2")
+            self.assertEqual(det_cid["source"], "report_json")
+            self.assertFalse(det_cid["summary_only"])
+
+            # update-meta renames Win Alpha 1 and returns new detail_slug
+            upd_meta = _invoke(
+                ["--action", "update-meta", "--json"],
+                stdin_obj={"params": {"target": "win-alpha-1", "label": "Win Alpha One"}, "context": {"metrics_home": str(m_home2)}},
+            )
+            self.assertTrue(upd_meta["ok"])
+            self.assertEqual(upd_meta["detail_slug"], "win-alpha-one")
+            self.assertEqual(upd_meta["record"]["detail_slug"], "win-alpha-one")
+            det_new = _invoke(["--view", "session-detail", "--metrics-home", str(m_home2), "--target", "win-alpha-one", "--json"])
+            self.assertTrue(det_new["found"])
+            self.assertEqual(det_new["label"], "Win Alpha One")
+            self.assertEqual(det_new["source"], "report_json")
+
+            # run_action("update") targeting window 1 via slug updates window 1 without clobbering window 2
+            upd_w1 = _invoke(
+                ["--action", "update", "--json"],
+                stdin_obj={
+                    "params": {"target": "win-alpha-one", "conversation_id": cid, "note": "re-sealed w1"},
+                    "context": {"metrics_home": str(m_home2), "brain_dir": str(brain)},
+                },
+            )
+            self.assertTrue(upd_w1["ok"])
+            self.assertEqual(upd_w1["detail_slug"], "win-alpha-one")
+            self.assertEqual(upd_w1["record"]["window_start_step"], 0)
+            self.assertEqual(upd_w1["record"]["label"], "Win Alpha One")
+            self.assertEqual(upd_w1["record"]["note"], "re-sealed w1")
+
+            # Mutate window 2 and run_action("update") targeting window 2 via label
+            _write_transcript(
+                brain / cid,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T09:00:00Z", "content": "/gravity win1"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T09:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": []},
+                    {"step_index": 10, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T10:00:00Z", "content": "/gravity win2"},
+                    {"step_index": 11, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T10:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 4_000, "cache_read_tokens": 0, "output_tokens": 400, "tool_calls": []},
+                ],
+            )
+            upd_w2 = _invoke(
+                ["--action", "update", "--json"],
+                stdin_obj={
+                    "params": {"target": cid, "label": "Win Alpha 2"},
+                    "context": {"metrics_home": str(m_home2), "brain_dir": str(brain)},
+                },
+            )
+            self.assertTrue(upd_w2["ok"])
+            self.assertEqual(upd_w2["record"]["window_start_step"], 10)
+            self.assertEqual(upd_w2["record"]["input_tokens"], 4_000)
+            self.assertEqual(len(load_history(hist2)), 2)
+
+            # Missing report JSON falls back cleanly with summary_only=True
+            (m_home2 / "reports" / "win-alpha-one.json").unlink()
+            det_fb = _invoke(["--view", "session-detail", "--metrics-home", str(m_home2), "--target", "win-alpha-one", "--json"])
+            self.assertTrue(det_fb["found"])
+            self.assertEqual(det_fb["source"], "history_fallback")
+            self.assertTrue(det_fb["summary_only"])
+            self.assertTrue(tpath.is_file())
+
+    def test_metrics_filters_pending_ignored_and_transcript_signature_freshness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            m_home = root / "metrics"
+            brain = root / "brain"
+
+            cid_pa = "cccc1111-2222-3333-4444-000000000001"
+            cid_pb = "cccc2222-2222-3333-4444-000000000002"
+            cid_ia = "cccc3333-2222-3333-4444-000000000003"
+            cid_ib = "cccc4444-2222-3333-4444-000000000004"
+            for cid, cmd in (
+                (cid_pa, "/gravity alpha-pend"),
+                (cid_pb, "/gravity beta-pend"),
+                (cid_ia, "/gravity alpha-ign"),
+                (cid_ib, "/gravity beta-ign"),
+            ):
+                _write_transcript(
+                    brain / cid,
+                    [
+                        {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T12:00:00Z", "content": cmd},
+                        {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T12:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "edit_file"}]},
+                    ],
+                )
+            record_session_meta(cid_pa, cwd=str(root / "ProjA"), project="ProjA", store_dir=m_home)
+            record_session_meta(cid_ia, cwd=str(root / "ProjA"), project="ProjA", store_dir=m_home)
+            record_session_meta(cid_pb, cwd=str(root / "ProjB"), project="ProjB", store_dir=m_home)
+            record_session_meta(cid_ib, cwd=str(root / "ProjB"), project="ProjB", store_dir=m_home)
+            ignore_session(cid_ia, reason="noise-alpha", store_dir=m_home)
+            ignore_session(cid_ib, reason="noise-beta", store_dir=m_home)
+
+            ctx = {"metrics_home": str(m_home), "brain_dir": str(brain)}
+            view_a = _invoke(["--view", "metrics", "--json"], stdin_obj={"params": {"project": "ProjA"}, "context": ctx})
+            self.assertEqual([p["conversation_id"] for p in view_a["pending_sessions"]], [cid_pa])
+            self.assertEqual([i["conversation_id"] for i in view_a["ignored_sessions"]], [cid_ia])
+
+            view_q = _invoke(["--view", "metrics", "--json"], stdin_obj={"params": {"q": "noise-beta"}, "context": ctx})
+            self.assertEqual(view_q["pending_sessions"], [])
+            self.assertEqual([i["conversation_id"] for i in view_q["ignored_sessions"]], [cid_ib])
+
+            # Mutating transcript.jsonl in existing brain/<cid> invalidates metrics signature
+            view_all = _invoke(["--view", "metrics", "--json"], stdin_obj={"params": {}, "context": ctx})
+            sig_before = view_all["signature"]
+            _write_transcript(
+                brain / cid_pa,
+                [
+                    {"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": "2026-11-27T12:00:00Z", "content": "/gravity alpha-pend"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T12:00:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 1_000, "cache_read_tokens": 0, "output_tokens": 100, "tool_calls": [{"name": "edit_file"}]},
+                    {"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-11-27T12:01:10Z", "model": "gemini-3.8-flash-tiered", "input_tokens": 2_000, "cache_read_tokens": 0, "output_tokens": 200, "tool_calls": [{"name": "edit_file"}]},
+                ],
+            )
+            view_mut = _invoke(
+                ["--view", "metrics", "--since-signature", sig_before, "--json"],
+                stdin_obj={"params": {}, "context": ctx},
+            )
+            self.assertTrue(view_mut["changed"])
+            self.assertNotEqual(view_mut["signature"], sig_before)
+            pa_item = next(p for p in view_mut["pending_sessions"] if p["conversation_id"] == cid_pa)
+            self.assertEqual(pa_item["llm_calls"], 2)
 
 
 if __name__ == "__main__":

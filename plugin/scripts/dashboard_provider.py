@@ -23,10 +23,11 @@ _tr_reader = importlib.import_module("_shared.transcript_reader")
 
 from metrics import (  # noqa: E402
     apply_remove, archive_conversation, build_audit_links_by_session,
-    default_brain_dir, discover_audit_roots, ignore_session, list_audits_bundle,
-    list_pending_sessions, load_active_captures, load_ignored_sessions,
-    load_session_meta, read_audit, resolve_conversation_id_in_brain,
-    resolve_store_paths, slugify_label, unignore_session, update_session_metadata,
+    build_recorded_index, default_brain_dir, discover_audit_roots, ignore_session,
+    list_audits_bundle, list_pending_sessions, load_active_captures,
+    load_ignored_sessions, load_session_meta, read_audit,
+    resolve_conversation_id_in_brain, resolve_store_paths, slugify_label,
+    unignore_session, update_session_metadata,
 )
 from metrics.pricing import build_analytics, extract_record_tokens, safe_int  # noqa: E402
 
@@ -206,7 +207,7 @@ def _compute_kpis(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 def _matches_query(rec: Dict[str, Any], q_cf: str) -> bool:
     if not q_cf:
         return True
-    fields = ("label", "project", "conversation_id", "note", "primary_model", "execution_mode", "current_phase")
+    fields = ("label", "project", "conversation_id", "note", "primary_model", "execution_mode", "current_phase", "ignored_reason")
     return any(isinstance(rec.get(f), str) and q_cf in rec[f].casefold() for f in fields)
 
 
@@ -324,6 +325,19 @@ def _audit_stat_tokens(audits_dirs: Optional[List[Path]], ws_dirs: List[Path]) -
     return tokens
 
 
+def _brain_stat_tokens(brain_dir: Optional[Path]) -> List[str]:
+    if brain_dir is None or not brain_dir.is_dir() or _path_safety.is_symlink_or_junction(brain_dir):
+        return []
+    try:
+        return [
+            f"{e.name}:{_stat_token(Path(e.path) / '.system_generated' / 'logs' / 'transcript.jsonl')}"
+            for e in sorted(os.scandir(brain_dir), key=lambda d: d.name)
+            if e.is_dir(follow_symlinks=False)
+        ]
+    except OSError:
+        return []
+
+
 def get_metrics_view(
     *, project: str = "", limit: int = DEFAULT_LIMIT, q: str = "", since_signature: str = "",
     m_home: Path, audits_dirs: Optional[List[Path]] = None, brain_dir: Optional[Path] = None,
@@ -337,7 +351,7 @@ def get_metrics_view(
         str(m_home), str(eff_brain) if eff_brain is not None else "", project_clean.casefold(), eff_limit, q_clean.casefold(),
         _stat_token(history_path), _stat_token(m_home / "active_captures.json"),
         _stat_token(m_home / "ignored.json"), _stat_token(m_home / "session_meta.json"),
-        _stat_token(md_path), _stat_token(eff_brain), *_audit_stat_tokens(audits_dirs, ws_dirs),
+        _stat_token(md_path), _stat_token(eff_brain), *_brain_stat_tokens(eff_brain), *_audit_stat_tokens(audits_dirs, ws_dirs),
     ])
     if since_signature and since_signature == sig:
         return {"changed": False, "unchanged": True, "signature": sig}
@@ -350,14 +364,14 @@ def get_metrics_view(
         workspace_dirs=ws_dirs if audits_dirs is None else None, include_cwd=False,
     )
     proj_cf, q_cf = project_clean.casefold(), q_clean.casefold()
-    filtered = [
-        r for r in all_records
-        if (not proj_cf or str(r.get("project") or "").strip().casefold() == proj_cf) and _matches_query(r, q_cf)
-    ]
-    pending_sessions, ignored_sessions = _derive_pending_states_ro(
+    _match_f = lambda item: (not proj_cf or str(item.get("project") or "").strip().casefold() == proj_cf) and _matches_query(item, q_cf)
+    filtered = [r for r in all_records if _match_f(r)]
+    pending_raw, ignored_raw = _derive_pending_states_ro(
         records=all_records, active_captures=active_captures, ignored_map=ignored_map,
         session_meta=session_meta, brain_dir=eff_brain, m_home=m_home, history_path=history_path,
     )
+    pending_sessions = [p for p in pending_raw if _match_f(p)]
+    ignored_sessions = [i for i in ignored_raw if _match_f(i)]
     audit_links = build_audit_links_by_session(audits_bundle["audits"])
     payload: Dict[str, Any] = {
         "available": True, "changed": True, "unchanged": False, "signature": sig,
@@ -381,18 +395,24 @@ def _resolve_target_record(records: Sequence[Dict[str, Any]], target: str) -> Tu
     clean = target.strip()
     if not clean:
         return None, "Target is required."
-    for rec in records:
+    rev = list(reversed(records))
+    for rec in rev:
         if str(rec.get("detail_slug") or "") == clean or str(rec.get("label") or "").strip() == clean:
             return rec, None
     cf = clean.casefold()
-    if hits := [r for r in records if str(r.get("label") or "").strip().casefold() == cf]:
-        return hits[-1], None
+    for rec in rev:
+        if str(rec.get("detail_slug") or "").strip().casefold() == cf or str(rec.get("label") or "").strip().casefold() == cf:
+            return rec, None
     low = clean.lower()
-    for rec in records:
+    for rec in rev:
         if str(rec.get("conversation_id") or "").strip().lower() == low:
             return rec, None
     if len(clean) >= 8 and _HEX_PREFIX_RE.match(clean):
-        matches = {str(r.get("conversation_id") or "").strip(): r for r in records if str(r.get("conversation_id") or "").strip().lower().startswith(low)}
+        matches: Dict[str, Dict[str, Any]] = {}
+        for rec in rev:
+            rcid = str(rec.get("conversation_id") or "").strip()
+            if rcid.lower().startswith(low):
+                matches.setdefault(rcid, rec)
         if len(matches) == 1:
             return next(iter(matches.values())), None
         if len(matches) > 1:
@@ -445,7 +465,8 @@ def get_session_detail_view(target: str, *, m_home: Path) -> Dict[str, Any]:
             report_md_uri = _file_uri_if_exists(md_cand)
 
     result = {
-        "found": True, "source": source, "target": clean_target, "slug": slug,
+        "found": True, "source": source, "summary_only": source == "history_fallback",
+        "target": clean_target, "slug": slug,
         "conversation_id": cid, "label": label, "report_md_uri": report_md_uri,
         "detail": detail_data, "record": rec, "warnings": warnings,
     }
@@ -499,7 +520,7 @@ def _resolve_cid_for_lifecycle(target: str, brain_dir: Path, m_home: Path) -> st
 def run_action(action: str, params: Dict[str, Any], *, m_home: Path, brain_dir: Path) -> Dict[str, Any]:
     clean_act = action.strip().lower()
     store_dir, history_path = resolve_store_paths(store_dir=m_home)
-    target = str(params.get("target") or params.get("conversation_id") or params.get("slug") or "").strip()
+    target = str(params.get("target") or params.get("conversation_id") or params.get("slug") or params.get("detail_slug") or "").strip()
     try:
         if clean_act in ("record", "archive", "update"):
             cid_target = str(params.get("conversation_id") or target).strip()
@@ -508,16 +529,20 @@ def run_action(action: str, params: Dict[str, Any], *, m_home: Path, brain_dir: 
             ws_raw = str(params.get("workspace") or "").strip()
             proj = str(params.get("project") or "").strip() or (Path(ws_raw).expanduser().name if ws_raw else "")
             full = bool(params.get("full", False))
+            raw_from = params.get("from_step")
+            from_step = raw_from if isinstance(raw_from, int) and not isinstance(raw_from, bool) else None
+            slug_hint = str(params.get("detail_slug") or params.get("slug") or (target if params.get("conversation_id") and target != cid_target else "")).strip()
             saved_rec, _, _ = archive_conversation(
                 cid_target, store_dir=store_dir, history_path=history_path, brain_dir=brain_dir,
                 catalog_path=PLUGIN_ROOT / "config" / "pricing_catalog.json",
                 label=str(params.get("label") or "").strip(), note=str(params.get("note") or "").strip(),
-                gravity_window=not full, full_conversation=full, project=proj,
+                gravity_window=not full, full_conversation=full, from_step=from_step, project=proj,
                 force=bool(params.get("force", False)), update_sealed=(clean_act == "update" or bool(params.get("update", False))),
+                detail_slug=slug_hint,
             )
             already = bool(saved_rec.get("already_archived"))
             msg = f"Session '{saved_rec.get('label')}' déjà enregistrée." if already else f"Session '{saved_rec.get('label')}' enregistrée."
-            return {"ok": True, "action": clean_act, "conversation_id": saved_rec.get("conversation_id"), "already_archived": already, "record": saved_rec, "message": msg}
+            return {"ok": True, "action": clean_act, "conversation_id": saved_rec.get("conversation_id"), "detail_slug": saved_rec.get("detail_slug", ""), "already_archived": already, "record": saved_rec, "message": msg}
         if clean_act == "update-meta":
             updated_rec, _ = update_session_metadata(
                 target, store_dir=store_dir, history_path=history_path,
@@ -525,7 +550,7 @@ def run_action(action: str, params: Dict[str, Any], *, m_home: Path, brain_dir: 
                 project=str(params["project"]) if params.get("project") is not None else None,
                 note=str(params["note"]) if params.get("note") is not None else None,
             )
-            return {"ok": True, "action": clean_act, "record": updated_rec, "message": f"Métadonnées de '{updated_rec.get('label')}' mises à jour."}
+            return {"ok": True, "action": clean_act, "detail_slug": updated_rec.get("detail_slug", ""), "record": updated_rec, "message": f"Métadonnées de '{updated_rec.get('label')}' mises à jour."}
         if clean_act == "ignore":
             cid = _resolve_cid_for_lifecycle(str(params.get("conversation_id") or target), brain_dir, m_home)
             return {"ok": True, "action": clean_act, "conversation_id": cid, "entry": ignore_session(cid, reason=str(params.get("reason") or ""), store_dir=store_dir), "message": f"Session '{cid[:8]}' masquée."}
@@ -639,9 +664,9 @@ def get_health_view(*, m_home: Path, raw_m_home: Optional[Path] = None) -> Dict[
 def get_live_meta_view(
     *, m_home: Path, since_signature: str = "", raw_m_home: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Retourne `active_captures` et `session_meta` (worktrees filtrés) en RO strict avec signature compatible."""
-    cap_path, meta_path = m_home / "active_captures.json", m_home / "session_meta.json"
-    sig = _short_digest([str(m_home), _stat_token(cap_path), _stat_token(meta_path)])
+    """Retourne `active_captures`, `session_meta` (worktrees filtrés) et index léger `recorded_by_cid`/`recent_archived` en RO strict."""
+    cap_path, meta_path, hist_path = m_home / "active_captures.json", m_home / "session_meta.json", m_home / "data" / "history.jsonl"
+    sig = _short_digest([str(m_home), _stat_token(cap_path), _stat_token(meta_path), _stat_token(hist_path)])
     if since_signature and since_signature == sig:
         return {"ok": True, "changed": False, "unchanged": True, "signature": sig}
 
@@ -658,6 +683,8 @@ def get_live_meta_view(
             "unchanged": False,
             "active_captures": {},
             "session_meta": {},
+            "recorded_by_cid": {},
+            "recent_archived": [],
             "signature": sig,
             "warnings": warnings,
         }
@@ -685,12 +712,16 @@ def get_live_meta_view(
         for cid, meta in raw_sessions.items()
         if not _tr_reader.is_worktree_path(str(meta.get("cwd") or ""))
     }
+    history_records = _load_history_ro(hist_path, warnings)
+    recorded_by_cid, recent_archived = build_recorded_index(history_records)
     return {
         "ok": True,
         "changed": True,
         "unchanged": False,
         "active_captures": active_captures,
         "session_meta": session_meta,
+        "recorded_by_cid": recorded_by_cid,
+        "recent_archived": recent_archived,
         "signature": sig,
         "warnings": warnings,
     }

@@ -7,7 +7,7 @@ import importlib
 import json
 from pathlib import Path
 import sys
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(_PLUGIN_ROOT) not in sys.path:
@@ -17,7 +17,7 @@ _atomic_io = importlib.import_module("_shared.atomic_io")
 _file_lock = importlib.import_module("_shared.file_lock")
 
 from .collector import _fmt_iso_utc, slugify_label
-from .pricing import SCHEMA_VERSION
+from .pricing import SCHEMA_VERSION, extract_record_tokens, safe_int
 
 
 @contextlib.contextmanager
@@ -317,13 +317,97 @@ def save_history(history_path: Union[Path, str], records: List[Dict[str, Any]]) 
     _atomic_io.write_text_atomic(hpath, payload)
 
 
+def _parse_iso_epoch(ts: str) -> Optional[float]:
+    raw = str(ts or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
+def record_max_timestamp(rec: Dict[str, Any]) -> Tuple[float, str]:
+    """Retourne `(epoch, iso)` maximal parmi `ended_at`, `archived_at`, `added_at`, `started_at`."""
+    best_epoch = float("-inf")
+    best_iso = ""
+    for field in ("ended_at", "archived_at", "added_at", "started_at"):
+        ts = str(rec.get(field) or "").strip()
+        if not ts:
+            continue
+        ep = _parse_iso_epoch(ts)
+        if ep is not None:
+            if ep > best_epoch or (ep == best_epoch and ts > best_iso):
+                best_epoch, best_iso = ep, ts
+        elif best_epoch == float("-inf") and ts > best_iso:
+            best_iso = ts
+    return best_epoch, best_iso
+
+
+def build_recorded_index(
+    records: Sequence[Dict[str, Any]],
+    *,
+    recent_limit: int = 30,
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """Construit l'index léger `recorded_by_cid` (max timestamp multi-fenêtres) et `recent_archived`."""
+    best_by_cid: Dict[str, Tuple[Tuple[int, float, str, int], Dict[str, Any]]] = {}
+    for idx, rec in enumerate(records):
+        if not isinstance(rec, dict):
+            continue
+        cid = str(rec.get("conversation_id") or "").strip()
+        if not cid:
+            continue
+        status = str(rec.get("status") or "archived").strip().lower() or "archived"
+        label = str(rec.get("label") or "").strip()
+        slug = str(rec.get("detail_slug") or "").strip() or slugify_label(label, f"session-{cid[:8]}")
+        archived_at = str(rec.get("archived_at") or (rec.get("added_at") if status == "archived" else "") or "").strip()
+        _, _, tot_tokens, useful_tokens = extract_record_tokens(rec)
+        summary = {
+            "conversation_id": cid,
+            "label": label,
+            "project": str(rec.get("project") or "").strip(),
+            "status": status,
+            "detail_slug": slug,
+            "ended_at": str(rec.get("ended_at") or "").strip(),
+            "archived_at": archived_at,
+            "total_tokens": tot_tokens,
+            "useful_tokens": useful_tokens,
+            "agents": safe_int(rec.get("agents")),
+            "primary_model": str(rec.get("primary_model") or "").strip(),
+            "current_phase": str(rec.get("current_phase") or "").strip(),
+        }
+        max_ep, max_iso = record_max_timestamp(rec)
+        cand_key = (1 if status == "archived" else 0, max_ep, max_iso, idx)
+        prev = best_by_cid.get(cid)
+        if prev is None or cand_key > prev[0]:
+            best_by_cid[cid] = (cand_key, summary)
+
+    recorded_by_cid = {cid: entry for cid, (_, entry) in best_by_cid.items()}
+    archived_items = [
+        (key, entry)
+        for key, entry in best_by_cid.values()
+        if entry["status"] == "archived"
+    ]
+    archived_items.sort(key=lambda item: (item[0][1], item[0][2], item[1]["conversation_id"]), reverse=True)
+    cap = max(0, int(recent_limit))
+    recent_archived = [entry for _, entry in archived_items[:cap]]
+    return recorded_by_cid, recent_archived
+
+
 def resolve_session_index(records: List[Dict[str, Any]], key: str) -> int:
-    """Trouve l'indice d'une session par label, detail_slug, UUID exact ou préfixe unique d'UUID."""
+    """Trouve l'indice le plus récent d'une session par label, detail_slug, UUID ou préfixe unique."""
     target = key.strip()
     if not target:
         raise KeyError("Clé de session vide.")
 
-    for idx, rec in enumerate(records):
+    rev_indices = range(len(records) - 1, -1, -1)
+    for idx in rev_indices:
+        rec = records[idx]
         if (
             rec.get("label") == target
             or rec.get("detail_slug") == target
@@ -332,18 +416,28 @@ def resolve_session_index(records: List[Dict[str, Any]], key: str) -> int:
             return idx
 
     t_low = target.lower()
-    matches = [
-        idx
-        for idx, rec in enumerate(records)
-        if str(rec.get("conversation_id") or "").lower().startswith(t_low)
-        or str(rec.get("label") or "").lower() == t_low
-        or str(rec.get("detail_slug") or "").lower() == t_low
-    ]
-    if not matches:
+    for idx in rev_indices:
+        rec = records[idx]
+        if (
+            str(rec.get("label") or "").lower() == t_low
+            or str(rec.get("detail_slug") or "").lower() == t_low
+        ):
+            return idx
+
+    for idx in rev_indices:
+        if str(records[idx].get("conversation_id") or "").lower() == t_low:
+            return idx
+
+    prefix_by_cid: Dict[str, int] = {}
+    for idx in rev_indices:
+        cid = str(records[idx].get("conversation_id") or "").strip()
+        if cid.lower().startswith(t_low):
+            prefix_by_cid.setdefault(cid, idx)
+    if not prefix_by_cid:
         raise KeyError(f"Session introuvable : {key!r}")
-    if len(matches) > 1:
+    if len(prefix_by_cid) > 1:
         raise ValueError(f"Plusieurs sessions correspondent à {key!r} ; précisez le label complet.")
-    return matches[0]
+    return next(iter(prefix_by_cid.values()))
 
 
 def upsert_session(records: List[Dict[str, Any]], record: Dict[str, Any]) -> List[Dict[str, Any]]:
