@@ -15,6 +15,13 @@ if str(_PLUGIN_ROOT) not in sys.path:
 
 _path_safety = importlib.import_module("_shared.path_safety")
 
+from .pricing import (
+    CATEGORY_LABELS_FR,
+    CATEGORY_ORDER,
+    accumulate_category_and_model_buckets,
+    extract_record_tokens,
+)
+
 MAX_AUDIT_BYTES = 262_144
 
 _UUID_RE = re.compile(
@@ -261,38 +268,49 @@ def _extract_excerpt(text: str) -> str:
     return ""
 
 
-def _extract_linked_sessions(text: str, records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _build_linked_session_entry(rec: Dict[str, Any], matched_by: str) -> Dict[str, Any]:
+    cid = str(rec.get("conversation_id") or "")
+    lbl = str(rec.get("label") or cid[:8])
+    _, _, tot, useful = extract_record_tokens(rec)
+    return {
+        "conversation_id": cid,
+        "label": lbl,
+        "project": str(rec.get("project") or ""),
+        "cost_usd": float(rec.get("cost_usd") or 0.0),
+        "cost_2027_usd": float(rec.get("cost_2027_usd") or 0.0),
+        "cache_hit_rate_pct": float(rec.get("cache_hit_rate_pct") or 0.0),
+        "total_tokens": tot,
+        "useful_tokens": useful,
+        "primary_model": str(rec.get("primary_model") or ""),
+        "started_at": rec.get("started_at") or rec.get("added_at") or "",
+        "matched_by": matched_by,
+    }
+
+
+def _extract_linked_sessions_with_records(
+    text: str, records: Sequence[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     if not records or not text:
-        return []
+        return [], []
     by_cid: Dict[str, List[Dict[str, Any]]] = {}
     for rec in records:
         cid = str(rec.get("conversation_id") or "").strip().lower()
         if cid:
             by_cid.setdefault(cid, []).append(rec)
     if not by_cid:
-        return []
+        return [], []
 
     all_cids = list(by_cid.keys())
     matched: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    matched_recs: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     for full_uuid in _UUID_RE.findall(text):
-        key = full_uuid.lower()
-        for rec in by_cid.get(key, []):
+        for rec in by_cid.get(full_uuid.lower(), []):
             cid = str(rec.get("conversation_id") or "")
             lbl = str(rec.get("label") or cid[:8])
-            matched.setdefault(
-                (cid, lbl),
-                {
-                    "conversation_id": cid,
-                    "label": lbl,
-                    "project": str(rec.get("project") or ""),
-                    "cost_usd": float(rec.get("cost_usd") or 0.0),
-                    "cost_2027_usd": float(rec.get("cost_2027_usd") or 0.0),
-                    "cache_hit_rate_pct": float(rec.get("cache_hit_rate_pct") or 0.0),
-                    "started_at": rec.get("started_at") or rec.get("added_at") or "",
-                    "matched_by": "uuid",
-                },
-            )
+            if (cid, lbl) not in matched:
+                matched[(cid, lbl)] = _build_linked_session_entry(rec, "uuid")
+                matched_recs[(cid, lbl)] = rec
 
     text_no_full = _UUID_RE.sub(" ", text)
     for tok in _HEX_PREFIX_RE.findall(text_no_full):
@@ -305,25 +323,109 @@ def _extract_linked_sessions(text: str, records: Sequence[Dict[str, Any]]) -> Li
         for rec in by_cid[cid_hits[0]]:
             cid = str(rec.get("conversation_id") or "")
             lbl = str(rec.get("label") or cid[:8])
-            matched.setdefault(
-                (cid, lbl),
-                {
-                    "conversation_id": cid,
-                    "label": lbl,
-                    "project": str(rec.get("project") or ""),
-                    "cost_usd": float(rec.get("cost_usd") or 0.0),
-                    "cost_2027_usd": float(rec.get("cost_2027_usd") or 0.0),
-                    "cache_hit_rate_pct": float(rec.get("cache_hit_rate_pct") or 0.0),
-                    "started_at": rec.get("started_at") or rec.get("added_at") or "",
-                    "matched_by": "prefix",
-                },
-            )
+            if (cid, lbl) not in matched:
+                matched[(cid, lbl)] = _build_linked_session_entry(rec, "prefix")
+                matched_recs[(cid, lbl)] = rec
 
-    return sorted(
-        matched.values(),
-        key=lambda item: (str(item.get("started_at") or ""), str(item.get("label") or "")),
+    ordered_keys = sorted(
+        matched.keys(),
+        key=lambda k: (str(matched[k].get("started_at") or ""), str(matched[k].get("label") or "")),
         reverse=True,
     )
+    return [matched[k] for k in ordered_keys], [matched_recs[k] for k in ordered_keys]
+
+
+def _extract_linked_sessions(text: str, records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    sessions, _ = _extract_linked_sessions_with_records(text, records)
+    return sessions
+
+
+def _build_linked_metrics(matched_records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Agrège les métriques tokens, cache, catégories et modèles des sessions liées à un audit."""
+    cnt = len(matched_records)
+    if cnt == 0:
+        return {
+            "sessions_count": 0, "total_tokens": 0, "useful_tokens": 0,
+            "avg_tokens_per_session": 0.0, "avg_useful_tokens_per_session": 0.0,
+            "avg_cache_hit_rate_pct": 0.0, "cache_hit_rate_pct": 0.0,
+            "total_cost_usd": 0.0, "avg_cost_usd": 0.0,
+            "by_category": {}, "primary_models": [],
+        }
+
+    sum_in = sum_cache = sum_tot = sum_useful = 0
+    sum_cost = sum_cache_pct = 0.0
+    for rec in matched_records:
+        in_tok, cache_tok, tot, useful = extract_record_tokens(rec)
+        sum_in += in_tok
+        sum_cache += cache_tok
+        sum_tot += tot
+        sum_useful += useful
+        sum_cost += float(rec.get("cost_usd") or 0.0)
+        sum_cache_pct += float(rec.get("cache_hit_rate_pct") or 0.0)
+
+    cat_buckets, model_buckets = accumulate_category_and_model_buckets(matched_records)
+    avg_cache_pct = round(sum_cache_pct / cnt, 2)
+    tot_prompt = sum_in + sum_cache
+    weighted_cache_pct = round((sum_cache / tot_prompt) * 100.0, 2) if tot_prompt > 0 else avg_cache_pct
+
+    cat_tot_sum = sum(b["total_tokens"] for b in cat_buckets.values())
+    ordered_cats = [c for c in CATEGORY_ORDER if c in cat_buckets] + sorted(
+        c for c in cat_buckets if c not in CATEGORY_ORDER
+    )
+    by_category = {
+        cat: {
+            "label": CATEGORY_LABELS_FR.get(cat, cat),
+            "sessions": cat_buckets[cat]["sessions"],
+            "agents": cat_buckets[cat]["agents"],
+            "total_tokens": cat_buckets[cat]["total_tokens"],
+            "useful_tokens": cat_buckets[cat]["useful_tokens"],
+            "avg_tokens_per_session": round(cat_buckets[cat]["total_tokens"] / cnt, 1),
+            "avg_useful_tokens_per_session": round(cat_buckets[cat]["useful_tokens"] / cnt, 1),
+            "avg_tokens_per_agent": (
+                round(cat_buckets[cat]["total_tokens"] / cat_buckets[cat]["agents"], 1)
+                if cat_buckets[cat]["agents"] > 0
+                else 0.0
+            ),
+            "share_pct": round((cat_buckets[cat]["total_tokens"] / cat_tot_sum) * 100.0, 2) if cat_tot_sum > 0 else 0.0,
+        }
+        for cat in ordered_cats
+    }
+
+    model_tot_sum = sum(b["total_tokens"] for b in model_buckets.values())
+    model_sess_sum = sum(b["sessions"] for b in model_buckets.values())
+    primary_models = [
+        {
+            "model": m_name,
+            "sessions": m_data["sessions"],
+            "calls": m_data["calls"],
+            "agents": m_data["agents"],
+            "total_tokens": m_data["total_tokens"],
+            "useful_tokens": m_data["useful_tokens"],
+            "share_pct": (
+                round((m_data["total_tokens"] / model_tot_sum) * 100.0, 2)
+                if model_tot_sum > 0
+                else (round((m_data["sessions"] / model_sess_sum) * 100.0, 2) if model_sess_sum > 0 else 0.0)
+            ),
+        }
+        for m_name, m_data in sorted(
+            model_buckets.items(),
+            key=lambda kv: (-kv[1]["total_tokens"], -kv[1]["calls"], -kv[1]["sessions"], kv[0]),
+        )
+    ]
+
+    return {
+        "sessions_count": cnt,
+        "total_tokens": sum_tot,
+        "useful_tokens": sum_useful,
+        "avg_tokens_per_session": round(sum_tot / cnt, 1),
+        "avg_useful_tokens_per_session": round(sum_useful / cnt, 1),
+        "avg_cache_hit_rate_pct": avg_cache_pct,
+        "cache_hit_rate_pct": weighted_cache_pct,
+        "total_cost_usd": round(sum_cost, 6),
+        "avg_cost_usd": round(sum_cost / cnt, 6),
+        "by_category": by_category,
+        "primary_models": primary_models,
+    }
 
 
 def _read_bounded_markdown(path: Path) -> Tuple[str, int, bool]:
@@ -359,7 +461,8 @@ def _build_audit_record(
     is_index = rel_posix.lower() == "readme.md"
     title = _extract_title(text, file_resolved.stem)
     verdict, verdict_tone = _extract_verdict(text)
-    linked_sessions = _extract_linked_sessions(text, records)
+    linked_sessions, matched_records = _extract_linked_sessions_with_records(text, records)
+    linked_metrics = _build_linked_metrics(matched_records)
 
     entry: Dict[str, Any] = {
         "audit_id": audit_id,
@@ -377,6 +480,7 @@ def _build_audit_record(
         "truncated": truncated,
         "excerpt": _extract_excerpt(text),
         "linked_sessions": linked_sessions,
+        "linked_metrics": linked_metrics,
         "uri": file_resolved.as_uri(),
     }
     if include_content:

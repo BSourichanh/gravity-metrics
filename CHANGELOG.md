@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Fail-Safe `Stop` Auto-Record Hook, Native Subagent Classification, Audit `linked_metrics` & 4-Axis Analytics (`TASK-UX-04`):**
+  - Added `plugin/hooks/stop_auto_record.py` and declared active `Stop` handler (`python3 hooks/stop_auto_record.py`, timeout `10`, `"enabled": true`) in `plugin/hooks.json` to silently seal active captures (`archive_conversation(..., update_sealed=True)`, exit `0`, stdout `{}`) only when `fullyIdle=true`, zero errors, and a Validation marker is present.
+  - Extended `plugin/metrics/pricing.py::classify_agent` to classify native Antigravity subagent types (`general`, `code_review`, `research`, `planner`, `builder`, `reviewer`) without falling back to `other`.
+  - Added `linked_metrics` (session/useful token averages, cache %, per-category averages, `primary_models`) to `plugin/metrics/audits_reader.py::_build_audit_record` while preserving strict `audits/code/` exclusion.
+  - Extended `plugin/scripts/dashboard_provider.py` (`_compute_kpis`, `_derive_pending_states_ro`, `get_metrics_view`) with `avg_tokens_per_session`, `avg_useful_tokens_per_session`, preserved `milestones` and `window_mode` in `pending_sessions`, 4-axis `analytics` (`by_agent_type`, `by_phase`, `by_session_mode`, `by_model`), and `audit_links_by_session` in strict read-only `< 450_000` B.
+
 ### Changed
 - **Session Continuity, Sealed Interval Overlap & 4-Phase Token Alignment (`TASK-UX-01`):**
   - Excluded bare `/gravity` and consultative subcommands (`status`, `doctor`, `dashboard`, `modules`, `help`, `overview`) from `plugin/metrics/prompt_classifier.py::is_gravity_session_prompt` so consultative calls do not anchor phantom `step=0` windows.

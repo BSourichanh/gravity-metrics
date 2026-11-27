@@ -22,12 +22,13 @@ _path_safety = importlib.import_module("_shared.path_safety")
 _tr_reader = importlib.import_module("_shared.transcript_reader")
 
 from metrics import (  # noqa: E402
-    apply_remove, archive_conversation, default_brain_dir, discover_audit_roots,
-    ignore_session, list_audits_bundle, list_pending_sessions, load_active_captures,
-    load_ignored_sessions, load_session_meta, read_audit,
-    resolve_conversation_id_in_brain, resolve_store_paths, slugify_label,
-    unignore_session, update_session_metadata,
+    apply_remove, archive_conversation, build_audit_links_by_session,
+    default_brain_dir, discover_audit_roots, ignore_session, list_audits_bundle,
+    list_pending_sessions, load_active_captures, load_ignored_sessions,
+    load_session_meta, read_audit, resolve_conversation_id_in_brain,
+    resolve_store_paths, slugify_label, unignore_session, update_session_metadata,
 )
+from metrics.pricing import build_analytics, extract_record_tokens, safe_int  # noqa: E402
 
 DEFAULT_LIMIT, MAX_LIMIT, MAX_PAYLOAD_BYTES, MAX_AGENTS_IN_DETAIL = 100, 500, 450_000, 200
 _HEX_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{0,4}){0,4}$")
@@ -183,6 +184,9 @@ def _compute_kpis(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     cnt = len(records)
     cost_usd = sum(float(r.get("cost_usd") or 0.0) for r in records)
     cost_2027 = sum(float(r["cost_2027_usd"]) if r.get("cost_2027_usd") is not None else float(r.get("cost_usd") or 0.0) for r in records)
+    tok_tuples = [extract_record_tokens(r) for r in records]
+    total_tokens = sum(t[2] for t in tok_tuples)
+    useful_tokens = sum(t[3] for t in tok_tuples)
     return {
         "sessions_count": cnt,
         "archived_count": sum(1 for r in records if str(r.get("status") or "archived").strip().lower() == "archived"),
@@ -190,9 +194,11 @@ def _compute_kpis(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "cost_usd": round(cost_usd, 6), "cost_2027_usd": round(cost_2027, 6),
         "cache_savings_usd": round(sum(float(r.get("cache_savings_usd") or 0.0) for r in records), 6),
         "avg_cache_hit_rate_pct": round(sum(float(r.get("cache_hit_rate_pct") or 0.0) for r in records) / cnt, 2) if cnt else 0.0,
-        "total_tokens": sum(int(r.get("total_tokens") or 0) for r in records),
-        "useful_tokens": sum(int(r.get("input_tokens") or 0) + int(r.get("output_tokens") or 0) for r in records),
-        "total_llm_calls": sum(int(r.get("llm_calls") or 0) for r in records),
+        "total_tokens": total_tokens,
+        "useful_tokens": useful_tokens,
+        "avg_tokens_per_session": round(total_tokens / cnt, 1) if cnt else 0.0,
+        "avg_useful_tokens_per_session": round(useful_tokens / cnt, 1) if cnt else 0.0,
+        "total_llm_calls": sum(safe_int(r.get("llm_calls")) for r in records),
         "bridge_sessions_count": 0, "bridge_children_total": 0,
     }
 
@@ -245,7 +251,12 @@ def _derive_pending_states_ro(
             "ignored": ign is not None or bool(lp.get("ignored")),
             "ignored_reason": str((ign or {}).get("reason") or lp.get("ignored_reason") or ""),
             "ignored_at": str((ign or {}).get("ignored_at") or lp.get("ignored_at") or ""),
+            "window_mode": str(lp.get("window_mode") or hist_a.get("window_mode") or ""),
             "current_phase": str(lp.get("current_phase") or hist_a.get("current_phase") or ""),
+            "milestones": (
+                dict(lp["milestones"]) if isinstance(lp.get("milestones"), dict)
+                else (dict(hist_a["milestones"]) if isinstance(hist_a.get("milestones"), dict) else None)
+            ),
             "llm_calls": int(lp.get("llm_calls") or hist_a.get("llm_calls") or 0),
             "bridge_children_count": 0,
             "brain_exists": brain_exists,
@@ -347,18 +358,21 @@ def get_metrics_view(
         records=all_records, active_captures=active_captures, ignored_map=ignored_map,
         session_meta=session_meta, brain_dir=eff_brain, m_home=m_home, history_path=history_path,
     )
+    audit_links = build_audit_links_by_session(audits_bundle["audits"])
     payload: Dict[str, Any] = {
         "available": True, "changed": True, "unchanged": False, "signature": sig,
         "metrics_home": str(m_home), "metrics_md_uri": _file_uri_if_exists(md_path),
         "filters": {"project": project_clean, "limit": eff_limit, "q": q_clean},
         "total_records": len(all_records), "total_matching": len(filtered), "truncated": False,
         "kpis": _compute_kpis(filtered),
+        "analytics": build_analytics(filtered),
         "projects": sorted(_canonical_projects_map(all_records).values(), key=lambda s: (s.casefold(), s)),
         "by_project": _aggregate_by_project(filtered),
         "records": list(reversed(filtered))[:eff_limit],
         "active_captures": active_captures, "pending_sessions": pending_sessions, "ignored_sessions": ignored_sessions,
         "audits": audits_bundle["audits"], "index_audit": audits_bundle["index_audit"],
-        "index_audits": audits_bundle["index_audits"], "warnings": warnings,
+        "index_audits": audits_bundle["index_audits"], "audit_links_by_session": audit_links,
+        "warnings": warnings,
     }
     return _enforce_payload_budget(payload, ("records", "audits", "pending_sessions", "ignored_sessions"))
 

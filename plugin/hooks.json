@@ -18,5 +18,15 @@
         "timeout": 15
       }
     ]
+  },
+  "gravity-metrics-stop": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 hooks/stop_auto_record.py",
+        "timeout": 10
+      }
+    ]
   }
 }
