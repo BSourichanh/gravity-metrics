@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests unitaires SPI-1 pour plugin/scripts/dashboard_provider.py (100 % stdlib)."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -397,6 +398,151 @@ class TestDashboardProviderSpi1(unittest.TestCase):
             self.assertTrue(rm_ghost["ok"])
             self.assertTrue(rm_ghost["already_absent"])
             self.assertEqual(rm_ghost["remaining"], 0)
+
+    def test_health_view_ro_states_and_symlink_safety(self) -> None:
+        mod_cfg = json.loads((PLUGIN_ROOT / "config" / "module.json").read_text(encoding="utf-8"))
+        self.assertIn("health", mod_cfg["dashboard"]["views"])
+        self.assertIn("live-meta", mod_cfg["dashboard"]["views"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            m_home = root / "metrics_uninit"
+
+            # 1) Uninitialized metrics_home -> WARN, strictly RO (never creates m_home)
+            h_missing = _invoke(["--view", "health", "--metrics-home", str(m_home), "--json"])
+            self.assertTrue(h_missing["ok"])
+            self.assertEqual(h_missing["status"], "WARN")
+            self.assertEqual(h_missing["summary"], "history.jsonl/METRICS.md absent(s)")
+            self.assertTrue(any("history.jsonl" in w and "/gravity-metrics" in w for w in h_missing["warnings"]))
+            self.assertFalse(m_home.exists())
+
+            # 2) Valid METRICS.md + history.jsonl -> OK with exact session count
+            hist_path = m_home / "data" / "history.jsonl"
+            md_path = m_home / "METRICS.md"
+            hist_path.parent.mkdir(parents=True)
+            md_path.write_text("# Metrics\n", encoding="utf-8")
+            hist_path.write_text(
+                '\ufeff{"conversation_id":"c1"}\n\n{"id":"c2"}\n',
+                encoding="utf-8",
+            )
+            h_ok = _invoke(["--view", "health", "--metrics-home", str(m_home), "--json"])
+            self.assertEqual(h_ok, {"ok": True, "status": "OK", "summary": "2 session(s)", "warnings": []})
+
+            # 3) Corrupt JSONL / non-dict JSON -> WARN "history.jsonl invalide"
+            hist_path.write_text('{"id":"c1"}\n[1, 2, 3]\n', encoding="utf-8")
+            h_nondict = _invoke(["--view", "health", "--metrics-home", str(m_home), "--json"])
+            self.assertTrue(h_nondict["ok"])
+            self.assertEqual(h_nondict["status"], "WARN")
+            self.assertEqual(h_nondict["summary"], "history.jsonl invalide")
+            self.assertTrue(h_nondict["warnings"])
+
+            hist_path.write_text("{corrupt\n", encoding="utf-8")
+            h_bad = _invoke(["--view", "health", "--metrics-home", str(m_home), "--json"])
+            self.assertTrue(h_bad["ok"])
+            self.assertEqual(h_bad["status"], "WARN")
+            self.assertEqual(h_bad["summary"], "history.jsonl invalide")
+            self.assertTrue(h_bad["warnings"])
+
+            # 4) Symlink refusal on history.jsonl and m_home
+            hist_path.unlink()
+            real_target = root / "real_history.jsonl"
+            real_target.write_text('{"id":"ok"}\n', encoding="utf-8")
+            try:
+                hist_path.symlink_to(real_target)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symlinks not supported in this environment")
+            h_sym = _invoke(["--view", "health", "--metrics-home", str(m_home), "--json"])
+            self.assertTrue(h_sym["ok"])
+            self.assertEqual(h_sym["status"], "WARN")
+            self.assertTrue(any("symlink" in w.lower() for w in h_sym["warnings"]))
+
+            hist_path.unlink()
+            hist_path.write_text('{"id":"ok"}\n', encoding="utf-8")
+            sym_home = root / "sym_metrics"
+            sym_home.symlink_to(m_home, target_is_directory=True)
+            h_sym_home = _invoke(["--view", "health", "--metrics-home", str(sym_home), "--json"])
+            self.assertTrue(h_sym_home["ok"])
+            self.assertEqual(h_sym_home["status"], "WARN")
+            self.assertTrue(any("symlink" in w.lower() for w in h_sym_home["warnings"]))
+
+    def test_live_meta_view_filters_worktrees_signature_and_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            m_home = root / "metrics_home"
+
+            def _expected_sig(home: Path) -> str:
+                def _tok(p: Path) -> str:
+                    try:
+                        st = p.stat()
+                        return f"{st.st_mtime_ns}:{st.st_size}"
+                    except FileNotFoundError:
+                        return "missing"
+
+                parts = [str(home.resolve()), _tok(home / "active_captures.json"), _tok(home / "session_meta.json")]
+                return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+            # 1) Uninitialized m_home -> empty maps, compatible signature, zero writes
+            empty_res = _invoke(["--view", "live-meta", "--metrics-home", str(m_home), "--json"])
+            self.assertTrue(empty_res["ok"])
+            self.assertEqual(empty_res["active_captures"], {})
+            self.assertEqual(empty_res["session_meta"], {})
+            self.assertEqual(empty_res["signature"], _expected_sig(m_home))
+            self.assertFalse(m_home.exists())
+
+            # 2) active_captures + session_meta with worktree filtering
+            m_home.mkdir(parents=True)
+            cap_path = m_home / "active_captures.json"
+            meta_path = m_home / "session_meta.json"
+            cap_path.write_text(
+                json.dumps({"schema_version": 1, "captures": {"cid-1": {"start_step": 2, "label": "cap-1"}}}),
+                encoding="utf-8",
+            )
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sessions": {
+                            "cid-1": {"cwd": str(root / "gravity-metrics"), "project": "gravity-metrics"},
+                            "cid-wt1": {"cwd": "/home/user/gravity-worktrees/gravity-metrics-w1", "project": "wt1"},
+                            "cid-wt2": {"cwd": "/tmp/.worktrees/gravity-workflow-fix", "project": "wt2"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            res = _invoke(["--view", "live-meta", "--metrics-home", str(m_home), "--json"])
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["active_captures"], {"cid-1": {"start_step": 2, "label": "cap-1"}})
+            self.assertEqual(list(res["session_meta"].keys()), ["cid-1"])
+            self.assertEqual(res["signature"], _expected_sig(m_home))
+
+            # 3) --since-signature fast-path
+            unch = _invoke(
+                ["--view", "live-meta", "--metrics-home", str(m_home), "--since-signature", res["signature"], "--json"]
+            )
+            self.assertEqual(unch, {"ok": True, "changed": False, "unchanged": True, "signature": res["signature"]})
+
+            # 4) Symlink safety on session_meta.json and m_home
+            meta_path.unlink()
+            real_meta = root / "real_meta.json"
+            real_meta.write_text(json.dumps({"schema_version": 1, "sessions": {"cid-s": {"cwd": "/tmp/ws"}}}), encoding="utf-8")
+            try:
+                meta_path.symlink_to(real_meta)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symlinks not supported in this environment")
+            res_sym = _invoke(["--view", "live-meta", "--metrics-home", str(m_home), "--json"])
+            self.assertTrue(res_sym["ok"])
+            self.assertEqual(res_sym["active_captures"], {"cid-1": {"start_step": 2, "label": "cap-1"}})
+            self.assertEqual(res_sym["session_meta"], {})
+            self.assertTrue(any("symlink" in w.lower() for w in res_sym["warnings"]))
+
+            sym_home = root / "sym_live_home"
+            sym_home.symlink_to(m_home, target_is_directory=True)
+            res_sym_home = _invoke(["--view", "live-meta", "--metrics-home", str(sym_home), "--json"])
+            self.assertTrue(res_sym_home["ok"])
+            self.assertEqual(res_sym_home["active_captures"], {})
+            self.assertEqual(res_sym_home["session_meta"], {})
+            self.assertTrue(any("symlink" in w.lower() for w in res_sym_home["warnings"]))
 
 
 if __name__ == "__main__":

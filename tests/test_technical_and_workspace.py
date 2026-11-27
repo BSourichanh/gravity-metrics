@@ -98,6 +98,12 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
             "collect_run_metrics",
         ):
             self.assertTrue(hasattr(metrics_pkg, sym), sym)
+        collector_src = (PLUGIN_ROOT / "metrics" / "collector.py").read_text(encoding="utf-8")
+        self.assertNotIn("except ImportError:", collector_src)
+        self.assertNotIn("_shared_discover_known_repos", collector_src)
+        self.assertNotIn("_shared_normalize_worktree_path", collector_src)
+        self.assertIn("from .technical_signals import aggregate_technical_signals", collector_src)
+        self.assertIn("from .workspace_resolver import", collector_src)
 
     def test_worktree_normalization_and_workspace_kind(self) -> None:
         self.assertEqual(

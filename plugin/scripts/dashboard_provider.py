@@ -19,6 +19,7 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 _hook_rt = importlib.import_module("_shared.hook_runtime")
 _path_safety = importlib.import_module("_shared.path_safety")
+_tr_reader = importlib.import_module("_shared.transcript_reader")
 
 from metrics import (  # noqa: E402
     apply_remove, archive_conversation, default_brain_dir, discover_audit_roots,
@@ -85,16 +86,20 @@ def _enforce_payload_budget(payload: Dict[str, Any], list_keys: Sequence[str]) -
             payload[key] = items
     return payload
 
-def _resolve_metrics_home(*, metrics_home: Optional[str] = None, gravity_home: Optional[str] = None) -> Path:
+def _raw_metrics_home(*, metrics_home: Optional[str] = None, gravity_home: Optional[str] = None) -> Path:
     if metrics_home:
-        return Path(metrics_home).expanduser().resolve()
+        return Path(os.path.abspath(os.fspath(Path(metrics_home).expanduser())))
     if env_m := os.environ.get("GRAVITY_METRICS_HOME", "").strip():
-        return Path(env_m).expanduser().resolve()
+        return Path(os.path.abspath(os.fspath(Path(env_m).expanduser())))
     if gravity_home:
-        return (Path(gravity_home).expanduser() / "metrics").resolve()
+        return Path(os.path.abspath(os.fspath(Path(gravity_home).expanduser() / "metrics")))
     if env_g := os.environ.get("GRAVITY_HOME", "").strip():
-        return (Path(env_g).expanduser() / "metrics").resolve()
-    return (_path_safety.safe_home_dir() / ".gemini" / "gravity" / "metrics").resolve()
+        return Path(os.path.abspath(os.fspath(Path(env_g).expanduser() / "metrics")))
+    return Path(os.path.abspath(os.fspath(_path_safety.safe_home_dir() / ".gemini" / "gravity" / "metrics")))
+
+
+def _resolve_metrics_home(*, metrics_home: Optional[str] = None, gravity_home: Optional[str] = None) -> Path:
+    return _raw_metrics_home(metrics_home=metrics_home, gravity_home=gravity_home).resolve()
 
 
 def _load_history_ro(history_path: Path, warnings: List[str]) -> List[Dict[str, Any]]:
@@ -557,6 +562,126 @@ def _read_request_payload(payload_arg: str) -> Tuple[Dict[str, Any], Dict[str, A
     return dict(parsed), {}
 
 
+def _validate_jsonl_ro(path: Path) -> Tuple[int, Optional[str]]:
+    if _path_safety.is_symlink_or_junction(path):
+        return 0, f"{path} est un symlink (refusé en lecture seule)."
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return 0, f"{path} illisible ({exc})."
+    count = 0
+    for idx, raw_ln in enumerate(text.splitlines(), start=1):
+        line = raw_ln.lstrip("\ufeff").strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError as exc:
+            return count, f"{path} ligne {idx} corrompue ({exc})."
+        if not isinstance(obj, dict):
+            return count, f"{path} ligne {idx} n'est pas un objet JSON."
+        count += 1
+    return count, None
+
+
+def get_health_view(*, m_home: Path, raw_m_home: Optional[Path] = None) -> Dict[str, Any]:
+    """Inspecte la santé du stockage metrics en lecture seule stricte (zéro symlink, zéro écriture)."""
+    history_path, metrics_md = m_home / "data" / "history.jsonl", m_home / "METRICS.md"
+    candidates = [raw_m_home] if raw_m_home is not None else []
+    candidates.extend((m_home, history_path.parent, history_path, metrics_md))
+    sym_hit = next((p for p in candidates if _path_safety.is_symlink_or_junction(p)), None)
+    if sym_hit is not None:
+        return {
+            "ok": True,
+            "status": "WARN",
+            "summary": "symlink refusé",
+            "warnings": [f"Module 'metrics' : {sym_hit} est un symlink ou une jonction (refusé en lecture seule)."],
+        }
+    try:
+        files_ok = history_path.is_file() and metrics_md.is_file()
+    except OSError:
+        files_ok = False
+    if not files_ok:
+        return {
+            "ok": True,
+            "status": "WARN",
+            "summary": "history.jsonl/METRICS.md absent(s)",
+            "warnings": [
+                f"Module 'metrics' actif mais {history_path} ou {metrics_md} absent : "
+                "exécutez /gravity-metrics pour initialiser la télémétrie."
+            ],
+        }
+    sessions, jerr = _validate_jsonl_ro(history_path)
+    if jerr:
+        return {
+            "ok": True,
+            "status": "WARN",
+            "summary": "history.jsonl invalide",
+            "warnings": [f"Module 'metrics' : {jerr}"],
+        }
+    return {"ok": True, "status": "OK", "summary": f"{sessions} session(s)", "warnings": []}
+
+
+def get_live_meta_view(
+    *, m_home: Path, since_signature: str = "", raw_m_home: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Retourne `active_captures` et `session_meta` (worktrees filtrés) en RO strict avec signature compatible."""
+    cap_path, meta_path = m_home / "active_captures.json", m_home / "session_meta.json"
+    sig = _short_digest([str(m_home), _stat_token(cap_path), _stat_token(meta_path)])
+    if since_signature and since_signature == sig:
+        return {"ok": True, "changed": False, "unchanged": True, "signature": sig}
+
+    warnings: List[str] = []
+    sym_home = next(
+        (p for p in (raw_m_home, m_home) if p is not None and _path_safety.is_symlink_or_junction(p)),
+        None,
+    )
+    if sym_home is not None:
+        warnings.append(f"Refused symlink or junction: {sym_home.name}.")
+        return {
+            "ok": True,
+            "changed": True,
+            "unchanged": False,
+            "active_captures": {},
+            "session_meta": {},
+            "signature": sig,
+            "warnings": warnings,
+        }
+
+    def _load_map_ro(path: Path, key: str) -> Dict[str, Dict[str, Any]]:
+        if _path_safety.is_symlink_or_junction(path):
+            warnings.append(f"Refused symlink or junction: {path.name}.")
+            return {}
+        if not path.is_file():
+            return {}
+        raw, warn = _read_json_ro(path)
+        if warn:
+            warnings.append(warn)
+        bucket = raw.get(key) if isinstance(raw, dict) and isinstance(raw.get(key), dict) else {}
+        return {
+            str(k): dict(v)
+            for k, v in bucket.items()
+            if isinstance(k, str) and k.strip() and isinstance(v, dict)
+        }
+
+    active_captures = _load_map_ro(cap_path, "captures")
+    raw_sessions = _load_map_ro(meta_path, "sessions")
+    session_meta = {
+        cid: meta
+        for cid, meta in raw_sessions.items()
+        if not _tr_reader.is_worktree_path(str(meta.get("cwd") or ""))
+    }
+    return {
+        "ok": True,
+        "changed": True,
+        "unchanged": False,
+        "active_captures": active_captures,
+        "session_meta": session_meta,
+        "signature": sig,
+        "warnings": warnings,
+    }
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     _hook_rt.configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Gravity Metrics SPI-1 dashboard provider")
@@ -571,10 +696,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.add_argument(name, **kw)
     args = parser.parse_args(argv)
     params, ctx = _read_request_payload(args.payload)
-    m_home = _resolve_metrics_home(
+    raw_m_home = _raw_metrics_home(
         metrics_home=args.metrics_home or (str(ctx["metrics_home"]) if ctx.get("metrics_home") else None),
         gravity_home=args.gravity_home,
     )
+    m_home = raw_m_home.resolve()
     brain_dir = (
         Path(args.brain_dir).expanduser().resolve() if args.brain_dir
         else (Path(str(ctx["brain_dir"])).expanduser().resolve() if ctx.get("brain_dir") else default_brain_dir())
@@ -585,6 +711,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.target is not None:
             params["target"] = args.target
         out = run_action(args.action, params, m_home=m_home, brain_dir=brain_dir)
+    elif args.view == "health":
+        out = get_health_view(m_home=m_home, raw_m_home=raw_m_home)
+    elif args.view == "live-meta":
+        out = get_live_meta_view(
+            m_home=m_home,
+            since_signature=args.since_signature or str(params.get("since_signature") or ""),
+            raw_m_home=raw_m_home,
+        )
     elif args.view == "session-detail":
         out = get_session_detail_view(args.target if args.target is not None else str(params.get("target") or ""), m_home=m_home)
     elif args.view == "audit-detail":

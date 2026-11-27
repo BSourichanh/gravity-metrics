@@ -24,7 +24,9 @@
     "views": [
       "metrics",
       "session-detail",
-      "audit-detail"
+      "audit-detail",
+      "health",
+      "live-meta"
     ],
     "actions": [
       "record",

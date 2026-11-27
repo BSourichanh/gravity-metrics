@@ -8,11 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **SPI-1 `health` & `live-meta` Views (`TASK-ARCH-02b`):**
+  - Added read-only `get_health_view` (`--view health`) and `get_live_meta_view` (`--view live-meta`, with `--since-signature` fast-path, worktree filtering, and `_path_safety.is_symlink_or_junction` guards) to `plugin/scripts/dashboard_provider.py`.
+  - Declared `"health"` and `"live-meta"` in `plugin/config/module.json` (`dashboard.views`).
 - **Lifecycle Purge Helpers & Idempotent Remove Flags (`TASK-MET-06a`):**
   - Added atomic `remove_session_meta` and `purge_lifecycle_state` in `plugin/metrics/lifecycle.py` (exported from `plugin/metrics/__init__.py`).
   - Added `--purge-state` and `--if-exists` flags to `plugin/scripts/cli.py remove` while keeping strict failure behavior by default.
 
 ### Changed
+- **Collector Dead Import Fallbacks Removal (`TASK-ARCH-02b`):**
+  - Replaced dead `try/except ImportError:` blocks in `plugin/metrics/collector.py` with direct imports from `.technical_signals` and `.workspace_resolver`, and removed orphaned `math`, `re`, `_shared_discover_known_repos`, and `_shared_normalize_worktree_path`.
 - **SPI-1 Provider Pending Alignment & Idempotent Remove (`TASK-MET-06c`):**
   - Updated `plugin/scripts/dashboard_provider.py::get_metrics_view` and `main` to accept/forward `brain_dir` and include `_stat_token(brain_dir)` in `signature` invalidation.
   - Aligned `plugin/scripts/dashboard_provider.py::_derive_pending_states_ro` on `list_pending_sessions(..., include_ignored=True)` when `brain_dir` exists, removed raw `session_meta.json` injection, and surfaced only missing-transcript `active_captures`/`ignored` entries with `brain_exists: false, orphan: true`.

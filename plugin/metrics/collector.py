@@ -3,9 +3,7 @@
 
 from collections import Counter, defaultdict
 import importlib
-import math
 from pathlib import Path
-import re
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -14,8 +12,6 @@ if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
 _tr_reader = importlib.import_module("_shared.transcript_reader")
-_shared_discover_known_repos = _tr_reader.discover_known_repos
-_shared_normalize_worktree_path = _tr_reader.normalize_worktree_path
 parse_iso_ts = _tr_reader.parse_iso_ts
 
 from .agent_tree import (
@@ -67,148 +63,12 @@ from .transcript_index import (
     parse_agent_transcript,
 )
 
-try:
-    from .technical_signals import aggregate_technical_signals
-except ImportError:
-    def _pct_sorted(vals: List[int], pct: float) -> int:
-        if not vals:
-            return 0
-        return int(vals[min(len(vals) - 1, max(0, math.ceil(pct * len(vals)) - 1))])
-
-    def aggregate_technical_signals(agents: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Agrège les signaux techniques de tous les agents d'une session."""
-        t_calls = t_chars = t_est = compactions = 0
-        samples_ms: List[int] = []
-        fb_avg: List[float] = []
-        fb_p50: List[int] = []
-        fb_p95: List[int] = []
-        for ag in agents:
-            if not isinstance(ag, dict):
-                continue
-            t_calls += int(ag.get("thinking_calls") or 0)
-            t_chars += int(ag.get("thinking_chars") or 0)
-            t_est += int(ag.get("thinking_est_tokens") or 0)
-            compactions += int(ag.get("compaction_count") or 0)
-            raw_s = ag.get("_latency_samples_ms")
-            if isinstance(raw_s, list) and raw_s:
-                samples_ms.extend(int(v) for v in raw_s if isinstance(v, (int, float)) and v > 0)
-            elif int(ag.get("latency_p95_ms") or 0) > 0:
-                fb_avg.append(float(ag.get("latency_avg_ms") or 0.0))
-                fb_p50.append(int(ag.get("latency_p50_ms") or 0))
-                fb_p95.append(int(ag.get("latency_p95_ms") or 0))
-        if samples_ms:
-            s_ms = sorted(samples_ms)
-            return {
-                "thinking_calls": t_calls, "thinking_chars": t_chars, "thinking_est_tokens": t_est,
-                "compaction_count": compactions,
-                "latency_avg_ms": round(sum(s_ms) / len(s_ms), 1),
-                "latency_p50_ms": _pct_sorted(s_ms, 0.50),
-                "latency_p95_ms": _pct_sorted(s_ms, 0.95),
-                "latency_samples_count": len(s_ms),
-            }
-        if fb_p95:
-            return {
-                "thinking_calls": t_calls, "thinking_chars": t_chars, "thinking_est_tokens": t_est,
-                "compaction_count": compactions,
-                "latency_avg_ms": round(sum(fb_avg) / len(fb_avg), 1),
-                "latency_p50_ms": _pct_sorted(sorted(fb_p50), 0.50),
-                "latency_p95_ms": max(fb_p95),
-                "latency_samples_count": len(fb_p95),
-            }
-        return {
-            "thinking_calls": t_calls, "thinking_chars": t_chars, "thinking_est_tokens": t_est,
-            "compaction_count": compactions,
-            "latency_avg_ms": 0.0, "latency_p50_ms": 0, "latency_p95_ms": 0, "latency_samples_count": 0,
-        }
-
-
-try:
-    from .workspace_resolver import (
-        classify_workspace_kind,
-        discover_known_repos,
-        resolve_agent_workspace,
-    )
-except ImportError:
-    _SPEC_TASK_RE = re.compile(r"(?:^|/)(?:specs|tasks)/", re.IGNORECASE)
-
-    def discover_known_repos(
-        root_workspace: str = "",
-        root_workspace_path: Optional[Union[Path, str]] = None,
-    ) -> Set[str]:
-        return _shared_discover_known_repos(root_workspace, root_workspace_path)
-
-    def classify_workspace_kind(
-        workspace: str,
-        *,
-        root_workspace: str = "",
-        root_workspace_path: Optional[Union[Path, str]] = None,
-        workspace_path: Optional[Union[Path, str]] = None,
-        has_atelier_markers: Optional[bool] = None,
-    ) -> str:
-        ws_clean, root_clean = str(workspace or "").strip(), str(root_workspace or "").strip()
-        if not ws_clean:
-            return "code"
-        if workspace_path is not None:
-            wp = Path(workspace_path)
-            if wp.is_dir():
-                if root_clean and ws_clean != root_clean:
-                    return "code"
-                return "atelier" if ((wp / "projects.json").is_file() or (wp / "specs").is_dir()) else "code"
-        if root_clean and ws_clean != root_clean:
-            return "code"
-        if has_atelier_markers is not None:
-            return "atelier" if has_atelier_markers else "code"
-        if root_workspace_path is not None:
-            rp = Path(root_workspace_path)
-            if rp.is_dir():
-                return "atelier" if ((rp / "projects.json").is_file() or (rp / "specs").is_dir()) else "code"
-        return "atelier" if ws_clean.lower().endswith("-studio") else "code"
-
-    def resolve_agent_workspace(
-        node: Dict[str, Any],
-        ws_signals: Optional[Dict[str, Any]] = None,
-        *,
-        root_workspace: str = "root",
-        root_workspace_path: Optional[Union[Path, str]] = None,
-        known_repos: Optional[Set[str]] = None,
-    ) -> str:
-        repos = known_repos if known_repos is not None else discover_known_repos(root_workspace, root_workspace_path)
-        root_ws = str(root_workspace or "").strip() or "root"
-        bridge_ws = str(node.get("bridge_workspace") or "").strip()
-        if bridge_ws:
-            return _shared_normalize_worktree_path(
-                bridge_ws, root_workspace=root_ws, root_workspace_path=root_workspace_path,
-                known_repos=repos, is_workspace_uri=True,
-            ) or bridge_ws
-        sigs = ws_signals or {}
-        w_votes: Counter = Counter()
-        for p in list(sigs.get("write_paths") or []) + list(sigs.get("shell_dirs") or []):
-            repo = _shared_normalize_worktree_path(
-                str(p), root_workspace=root_ws, root_workspace_path=root_workspace_path, known_repos=repos,
-            )
-            if repo:
-                w_votes[repo] += 1
-        if w_votes:
-            return min(w_votes.items(), key=lambda kv: (-kv[1], kv[0] == root_ws, kv[0]))[0]
-        r_votes: Counter = Counter()
-        for p in sigs.get("read_paths") or []:
-            p_str = str(p)
-            repo = _shared_normalize_worktree_path(
-                p_str, root_workspace=root_ws, root_workspace_path=root_workspace_path, known_repos=repos,
-            )
-            if repo and not (repo == root_ws and _SPEC_TASK_RE.search(p_str.replace("\\", "/").strip())):
-                r_votes[repo] += 1
-        if r_votes:
-            return min(r_votes.items(), key=lambda kv: (-kv[1], kv[0] == root_ws, kv[0]))[0]
-        for uri in node.get("workspace_uris") or node.get("workspaceUris") or []:
-            if isinstance(uri, str) and uri.strip():
-                repo = _shared_normalize_worktree_path(
-                    uri, root_workspace=root_ws, root_workspace_path=root_workspace_path,
-                    known_repos=repos, is_workspace_uri=True,
-                )
-                if repo and repo != root_ws:
-                    return repo
-        return root_ws
+from .technical_signals import aggregate_technical_signals
+from .workspace_resolver import (
+    classify_workspace_kind,
+    discover_known_repos,
+    resolve_agent_workspace,
+)
 
 
 def _collect_subtree_ids(start_id: str, children_map: Dict[str, List[str]]) -> Set[str]:
