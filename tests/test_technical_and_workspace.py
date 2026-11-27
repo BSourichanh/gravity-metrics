@@ -24,6 +24,7 @@ import metrics as metrics_pkg  # noqa: E402
 from metrics import (  # noqa: E402
     classify_workspace_kind,
     collect_run_metrics,
+    discover_known_repos,
     extract_technical_signals,
     load_history,
     normalize_worktree_path,
@@ -122,8 +123,9 @@ class TestTechnicalAndWorkspace(unittest.TestCase):
             ),
             "gravity-workflow",
         )
-        # Historical *-studio classification retained for legacy sessions
+        # Historical *-studio classification retained for legacy sessions; legacy repo name excluded
         self.assertEqual(classify_workspace_kind("legacy-studio"), "atelier")
+        self.assertNotIn("-".join(("gravity", "studio")), discover_known_repos())
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

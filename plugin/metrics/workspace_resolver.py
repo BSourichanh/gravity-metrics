@@ -21,7 +21,6 @@ KNOWN_GRAVITY_REPOS: Tuple[str, ...] = (
     "gravity-workflow",
     "gravity-metrics",
     "gravity-workshop",
-    "gravity-studio",  # Historical alias retained for legacy session attribution.
     "gravity",
 )
 
